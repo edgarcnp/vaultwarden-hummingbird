@@ -1,0 +1,54 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:recommended",
+        "helpers:pinGitHubActionDigests",
+        ":disableDependencyDashboard"
+    ],
+    "abandonmentThreshold": "1 year",
+    "addLabels": [
+        "renovate",
+        "dependencies"
+    ],
+    "assignAutomerge": true,
+    "automerge": false,
+    "keepUpdatedLabel": "renovate-keep-updated",
+    "lockFileMaintenance": {
+        "enabled": false
+    },
+    "osvVulnerabilityAlerts": true,
+    "pruneBranchAfterAutomerge": true,
+    "reviewers": [
+        "edgarcnp"
+    ],
+    "rollbackPrs": true,
+    "schedule": [
+        "* * * * *"
+    ],
+    "vulnerabilityAlerts": {
+        "groupName": null,
+        "schedule": [],
+        "dependencyDashboardApproval": false,
+        "minimumReleaseAge": null,
+        "rangeStrategy": "bump",
+        "commitMessageSuffix": "[SECURITY]",
+        "branchTopic": "{{{datasource}}}-{{{depNameSanitized}}}-vulnerability",
+        "prCreation": "immediate",
+        "vulnerabilityFixStrategy": "lowest"
+    },
+    "packageRules": [
+        {
+            "matchPackageNames": [
+                "/^vite$/",
+                "/^@tailwindcss\\/vite$/"
+            ],
+            "groupName": "Vite"
+        },
+        {
+            "matchPackageNames": [
+                "/^tailwindcss$/"
+            ],
+            "groupName": "Tailwind"
+        }
+    ]
+}

@@ -1,0 +1,9 @@
+.git
+supervisor/target
+README.md
+CONFIG.md
+render.yaml
+docker-compose.yaml
+.env
+.env.example
+*.md
