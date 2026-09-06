@@ -11,9 +11,19 @@ use crate::util::log;
 
 /// tailscaled with no TUN device when `userspace` (PaaS sandboxes deny
 /// /dev/net/tun); spawned as its own process group (see [`spawn`]).
+/// `--statedir` gives tailscaled its writable var root (TLS cert cache,
+/// Taildrop); without it `tailscale serve` HTTPS fails with
+/// "no TailscaleVarRoot". Derived from the state file's dir, which lives
+/// on the persistent /data volume.
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pid> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
+    if let Some(dir) = std::path::Path::new(state)
+        .parent()
+        .and_then(|d| d.to_str())
+    {
+        cmd.arg("--statedir").arg(dir);
+    }
     if userspace {
         cmd.arg("--tun=userspace-networking");
     }
