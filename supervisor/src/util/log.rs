@@ -16,3 +16,33 @@ pub fn info(msg: &str) {
 pub fn err(msg: &str) {
     let _ = writeln!(std::io::stderr().lock(), "[supervisor] {msg}");
 }
+
+/// Escape control characters in untrusted values before logging: a newline
+/// in user input (env var, .env value) must not forge additional log lines.
+pub fn sanitize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_are_escaped() {
+        assert_eq!(sanitize("plain"), "plain");
+        assert_eq!(sanitize("a\nb"), "a\\nb");
+        assert_eq!(sanitize("a\r\nb"), "a\\r\\nb");
+        assert_eq!(sanitize("a\tb"), "a\\tb");
+        assert_eq!(sanitize("\u{7}"), "\\u{7}");
+    }
+}

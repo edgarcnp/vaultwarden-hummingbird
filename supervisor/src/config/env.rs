@@ -39,6 +39,23 @@ fn non_empty(v: Option<String>) -> Option<String> {
     v.filter(|v| !v.is_empty())
 }
 
+/// `Some(v)` only for a valid TCP port: 1-65535, digits only. A non-numeric
+/// or out-of-range value logs a warning and falls back to the default
+/// instead of breaking `tailscale serve` or the vaultwarden listener.
+fn valid_port(v: Option<String>) -> Option<String> {
+    let v = non_empty(v)?;
+    match v.parse::<u16>() {
+        Ok(p) if p != 0 => Some(v),
+        _ => {
+            log::err(&format!(
+                "config: invalid port '{}' (want 1-65535); using default",
+                log::sanitize(&v)
+            ));
+            None
+        }
+    }
+}
+
 /// Lenient boolean parse for the TS_* on/off knobs: the common spellings in
 /// any casing. Anything else (including empty — handled as unset by the
 /// caller) is `None`; callers warn and fall back to the default.
@@ -136,9 +153,9 @@ impl Config {
     pub fn from_env() -> Self {
         let file = FileConfig::load();
 
-        let port = non_empty(env::var("PORT").ok())
-            .or_else(|| non_empty(env::var("ROCKET_PORT").ok()))
-            .or_else(|| non_empty(file.child.get("ROCKET_PORT").cloned()))
+        let port = valid_port(env::var("PORT").ok())
+            .or_else(|| valid_port(env::var("ROCKET_PORT").ok()))
+            .or_else(|| valid_port(file.child.get("ROCKET_PORT").cloned()))
             .unwrap_or_else(|| "8080".into());
 
         let knob = |key: &str, default: &str| -> String {
@@ -164,8 +181,9 @@ impl Config {
                 let name = remote_env_name(name_raw);
                 if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     log::err(&format!(
-                        "config: invalid SUPERVISOR_S3_REMOTE '{remote}' (remote name must be \
-                         alphanumeric); state sync disabled"
+                        "config: invalid SUPERVISOR_S3_REMOTE '{}' (remote name must be \
+                         alphanumeric); state sync disabled",
+                        log::sanitize(&remote)
                     ));
                     None
                 } else {
@@ -174,8 +192,9 @@ impl Config {
                         Ok(secs) => secs,
                         Err(_) => {
                             log::err(&format!(
-                                "config: invalid SUPERVISOR_S3_SYNC_INTERVAL '{raw_interval}'; \
-                                 using default {SYNC_INTERVAL_DEFAULT}s"
+                                "config: invalid SUPERVISOR_S3_SYNC_INTERVAL '{}'; \
+                                 using default {SYNC_INTERVAL_DEFAULT}s",
+                                log::sanitize(&raw_interval)
                             ));
                             SYNC_INTERVAL_DEFAULT
                         }
@@ -190,8 +209,9 @@ impl Config {
                 }
             } else {
                 log::err(&format!(
-                    "config: invalid SUPERVISOR_S3_REMOTE '{remote}' (must be remote:path); \
-                     state sync disabled"
+                    "config: invalid SUPERVISOR_S3_REMOTE '{}' (must be remote:path); \
+                     state sync disabled",
+                    log::sanitize(&remote)
                 ));
                 None
             }
@@ -206,7 +226,8 @@ impl Config {
                     Some(b) => b,
                     None => {
                         log::err(&format!(
-                            "config: invalid {key} '{v}' (want true/false); using default {default}"
+                            "config: invalid {key} '{}' (want true/false); using default {default}",
+                            log::sanitize(&v)
                         ));
                         default
                     }
@@ -275,6 +296,20 @@ mod tests {
         for key in ["TS", "SUPERVISOR", "ts_authkey", "PORT", "DATABASE_URL"] {
             assert!(!is_supervisor_key(key), "{key} should reach the child");
         }
+    }
+
+    #[test]
+    fn port_validation() {
+        assert_eq!(valid_port(Some("8080".into())).as_deref(), Some("8080"));
+        assert_eq!(valid_port(Some("1".into())).as_deref(), Some("1"));
+        assert_eq!(valid_port(Some("65535".into())).as_deref(), Some("65535"));
+        assert_eq!(valid_port(Some("0".into())), None);
+        assert_eq!(valid_port(Some("65536".into())), None);
+        assert_eq!(valid_port(Some("-1".into())), None);
+        assert_eq!(valid_port(Some("8080\n".into())), None);
+        assert_eq!(valid_port(Some("".into())), None);
+        assert_eq!(valid_port(None), None);
+        assert_eq!(valid_port(Some("abc".into())), None);
     }
 
     /// All env mutation lives in this one test: `std::env` is process-global
