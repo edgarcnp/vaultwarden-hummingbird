@@ -173,4 +173,31 @@ mod tests {
         assert!(!signal_group(1, libc::SIGTERM));
         assert!(!signal_group(-5, libc::SIGTERM));
     }
+
+    /// End-to-end over real children: group signal reach, exit decoding, and
+    /// SIGKILL escalation. Kept as the suite's ONLY process-spawning test so
+    /// the `reap_any` inside `reap_until_gone` can never steal a parallel
+    /// test's child (see the module-level ownership notes).
+    #[test]
+    fn child_lifecycle_spawn_signal_reap_escalate() {
+        // TERM to the group reaps a well-behaved child as 128+15.
+        let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
+        assert!(signal_group(pid, libc::SIGTERM));
+        match reap_until_gone(pid, Duration::from_secs(5)) {
+            Gone::Reaped(raw) => assert_eq!(exit_code(raw), 143),
+            gone => panic!("expected reap after SIGTERM, got {gone:?}"),
+        }
+        // A reaped pid is ECHILD on the next targeted wait.
+        assert_eq!(
+            reap_until_gone(pid, Duration::from_millis(50)),
+            Gone::Vanished
+        );
+
+        // An unresponsive child is escalated to SIGKILL after the grace (128+9).
+        let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
+        match reap_until_gone(pid, Duration::from_millis(200)) {
+            Gone::Reaped(raw) => assert_eq!(exit_code(raw), 137),
+            gone => panic!("expected SIGKILL escalation, got {gone:?}"),
+        }
+    }
 }

@@ -9,7 +9,7 @@ mod tailscale;
 mod vaultwarden;
 
 pub use process::{
-    exit_code, exit_reason, reap_any, reap_until_gone, signal_group, Gone, Pid, POLL, TERM_GRACE,
+    Gone, POLL, Pid, TERM_GRACE, exit_code, exit_reason, reap_any, reap_until_gone, signal_group,
 };
 pub use signals::{install_signal_handlers, stopping, take_stop};
 pub use tailscale::{spawn_tailscaled, tailscale_serve, tailscale_up};

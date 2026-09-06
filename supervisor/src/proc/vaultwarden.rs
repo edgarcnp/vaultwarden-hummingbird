@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use crate::config::{is_supervisor_key, VAULTWARDEN};
+use crate::config::{VAULTWARDEN, is_supervisor_key};
 use crate::proc::process::{self, Pid};
 
 /// vaultwarden in foreground with a *localized* environment. The child gets:

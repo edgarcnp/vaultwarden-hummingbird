@@ -171,4 +171,12 @@ not a valid line
         let cfg = FileConfig::load_from(Some("/nonexistent/.env"));
         assert!(cfg.child.is_empty());
     }
+
+    #[test]
+    fn duplicates_win_later_and_bad_keys_are_dropped() {
+        let path = write_tmp("A=1\nA=2\nBAD-KEY=3\njust words\n");
+        let cfg = FileConfig::load_from(Some(&path));
+        assert_eq!(cfg.child.len(), 1);
+        assert_eq!(cfg.child.get("A").map(String::as_str), Some("2"));
+    }
 }
