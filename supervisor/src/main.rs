@@ -18,12 +18,15 @@ use std::process::exit;
 
 use config::Config;
 use proc::{
-    Gone, POLL, Pid, TERM_GRACE, exit_code, exit_reason, install_signal_handlers, reap_any,
-    reap_until_gone, run_vaultwarden, signal_group, spawn_tailscaled, stopping, tailscale_serve,
-    tailscale_up, take_stop,
+    exit_code, exit_reason, install_signal_handlers, reap_any, reap_until_gone, run_vaultwarden,
+    signal_group, spawn_tailscaled, stopping, tailscale_serve, tailscale_up, take_stop, Gone, Pid,
+    POLL, TERM_GRACE,
 };
 use util::{log, net};
 
+/// Boot sequence: arm signals, load config, bring up Tailscale (best effort —
+/// every failure path degrades to running vaultwarden without it), then hand
+/// off to [`start_vw`], which blocks for the container's lifetime.
 fn main() {
     install_signal_handlers(); // first: no window of unhandled signals as PID 1
     let cfg = Config::from_env();

@@ -1,3 +1,5 @@
+//! Unix-socket readiness probing for the tailscaled LocalAPI.
+
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 

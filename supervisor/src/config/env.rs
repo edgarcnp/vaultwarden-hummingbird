@@ -5,13 +5,18 @@ use std::time::Duration;
 
 use super::dotenv::FileConfig;
 
+/// Hard-coded child binary paths (baked into the image, no PATH lookup).
 pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
+/// `tailscale` CLI (drives `up`/`serve` over the LocalAPI socket).
 pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
+/// vaultwarden server binary (the payload this container exists to run).
 pub const VAULTWARDEN: &str = "/vaultwarden";
 
 /// Hard timeouts: never let a hung tailscaled block the vault.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
+/// Hard timeout for `tailscale serve`.
 pub const SERVE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Hard timeout waiting for tailscaled's LocalAPI socket.
 pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
 
 /// Keys owned by the supervisor (localized to PID 1): they configure the
@@ -20,6 +25,7 @@ pub fn is_supervisor_key(key: &str) -> bool {
     key.starts_with("TS_") || key.starts_with("SUPERVISOR_")
 }
 
+/// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
     /// tailscaled state file (under the writable data volume)
     pub state: String,
@@ -28,7 +34,9 @@ pub struct Config {
     /// vaultwarden listen port: PORT wins, then ROCKET_PORT, else 8080
     /// (non-root cannot bind 80)
     pub port: String,
+    /// node name announced to the tailnet (`TS_HOSTNAME`)
     pub hostname: String,
+    /// Tailscale auth key or OAuth client secret (`TS_AUTHKEY`; empty = skip `up`)
     pub authkey: String,
     /// configure `tailscale serve` after a successful up (inbound tailnet path)
     pub serve: bool,

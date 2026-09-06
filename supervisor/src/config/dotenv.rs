@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use super::env::is_supervisor_key;
 use crate::util::log;
 
+/// Env var holding the dotenv file path (absent/empty = env-only mode).
 pub const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
 
 #[derive(Default)]
@@ -32,6 +33,8 @@ pub struct FileConfig {
     pub child: BTreeMap<String, String>,
 }
 
+/// Parse dotenv syntax (see module docs); invalid lines are logged and
+/// skipped, later duplicates win.
 fn parse(raw: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for (n, line) in raw.lines().enumerate() {

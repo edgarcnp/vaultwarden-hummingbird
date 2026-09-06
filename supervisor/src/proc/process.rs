@@ -33,6 +33,7 @@ pub const TERM_GRACE: Duration = Duration::from_secs(10);
 /// problem, and must not hang our own exit.
 pub const KILL_GRACE: Duration = Duration::from_secs(5);
 
+/// Child process id (also its process-group id, see [`spawn`]).
 pub type Pid = i32;
 
 /// Spawn `cmd` as the leader of its own process group and return its pid.
