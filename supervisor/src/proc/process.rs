@@ -1,21 +1,17 @@
 //! Process primitives for a PID 1 supervisor: spawning, reaping, group
-//! signaling, and shutdown escalation.
+//! signaling, liveness, and bounded child runs.
 //!
-//! Ownership model (this is what makes the reaping race-free):
-//! - Long-running children (tailscaled, vaultwarden) are spawned as their own
-//!   process-group leaders (`process_group(0)`), so one `kill(-pgid)` reaches
-//!   the child *and* everything it spawned. Their `std::process::Child`
-//!   handle is dropped on purpose: statuses are collected only via the
-//!   namespace-wide reaper (`reap_any`), never through std's targeted
+//! Reaping is race-free by ownership:
+//! - Long-running children ([`spawn`]) are process-group leaders; their
+//!   `std::process::Child` handle is dropped on purpose — statuses come only
+//!   from the namespace-wide reaper ([`reap_any`]), never std's targeted
 //!   `try_wait`/`wait`, which would race it over the same zombie.
-//! - Short-lived CLI children (`run_bounded`) keep std's Child instead: they
-//!   are reaped via std inside that helper, and cannot overlap the namespace
-//!   reaper — the main thread is single-threaded, so while the helper polls,
-//!   `reap_any` is never called (even for rclone syncs inside the watch
-//!   loop, which run between two `reap_any` polls, never concurrently). They
-//!   are group leaders so a timeout kill reaches anything they spawned.
-//! - As PID 1, any orphan in the container re-parents to us; only `waitpid`
-//!   here (not std) can reap those, and skipping them would leak zombies.
+//! - Bounded CLI children ([`run_bounded_env`]) are reaped via std inside
+//!   the helper; the main thread is single-threaded, so the two never
+//!   overlap. They are also group leaders, so a timeout kill reaches
+//!   anything they spawned.
+//! - As PID 1, any orphan re-parents to us; only `waitpid` here (not std)
+//!   reaps those, and skipping them would leak zombies.
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -54,6 +50,11 @@ pub fn spawn(cmd: &mut Command) -> Option<Pid> {
             None
         }
     }
+}
+
+/// Liveness probe (not a reap): signal 0 checks existence only.
+pub fn alive(pid: Pid) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// Reap one pending zombie from anywhere in the namespace. `None` means
@@ -147,6 +148,61 @@ pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
         }
         std::thread::sleep(POLL);
     }
+}
+
+/// Run a child to completion with a hard timeout; kill on expiry. Aborts
+/// early when `abort` fires, so a stop request never waits out a bounded
+/// phase. stdio is inherited so failures stay visible in container logs.
+pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn() -> bool) -> bool {
+    run_bounded_env(timeout, prog, args, &[], abort)
+}
+
+/// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
+/// The child runs as its own process-group leader, so the expiry/abort kill
+/// reaches anything it spawned, not just the direct child.
+pub fn run_bounded_env(
+    timeout: Duration,
+    prog: &str,
+    args: &[&str],
+    extra_env: &[(String, String)],
+    abort: impl Fn() -> bool,
+) -> bool {
+    let mut cmd = Command::new(prog);
+    cmd.args(args).process_group(0);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            log::err(&format!("{prog} spawn failed: {e}"));
+            return false;
+        }
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return st.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if abort() {
+            log::info(&format!("stop requested; aborting {prog}"));
+            break;
+        }
+        if start.elapsed() > timeout {
+            log::err(&format!("{prog} timed out after {timeout:?}"));
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    // Whole-group kill first (the child may have exited; helpers may live on),
+    // then the direct child, then reap.
+    let pid = child.id() as i32;
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    let _ = child.kill();
+    let _ = child.wait(); // reap: no zombie
+    false
 }
 
 #[cfg(test)]

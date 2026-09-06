@@ -5,18 +5,17 @@ use std::ffi::OsStr;
 use std::process::Command;
 
 use crate::config::{VAULTWARDEN, is_supervisor_key};
-use crate::proc::process::{self, Pid};
+use crate::proc::{Pid, spawn};
 
-/// vaultwarden in foreground with a *localized* environment. The child gets:
-///   1. container env minus supervisor-owned keys (TS_*/SUPERVISOR_* —
-///      Tailscale secrets stay with the supervisor)
-///   2. dotenv-file vars (SUPERVISOR_ENV_FILE) — authoritative in file mode
-///      (this is what makes image-baked posture defaults overridable)
-///   3. hard invariants: ROCKET_PORT (from PORT), ROCKET_ADDRESS, DATA_FOLDER
+/// vaultwarden in the foreground with a *localized* environment: container
+/// env minus supervisor-owned keys (TS_*/SUPERVISOR_*), then dotenv-file vars
+/// (authoritative in file mode — this is what makes image-baked posture
+/// defaults overridable), then hard invariants: ROCKET_PORT (from PORT),
+/// ROCKET_ADDRESS, DATA_FOLDER.
 ///
-/// Spawned as its own process-group leader (see `process::spawn`) so shutdown
-/// signals reach the whole group. A spawn failure returns `None`; the caller
-/// tears down what is already running and exits 1.
+/// Own process-group leader (see [`spawn`]) so shutdown signals reach the
+/// whole group. Spawn failure returns `None`; the caller tears down what is
+/// already running and exits 1.
 pub fn run_vaultwarden(port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
     let mut cmd = Command::new(VAULTWARDEN);
     cmd.env_clear();
@@ -32,14 +31,14 @@ pub fn run_vaultwarden(port: &str, extra_env: &[(String, String)]) -> Option<Pid
     cmd.env("ROCKET_PORT", port) // platform PORT always wins
         .env("ROCKET_ADDRESS", "0.0.0.0")
         .env("DATA_FOLDER", "/data");
-    process::spawn(&mut cmd)
+    spawn(&mut cmd)
 }
 
 /// Whether a container-env key is forwarded to the child: everything except
 /// supervisor-owned keys. Non-UTF-8 keys are dropped: a key the supervisor
 /// can't read must never reach the child (a mangled `TS_*` secret would
-/// otherwise leak into the child's env), and `vars_os` keeps it a non-issue
-/// instead of a panic.
+/// otherwise leak into its env), and `vars_os` keeps it a non-issue instead
+/// of a panic.
 fn forwarded(key: &OsStr) -> bool {
     key.to_str().is_some_and(|k| !is_supervisor_key(k))
 }

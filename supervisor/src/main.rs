@@ -1,17 +1,16 @@
-//! PID 1 supervisor: tailscaled (userspace) + tailscale up/serve + vaultwarden.
-//! Designed for shell-less, package-manager-less Red Hat bases
-//! (Hummingbird core-runtime / UBI micro / distroless). glibc, version-locked
-//! to the runtime base image. Optional dotenv config layer (SUPERVISOR_ENV_FILE):
-//! the supervisor owns the file and distributes it localized to each child.
-//! Optional S3 state sync (SUPERVISOR_S3_*, via baked rclone): /data identity
-//! files (tailscaled.state, rsa_key*) survive ephemeral redeploys. The
+//! PID 1 supervisor: tailscaled (userspace) + tailscale up/serve + vaultwarden,
+//! for shell-less, package-manager-less Red Hat bases (Hummingbird
+//! core-runtime / UBI micro / distroless; glibc version-locked to the base).
+//! Optional dotenv layer (SUPERVISOR_ENV_FILE): the supervisor owns the file
+//! and distributes it localized to each child. Optional S3 state sync
+//! (SUPERVISOR_S3_*): /data identity files survive ephemeral redeploys. The
 //! Tailscale authkey is staged to a 0600 file (never argv) and removed after
 //! `up`.
 //!
 //! Shutdown model (see `proc::process` / `proc::signals`): children run in
 //! their own process groups; a stop request (SIGTERM/SIGINT/SIGHUP/SIGQUIT)
-//! is observed on the main thread, which then drives a full teardown — TERM
-//! to every child group, escalation to KILL after a grace period, and
+//! is observed on the main thread, which drives a full teardown — TERM to
+//! every child group, escalation to KILL after a grace period, and
 //! namespace-wide reaping so no orphan or zombie outlives the container.
 
 mod config;
@@ -19,10 +18,11 @@ mod proc;
 mod util;
 
 use std::process::exit;
+use std::time::Instant;
 
 use config::{Config, SyncConfig};
 use proc::{
-    Gone, POLL, Pid, TERM_GRACE, exit_code, exit_reason, install_signal_handlers, reap_any,
+    Gone, POLL, Pid, TERM_GRACE, alive, exit_code, exit_reason, install_signal_handlers, reap_any,
     reap_until_gone, restore_state, run_vaultwarden, signal_group, spawn_tailscaled, stopping,
     sync_state, tailscale_serve, tailscale_up, take_stop,
 };
@@ -99,7 +99,7 @@ fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
         shutdown(tsd, 1, None)
     };
 
-    let mut last_sync = std::time::Instant::now();
+    let mut last_sync = Instant::now();
     let code = 'watch: loop {
         if let Some((pid, raw)) = reap_any() {
             if pid == vw {
@@ -135,7 +135,7 @@ fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
             && last_sync.elapsed() >= sync.interval
         {
             sync_state(sync, stopping);
-            last_sync = std::time::Instant::now();
+            last_sync = Instant::now();
         }
         std::thread::sleep(POLL);
     };
@@ -161,9 +161,4 @@ fn shutdown(tsd: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
         sync_state(sync, || false);
     }
     exit(code)
-}
-
-/// Liveness probe (not a reap): signal 0 checks existence only.
-fn alive(pid: Pid) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
 }

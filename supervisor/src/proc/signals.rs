@@ -5,14 +5,14 @@
 //! stop flag. All signal *delivery* (forwarding to children, escalation,
 //! reaping) happens on the main thread, which owns the child pids as plain
 //! locals and polls [`take_stop`]. No shared pid tables, no arming gates,
-//! no registration windows: a signal arriving in ANY phase (startup, bounded
-//! CLI runs, watch loop) is observed at the next tick and acted on with full
-//! context. Forwarding latency is bounded by one poll tick (~100 ms) —
-//! irrelevant next to container stop timeouts.
+//! no registration windows: a signal arriving in ANY phase is observed at
+//! the next tick and acted on with full context; forwarding latency is
+//! bounded by one poll tick (~100 ms) — irrelevant next to container stop
+//! timeouts.
 //!
-//! SIGTERM/SIGINT/SIGHUP/SIGQUIT are all treated as stop requests (from a
-//! container orchestrator's perspective that is what they are); SIGCHLD and
-//! SIGPIPE are left alone (reaping is a poll; std write errors are handled
+//! SIGTERM/SIGINT/SIGHUP/SIGQUIT are all stop requests (from a container
+//! orchestrator's perspective that is what they are); SIGCHLD and SIGPIPE
+//! are left alone (reaping is a poll; std write errors are handled
 //! in-process).
 
 use std::sync::atomic::{AtomicBool, Ordering};

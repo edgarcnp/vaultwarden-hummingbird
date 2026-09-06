@@ -2,29 +2,28 @@
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::{TAILSCALE, TAILSCALED};
-use crate::proc::process::{self, Pid};
+use crate::proc::{Pid, run_bounded, spawn};
 use crate::util::log;
 
-/// tailscaled with no TUN device (PaaS sandboxes deny /dev/net/tun).
-/// Spawned as its own process-group leader (see `process::spawn`).
+/// tailscaled with no TUN device when `userspace` (PaaS sandboxes deny
+/// /dev/net/tun); spawned as its own process group (see [`spawn`]).
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pid> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
     if userspace {
         cmd.arg("--tun=userspace-networking");
     }
-    process::spawn(&mut cmd)
+    spawn(&mut cmd)
 }
 
-/// `tailscale up` with hard timeout; auth failures are non-fatal for the
-/// vault. The authkey is staged into a 0600 file under `/tmp` and passed as
-/// `--auth-key=file:...` — never argv, whose cmdline is world-readable in
-/// /proc.
+/// `tailscale up` with hard timeout; failures are non-fatal for the vault.
+/// The authkey is staged into a 0600 file and passed as `--auth-key=file:...`
+/// — never argv, whose cmdline is world-readable in /proc — and removed
+/// afterwards.
 pub fn tailscale_up(
     authkey: &str,
     hostname: &str,
@@ -63,8 +62,8 @@ fn stage_authkey(authkey: &str) -> Option<String> {
     write_authkey_file(&path, authkey).ok().map(|_| path)
 }
 
-/// Create `path` (0600, must not pre-exist) holding `authkey`. If creation
-/// succeeded but the write did not, the partial secret is removed.
+/// Create `path` (0600, must not pre-exist) holding `authkey`; a partial
+/// write removes the file (we only ever clean up files we created).
 fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -75,8 +74,6 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
         .write_all(authkey.as_bytes())
         .and_then(|_| file.sync_all())
     {
-        // We created this file; a partial secret must not remain on disk.
-        // (create_new means we never touch a file we didn't create.)
         drop(file);
         let _ = std::fs::remove_file(path);
         return Err(e);
@@ -97,67 +94,6 @@ pub fn tailscale_serve(port: &str, timeout: Duration, abort: impl Fn() -> bool) 
         ],
         abort,
     )
-}
-
-/// Run a child to completion with a hard timeout; kill on expiry. Aborts
-/// early when `abort` fires, so a stop request never waits out a bounded
-/// phase. stdio is inherited so failures stay visible in container logs.
-///
-/// This child is reaped HERE via std (`try_wait`/`wait`); it never overlaps
-/// with the namespace-wide reaper (`process::reap_any`): both run on the
-/// single main thread, and while this helper polls, nothing else reaps —
-/// no status-stealing races. (rclone syncs DO run inside the watch loop,
-/// but only between `reap_any` polls, never concurrently.)
-pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn() -> bool) -> bool {
-    run_bounded_env(timeout, prog, args, &[], abort)
-}
-
-/// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
-/// The child runs as its own process-group leader, so the expiry/abort kill
-/// reaches anything it spawned, not just the direct child.
-pub fn run_bounded_env(
-    timeout: Duration,
-    prog: &str,
-    args: &[&str],
-    extra_env: &[(String, String)],
-    abort: impl Fn() -> bool,
-) -> bool {
-    let mut cmd = Command::new(prog);
-    cmd.args(args).process_group(0);
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            log::err(&format!("{prog} spawn failed: {e}"));
-            return false;
-        }
-    };
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(st)) => return st.success(),
-            Ok(None) => {}
-            Err(_) => return false,
-        }
-        if abort() {
-            log::info(&format!("stop requested; aborting {prog}"));
-            break;
-        }
-        if start.elapsed() > timeout {
-            log::err(&format!("{prog} timed out after {timeout:?}"));
-            break;
-        }
-        std::thread::sleep(process::POLL);
-    }
-    // Whole-group kill first (the child may have exited; helpers may live on),
-    // then the direct child, then reap.
-    let pid = child.id() as i32;
-    unsafe { libc::kill(-pid, libc::SIGKILL) };
-    let _ = child.kill();
-    let _ = child.wait(); // reap: no zombie
-    false
 }
 
 #[cfg(test)]

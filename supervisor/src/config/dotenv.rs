@@ -1,24 +1,15 @@
 //! Supervisor-owned dotenv file layer (opt-in via SUPERVISOR_ENV_FILE).
 //!
-//! One universal format: the same .env that `--env-file`, compose
-//! `env_file:` and PaaS dashboards consume can be mounted for the supervisor.
-//! The supervisor is the distributor:
-//!   - `TS_*`/`SUPERVISOR_*` keys  -> its own knobs (localized to PID 1;
+//! One universal format: the same .env that `--env-file`, compose `env_file:`
+//! and PaaS dashboards consume can be mounted for the supervisor, which
+//! distributes it:
+//!   - `TS_*`/`SUPERVISOR_*` keys -> its own knobs (localized to PID 1;
 //!     never reach the vaultwarden child, never appear in `podman inspect`)
-//!   - everything else             -> forwarded verbatim to the vaultwarden
-//!     child as its localized environment (any of the 139 upstream env names)
+//!   - everything else            -> forwarded verbatim to the child
 //!
 //! Syntax: KEY=value, `#` comments, optional `export ` or `export<TAB>`
 //! prefix, optional matching single/double quotes around values (quote
-//! values containing `#`).
-//!
-//! Precedence:
-//!   - supervisor knobs (TS_*/SUPERVISOR_*): process env > this file
-//!     (platform plumbing and secrets belong to env). PORT/ROCKET_PORT are
-//!     resolved separately in config::env (process env > file > 8080); a
-//!     file PORT is forwarded to the child but never read by the supervisor.
-//!   - vaultwarden keys: this file > container env (file is authoritative in
-//!     file mode; this is what makes image-baked posture defaults overridable)
+//! values containing `#`). Precedence is resolved in `config::env`.
 
 use std::collections::BTreeMap;
 

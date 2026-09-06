@@ -33,6 +33,12 @@ pub fn is_supervisor_key(key: &str) -> bool {
     key.starts_with("TS_") || key.starts_with("SUPERVISOR_")
 }
 
+/// `Some(v)` only for non-empty values: empty env/file entries are treated
+/// as unset everywhere (an empty port or remote is never valid).
+fn non_empty(v: Option<String>) -> Option<String> {
+    v.filter(|v| !v.is_empty())
+}
+
 /// Uppercased rclone remote name (the part before ':' in `remote:path`):
 /// prefix of the RCLONE_CONFIG_* backend env vars.
 fn remote_env_name(remote: &str) -> String {
@@ -120,23 +126,14 @@ impl Config {
 
         // platform PORT always wins (Render injects it; non-root can't bind 80).
         // Empty env values are treated as unset — an empty port is never valid.
-        let port = env::var("PORT")
-            .ok()
-            .filter(|p| !p.is_empty())
-            .or_else(|| env::var("ROCKET_PORT").ok().filter(|p| !p.is_empty()))
-            .or_else(|| {
-                file.child
-                    .get("ROCKET_PORT")
-                    .cloned()
-                    .filter(|p| !p.is_empty())
-            })
+        let port = non_empty(env::var("PORT").ok())
+            .or_else(|| non_empty(env::var("ROCKET_PORT").ok()))
+            .or_else(|| non_empty(file.child.get("ROCKET_PORT").cloned()))
             .unwrap_or_else(|| "8080".into());
 
         let knob = |key: &str, default: &str| -> String {
-            env::var(key)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .or_else(|| file.knobs.get(key).cloned().filter(|v| !v.is_empty()))
+            non_empty(env::var(key).ok())
+                .or_else(|| non_empty(file.knobs.get(key).cloned()))
                 .unwrap_or_else(|| default.to_string())
         };
 

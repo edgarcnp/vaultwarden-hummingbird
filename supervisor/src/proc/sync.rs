@@ -1,18 +1,15 @@
 //! rclone-backed S3 state sync (opt-in via SUPERVISOR_S3_*).
 //!
-//! On hosts without persistent volumes this restores the *same* tailscale
-//! node and vaultwarden RSA signing keys across redeploys:
-//!   - pull:  bucket -> /data, once at boot before any daemon starts
-//!   - push:  /data -> bucket, after `up`, on a cadence, and at shutdown
+//! Pulls /data identity files (tailscaled.state, rsa_key*) from the bucket at
+//! boot, pushes them after `up`, on a cadence, and at shutdown — so the same
+//! tailnet node and vaultwarden RSA signing keys survive ephemeral redeploys.
+//! The DB is external; everything else in /data is regenerable. The bucket
+//! holds secrets (node key, JWT signing key): keep it private, and run ONE
+//! container per bucket/path (a state file restored in two containers
+//! simultaneously means one node identity twice).
 //!
-//! Scope is limited to identity files (tailscaled.state, rsa_key*) — the
-//! database is external and everything else in /data is regenerable. The
-//! bucket therefore holds secrets (node key, JWT signing key): keep it
-//! private, and run ONE container per bucket/path (a state file restored in
-//! two containers simultaneously means one node identity twice).
-//!
-//! Every sync failure is non-fatal: the vault runs regardless; worst case is
-//! a fresh node registration (re-auth) or one client re-login.
+//! Every failure is non-fatal: the vault runs regardless; worst case is a
+//! fresh node registration (re-auth) or one client re-login.
 
 use crate::config::{RCLONE, SYNC_TIMEOUT, SyncConfig};
 use crate::proc::run_bounded_env;
@@ -24,9 +21,11 @@ const INCLUDES: [&str; 4] = ["--include", "tailscaled.state", "--include", "rsa_
 /// rclone argument vector for one copy operation. The backend config comes
 /// from env (RCLONE_CONFIG*), never argv, whose cmdline is world-readable.
 fn copy_args(src: &str, dst: &str) -> Vec<String> {
-    let mut args: Vec<String> = ["copy", src, dst].iter().map(|s| s.to_string()).collect();
-    args.extend(INCLUDES.iter().map(|s| s.to_string()));
-    args
+    ["copy", src, dst]
+        .into_iter()
+        .chain(INCLUDES)
+        .map(String::from)
+        .collect()
 }
 
 /// Pull identity files from the bucket into /data. Called at boot, before
