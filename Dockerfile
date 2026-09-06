@@ -6,6 +6,7 @@
 # - vaultwarden: official source tarball; sqlite static, libpq bundled/static
 #   (Hummingbird repo ships no libpq), openssl distro-shared
 # - tailscale: official release tarball, sha256-verified
+# - rclone: official release zip, SHA256SUMS-verified (S3 state sync)
 # - web vault: optional build arg (upstream-style). Default false (API-only,
 #   Bitwarden apps talk to the API directly). Rebuild with --build-arg
 #   WEB_VAULT=true to include it.
@@ -13,31 +14,38 @@
 
 ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder
 ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest
-ARG RUST_VERSION=1.97.1
 ARG VW_VERSION=1.37.2
 ARG WEB_VAULT_VERSION=v2026.7.0
 ARG WEB_VAULT=false
 ARG TAILSCALE_VERSION=1.102.3
 ARG CMAKE_VERSION=4.3.0
+ARG RCLONE_VERSION=1.75.1
 
 ############################################################################
 # Stage 1: fetch + verify + extract official release tarballs
+# (rclone is used by the supervisor's optional S3 state sync)
 ############################################################################
 FROM ${BUILDER_IMAGE} AS fetch
 ARG VW_VERSION
 ARG WEB_VAULT_VERSION
 ARG WEB_VAULT
 ARG TAILSCALE_VERSION
-RUN dnf -y install tar gzip && dnf clean all
+ARG RCLONE_VERSION
+RUN dnf -y install tar gzip unzip && dnf clean all
 WORKDIR /fetch
 RUN ARCH="${TARGETARCH:-$(uname -m)}" \
  && case "${ARCH}" in \
-        amd64|x86_64) TS_ARCH=amd64 ;; \
-        arm64|aarch64) TS_ARCH=arm64 ;; \
+        amd64|x86_64) TS_ARCH=amd64; RC_ARCH=linux-amd64 ;; \
+        arm64|aarch64) TS_ARCH=arm64; RC_ARCH=linux-arm64 ;; \
         *) echo "unsupported arch: ${ARCH}" && exit 1 ;; \
     esac \
  && curl -fsSL -o vw.tar.gz \
         "https://github.com/dani-garcia/vaultwarden/archive/refs/tags/${VW_VERSION}.tar.gz" \
+ && curl -fsSL -o SHA256SUMS \
+        "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/SHA256SUMS" \
+ && curl -fsSL -o "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
+        "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
+ && grep "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip$" SHA256SUMS | sha256sum -c - \
  && mkdir -p /out/web-vault \
  && if [ "${WEB_VAULT}" = "true" ]; then \
         curl -fsSL -o "bw_web_${WEB_VAULT_VERSION}.tar.gz" \
@@ -55,7 +63,9 @@ RUN ARCH="${TARGETARCH:-$(uname -m)}" \
  && echo "$(cat ts.tgz.sha256)  ts.tgz" | sha256sum -c - \
  && mkdir -p /out /data \
  && tar -xzf ts.tgz -C /out --strip-components=1 \
- && test -x /out/tailscale && test -x /out/tailscaled
+ && unzip -j "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" "*/rclone" -d /out \
+ && rm "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" SHA256SUMS \
+ && test -x /out/tailscale && test -x /out/tailscaled && test -x /out/rclone
 
 ############################################################################
 # Stage 2: supervisor (hardened rust toolchain, glibc lockstep with runtime)
@@ -102,7 +112,7 @@ ARG VW_VERSION
 ARG TAILSCALE_VERSION
 ARG WEB_VAULT
 
-LABEL org.opencontainers.image.title="vaultwarden-render" \
+LABEL org.opencontainers.image.title="vaultwarden-hummingbird" \
       org.opencontainers.image.description="Vaultwarden ${VW_VERSION} + Tailscale ${TAILSCALE_VERSION} on Hummingbird core-runtime" \
       org.opencontainers.image.source="https://github.com/dani-garcia/vaultwarden"
 
@@ -117,6 +127,7 @@ COPY --from=vw-build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=supervisor /out-supervisor /entrypoint
 COPY --from=fetch /out/tailscale /usr/local/bin/tailscale
 COPY --from=fetch /out/tailscaled /usr/local/bin/tailscaled
+COPY --from=fetch /out/rclone /usr/local/bin/rclone
 COPY --from=vw-build /out-vaultwarden /vaultwarden
 # web vault files are present only when built with WEB_VAULT=true; the dir
 # always exists (possibly empty) so the unconditional COPY succeeds

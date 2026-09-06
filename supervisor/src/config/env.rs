@@ -4,6 +4,7 @@ use std::env;
 use std::time::Duration;
 
 use super::dotenv::FileConfig;
+use crate::util::log;
 
 /// Hard-coded child binary paths (baked into the image, no PATH lookup).
 pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
@@ -11,6 +12,8 @@ pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
 pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
 /// vaultwarden server binary (the payload this container exists to run).
 pub const VAULTWARDEN: &str = "/vaultwarden";
+/// rclone binary (S3 state sync; baked into the image by the fetch stage).
+pub const RCLONE: &str = "/usr/local/bin/rclone";
 
 /// Hard timeouts: never let a hung tailscaled block the vault.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
@@ -18,11 +21,63 @@ pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
 pub const SERVE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Hard timeout waiting for tailscaled's LocalAPI socket.
 pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
+/// Hard timeout for one rclone state-sync operation.
+pub const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default cadence (seconds) for periodic state pushes.
+pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;
 
 /// Keys owned by the supervisor (localized to PID 1): they configure the
-/// supervisor/tailscale and are filtered out of the vaultwarden child's env.
+/// supervisor/tailscale/S3-sync and are filtered out of the vaultwarden
+/// child's env.
 pub fn is_supervisor_key(key: &str) -> bool {
     key.starts_with("TS_") || key.starts_with("SUPERVISOR_")
+}
+
+/// S3-backed persistence for `/data` identity files (opt-in): tailscaled's
+/// node state and vaultwarden's RSA keys are synced via rclone to an
+/// S3-compatible bucket, restoring the same tailnet node and JWT-signing
+/// keys across ephemeral redeploys. Single instance per bucket.
+pub struct SyncConfig {
+    /// rclone destination `remote:path` (e.g. `r2:vw-state`)
+    pub remote: String,
+    /// backend env for the rclone child (RCLONE_CONFIG_*; carries secrets)
+    pub env: Vec<(String, String)>,
+    /// periodic push cadence (0 disables periodic pushes)
+    pub interval: Duration,
+}
+
+impl SyncConfig {
+    /// Build from raw knob values; `endpoint` empty means the provider's
+    /// default (e.g. AWS). The rclone child gets backend config via env
+    /// vars — never argv, whose cmdline is world-readable in /proc.
+    /// `RCLONE_CONFIG=/dev/null` disables the config file (env-only remotes).
+    pub fn new(
+        remote: String,
+        key_id: String,
+        key_secret: String,
+        endpoint: String,
+        interval: Duration,
+    ) -> Self {
+        // remote name prefixes the RCLONE_CONFIG_* env vars (uppercased)
+        let name = remote.split(':').next().unwrap_or_default().to_uppercase();
+        let mut env = vec![
+            ("RCLONE_CONFIG".to_string(), "/dev/null".to_string()),
+            (format!("RCLONE_CONFIG_{name}_TYPE"), "s3".to_string()),
+            (format!("RCLONE_CONFIG_{name}_ACCESS_KEY_ID"), key_id),
+            (
+                format!("RCLONE_CONFIG_{name}_SECRET_ACCESS_KEY"),
+                key_secret,
+            ),
+        ];
+        if !endpoint.is_empty() {
+            env.push((format!("RCLONE_CONFIG_{name}_ENDPOINT"), endpoint));
+        }
+        Self {
+            remote,
+            env,
+            interval,
+        }
+    }
 }
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
@@ -42,6 +97,8 @@ pub struct Config {
     pub serve: bool,
     /// userspace networking: no TUN device on PaaS platforms
     pub userspace: bool,
+    /// S3 state sync (None = disabled)
+    pub sync: Option<SyncConfig>,
     /// verbatim vaultwarden env names -> values (from the dotenv file, if any)
     pub vw_env: Vec<(String, String)>,
 }
@@ -70,6 +127,44 @@ impl Config {
         };
 
         let data_folder = env::var("DATA_FOLDER").unwrap_or_else(|_| "/data".to_string());
+
+        // S3 state sync: enabled by SUPERVISOR_S3_REMOTE; misconfigurations
+        // degrade to sync disabled (never block the vault).
+        let sync = {
+            let remote = knob("SUPERVISOR_S3_REMOTE", "");
+            let key_id = knob("SUPERVISOR_S3_ACCESS_KEY_ID", "");
+            let key_secret = knob("SUPERVISOR_S3_SECRET_ACCESS_KEY", "");
+            if remote.is_empty() {
+                None
+            } else if key_id.is_empty() || key_secret.is_empty() {
+                log::err(
+                    "config: SUPERVISOR_S3_REMOTE set without SUPERVISOR_S3_ACCESS_KEY_ID/\
+                     SECRET_ACCESS_KEY; state sync disabled",
+                );
+                None
+            } else {
+                let name = remote.split(':').next().unwrap_or_default().to_uppercase();
+                if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    log::err(&format!(
+                        "config: invalid SUPERVISOR_S3_REMOTE '{remote}' (remote name must be \
+                         alphanumeric); state sync disabled"
+                    ));
+                    None
+                } else {
+                    let secs: u64 = knob("SUPERVISOR_S3_SYNC_INTERVAL", "")
+                        .parse()
+                        .unwrap_or(SYNC_INTERVAL_DEFAULT);
+                    Some(SyncConfig::new(
+                        remote,
+                        key_id,
+                        key_secret,
+                        knob("SUPERVISOR_S3_ENDPOINT", ""),
+                        Duration::from_secs(secs),
+                    ))
+                }
+            }
+        };
+
         Self {
             state: knob("TS_STATE_FILE", &format!("{data_folder}/tailscaled.state")),
             socket: knob("TS_SOCKET", "/tmp/tailscaled.sock"),
@@ -78,6 +173,7 @@ impl Config {
             authkey: knob("TS_AUTHKEY", ""),
             serve: knob("TS_SERVE", "true") == "true",
             userspace: knob("TS_USERSPACE", "true") == "true",
+            sync,
             vw_env: file.child.into_iter().collect(),
         }
     }
@@ -100,6 +196,11 @@ mod tests {
         "TS_SERVE",
         "TS_USERSPACE",
         "SUPERVISOR_ENV_FILE",
+        "SUPERVISOR_S3_REMOTE",
+        "SUPERVISOR_S3_ACCESS_KEY_ID",
+        "SUPERVISOR_S3_SECRET_ACCESS_KEY",
+        "SUPERVISOR_S3_ENDPOINT",
+        "SUPERVISOR_S3_SYNC_INTERVAL",
     ];
 
     fn set(key: &str, val: &str) {
@@ -183,5 +284,57 @@ mod tests {
         set("TS_HOSTNAME", "env-host");
         assert_eq!(Config::from_env().hostname, "env-host");
         let _ = fs::remove_file(&path);
+
+        // --- S3 sync: disabled without the remote knob ---
+        clear();
+        set("SUPERVISOR_ENV_FILE", "");
+        assert!(Config::from_env().sync.is_none());
+
+        // --- S3 sync: missing credentials degrade to disabled ---
+        set("SUPERVISOR_S3_REMOTE", "r2:vw-state");
+        assert!(Config::from_env().sync.is_none());
+
+        // --- S3 sync: enabled; backend env derived from the remote name ---
+        set("SUPERVISOR_S3_ACCESS_KEY_ID", "id");
+        set("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret");
+        set(
+            "SUPERVISOR_S3_ENDPOINT",
+            "https://acct.r2.cloudflarestorage.com",
+        );
+        set("SUPERVISOR_S3_SYNC_INTERVAL", "90");
+        let sync = Config::from_env().sync.expect("sync enabled");
+        assert_eq!(sync.remote, "r2:vw-state");
+        assert_eq!(sync.interval, Duration::from_secs(90));
+        assert_eq!(
+            sync.env,
+            vec![
+                ("RCLONE_CONFIG".to_string(), "/dev/null".to_string()),
+                ("RCLONE_CONFIG_R2_TYPE".to_string(), "s3".to_string()),
+                (
+                    "RCLONE_CONFIG_R2_ACCESS_KEY_ID".to_string(),
+                    "id".to_string()
+                ),
+                (
+                    "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY".to_string(),
+                    "secret".to_string()
+                ),
+                (
+                    "RCLONE_CONFIG_R2_ENDPOINT".to_string(),
+                    "https://acct.r2.cloudflarestorage.com".to_string()
+                ),
+            ]
+        );
+
+        // --- S3 sync: invalid remote name degrades to disabled ---
+        set("SUPERVISOR_S3_REMOTE", "no-colon-here");
+        assert!(Config::from_env().sync.is_none());
+
+        // --- S3 sync: unparsable interval falls back to the default ---
+        set("SUPERVISOR_S3_REMOTE", "r2:vw-state");
+        set("SUPERVISOR_S3_SYNC_INTERVAL", "not-a-number");
+        assert_eq!(
+            Config::from_env().sync.expect("sync enabled").interval,
+            Duration::from_secs(SYNC_INTERVAL_DEFAULT)
+        );
     }
 }

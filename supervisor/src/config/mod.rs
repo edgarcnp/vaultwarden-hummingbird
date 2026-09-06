@@ -7,6 +7,6 @@ mod dotenv;
 mod env;
 
 pub use env::{
-    AUTH_TIMEOUT, Config, DAEMON_WAIT, SERVE_TIMEOUT, TAILSCALE, TAILSCALED, VAULTWARDEN,
-    is_supervisor_key,
+    AUTH_TIMEOUT, Config, DAEMON_WAIT, RCLONE, SERVE_TIMEOUT, SYNC_TIMEOUT, SyncConfig, TAILSCALE,
+    TAILSCALED, VAULTWARDEN, is_supervisor_key,
 };

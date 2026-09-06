@@ -63,7 +63,23 @@ pub fn tailscale_serve(port: &str, timeout: Duration, abort: impl Fn() -> bool) 
 /// reaper (`process::reap_any`) only runs in the watch/teardown phases,
 /// which strictly follow this one — no status-stealing races.
 pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn() -> bool) -> bool {
-    let mut child = match Command::new(prog).args(args).spawn() {
+    run_bounded_env(timeout, prog, args, &[], abort)
+}
+
+/// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
+pub fn run_bounded_env(
+    timeout: Duration,
+    prog: &str,
+    args: &[&str],
+    extra_env: &[(String, String)],
+    abort: impl Fn() -> bool,
+) -> bool {
+    let mut cmd = Command::new(prog);
+    cmd.args(args);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             log::err(&format!("{prog} spawn failed: {e}"));

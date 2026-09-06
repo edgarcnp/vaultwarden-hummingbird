@@ -3,6 +3,8 @@
 //! (Hummingbird core-runtime / UBI micro / distroless). glibc, version-locked
 //! to the runtime base image. Optional dotenv config layer (SUPERVISOR_ENV_FILE):
 //! the supervisor owns the file and distributes it localized to each child.
+//! Optional S3 state sync (SUPERVISOR_S3_*, via baked rclone): /data identity
+//! files (tailscaled.state, rsa_key*) survive ephemeral redeploys.
 //!
 //! Shutdown model (see `proc::process` / `proc::signals`): children run in
 //! their own process groups; a stop request (SIGTERM/SIGINT/SIGHUP/SIGQUIT)
@@ -16,20 +18,26 @@ mod util;
 
 use std::process::exit;
 
-use config::Config;
+use config::{Config, SyncConfig};
 use proc::{
     Gone, POLL, Pid, TERM_GRACE, exit_code, exit_reason, install_signal_handlers, reap_any,
-    reap_until_gone, run_vaultwarden, signal_group, spawn_tailscaled, stopping, tailscale_serve,
-    tailscale_up, take_stop,
+    reap_until_gone, restore_state, run_vaultwarden, signal_group, spawn_tailscaled, stopping,
+    sync_state, tailscale_serve, tailscale_up, take_stop,
 };
 use util::{log, net};
 
-/// Boot sequence: arm signals, load config, bring up Tailscale (best effort —
-/// every failure path degrades to running vaultwarden without it), then hand
-/// off to [`start_vw`], which blocks for the container's lifetime.
+/// Boot sequence: arm signals, load config, restore S3 state (opt-in), bring
+/// up Tailscale (best effort — every failure path degrades to running
+/// vaultwarden without it), then hand off to [`start_vw`], which blocks for
+/// the container's lifetime.
 fn main() {
     install_signal_handlers(); // first: no window of unhandled signals as PID 1
     let cfg = Config::from_env();
+
+    // 0. S3 state restore (opt-in): same tailnet node + JWT keys as last run
+    if let Some(sync) = &cfg.sync {
+        restore_state(sync, stopping);
+    }
 
     // 1. tailscaled (userspace networking: no TUN device on PaaS)
     let Some(tsd) = spawn_tailscaled(&cfg.state, &cfg.socket, cfg.userspace) else {
@@ -41,7 +49,7 @@ fn main() {
     // 2. wait for the LocalAPI socket
     if !net::wait_daemon(&cfg.socket, config::DAEMON_WAIT, stopping) {
         if take_stop() {
-            shutdown(Some(tsd), 0);
+            shutdown(Some(tsd), 0, None);
         }
         log::err("tailscaled socket never appeared; continuing without Tailscale");
         start_vw(&cfg, Some(tsd))
@@ -54,6 +62,9 @@ fn main() {
         log::info("authenticating tailscale node...");
         if tailscale_up(&cfg.authkey, &cfg.hostname, config::AUTH_TIMEOUT, stopping) {
             log::info("tailscale up: connected");
+            if let Some(sync) = &cfg.sync {
+                sync_state(sync, stopping); // persist fresh node state early
+            }
             if cfg.serve {
                 let ok = tailscale_serve(&cfg.port, config::SERVE_TIMEOUT, stopping);
                 log::info(if ok {
@@ -64,7 +75,7 @@ fn main() {
             }
         } else {
             if take_stop() {
-                shutdown(Some(tsd), 0);
+                shutdown(Some(tsd), 0, None);
             }
             log::err(
                 "tailscale up failed or timed out - check TS_AUTHKEY; continuing without Tailscale",
@@ -78,14 +89,15 @@ fn main() {
 
 /// Hand off to vaultwarden and supervise it: the watch loop is the single
 /// reaper of the PID namespace (orphans re-parent to us as PID 1), observes
-/// vaultwarden's exit or a stop request, then tears down tailscaled and
-/// exits with vaultwarden's code.
+/// vaultwarden's exit or a stop request, drives periodic state sync, then
+/// tears down tailscaled and exits with vaultwarden's code.
 fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
     log::info("starting vaultwarden");
     let Some(vw) = run_vaultwarden(&cfg.port, &cfg.vw_env) else {
-        shutdown(tsd, 1)
+        shutdown(tsd, 1, None)
     };
 
+    let mut last_sync = std::time::Instant::now();
     let code = 'watch: loop {
         if let Some((pid, raw)) = reap_any() {
             if pid == vw {
@@ -115,16 +127,25 @@ fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
             // (should be impossible — we are the only reaper).
             break 'watch 1;
         }
+        // Periodic state push (identity files change rarely; cadence-bounded).
+        if let Some(sync) = &cfg.sync
+            && !sync.interval.is_zero()
+            && last_sync.elapsed() >= sync.interval
+        {
+            sync_state(sync, stopping);
+            last_sync = std::time::Instant::now();
+        }
         std::thread::sleep(POLL);
     };
 
-    shutdown(tsd, code)
+    shutdown(tsd, code, cfg.sync.as_ref())
 }
 
 /// Bring every child down and exit the container. TERM each child group,
-/// escalate to KILL after `TERM_GRACE`, drain strays, then exit with `code`.
-/// Safe for children that are already dead (group kill + reap are no-ops).
-fn shutdown(tsd: Option<Pid>, code: i32) -> ! {
+/// escalate to KILL after `TERM_GRACE`, drain strays, make a final (best
+/// effort) state push, then exit with `code`. Safe for children that are
+/// already dead (group kill + reap are no-ops).
+fn shutdown(tsd: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
     log::info("shutting down");
     if let Some(t) = tsd {
         signal_group(t, libc::SIGTERM);
@@ -133,6 +154,10 @@ fn shutdown(tsd: Option<Pid>, code: i32) -> ! {
         }
     }
     while reap_any().is_some() {} // drain any orphan that outlived its parent
+    // Final push AFTER children are gone; must not abort on the stop flag.
+    if let Some(sync) = sync {
+        sync_state(sync, || false);
+    }
     exit(code)
 }
 
