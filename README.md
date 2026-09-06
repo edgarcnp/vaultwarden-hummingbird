@@ -51,13 +51,13 @@ Three ways in:
 
 Supervisor-owned mode is *localized*: `TS_*`/`SUPERVISOR_*` keys stay with PID 1 — never in `docker inspect`, never in the vaultwarden process — and everything else is forwarded to vaultwarden. This keeps `TS_AUTHKEY` out of container env (leakage hygiene, not a security boundary).
 
-Precedence: `PORT`/`TS_*`/`SUPERVISOR_*` process env > `.env` file > image-baked defaults for the supervisor's knobs; for vaultwarden keys the `.env` file beats container env (that's what makes the baked posture overridable).
+Precedence: `PORT`/`ROCKET_PORT` and `TS_*`/`SUPERVISOR_*` process env > `.env` file > code defaults (empty values are treated as unset); for vaultwarden keys the `.env` file beats container env (that's what makes the baked posture overridable). Three exceptions are hard-pinned to the child by the supervisor and can't be overridden: `ROCKET_PORT` (follows `PORT`), `ROCKET_ADDRESS` and `DATA_FOLDER` (`/data`).
 
 ## Tailscale
 
-- `tailscaled` runs in **userspace networking** by default (works without a TUN device, e.g. on PaaS); `TS_USERSPACE=false` reverts to TUN for local use.
+- `tailscaled` runs in **userspace networking** by default (works without a TUN device, e.g. on PaaS); `TS_USERSPACE=false` reverts to TUN for local use. Note: the compose file ships `cap_drop: ALL` (userspace needs no caps), so TUN mode there requires editing the compose file and granting `NET_ADMIN` + `/dev/net/tun`.
 - **Inbound tailnet access requires `tailscale serve`** — the supervisor runs it after a successful `up` (disable with `TS_SERVE=false`), exposing `https://<hostname>.<tailnet>.ts.net` with valid certs (needs MagicDNS + HTTPS certificates on the tailnet). Point your Bitwarden clients there.
-- Missing/invalid `TS_AUTHKEY` is non-fatal: the vault starts without Tailscale. A hung `up` is killed after 90s.
+- Missing/invalid `TS_AUTHKEY` is non-fatal: the vault starts without Tailscale. A hung `up` is killed after 90s. The authkey is never placed on a command line — it's staged into a 0600 file (removed after `up`), keeping it out of `/proc/*/cmdline`.
 - Knobs: `TS_HOSTNAME` (default `vaultwarden`), `TS_SERVE`, `TS_USERSPACE`, `TS_SOCKET`, `TS_STATE_FILE`.
 
 ## State sync (volume-less hosts)
@@ -81,7 +81,7 @@ Don't want a bucket? Pure-ephemeral alternative: `TS_STATE_FILE=mem:` plus an `e
 Baked into the image, overridable via any configuration path:
 
 - `SIGNUPS_ALLOWED=false` — flip to `true` to create your account, then flip back
-- No organizations (`ORG_CREATION_USERS=none`) and no attachment/Sends storage (limits `0` — there is no `ATTACHMENTS_ENABLED` flag upstream); use Taildrop for file transfer
+- No organizations (`ORG_CREATION_USERS=none`) and no attachment storage (`USER_ATTACHMENT_LIMIT=0`/`ORG_ATTACHMENT_LIMIT=0` — there is no `ATTACHMENTS_ENABLED` flag upstream); use Taildrop for file transfer. Sends are *not* disabled by default — set `SENDS_ALLOWED=false` if you don't want them.
 - `WEB_VAULT_ENABLED` follows the `WEB_VAULT` build arg — default API-only: the official Bitwarden apps talk to the API directly, `https://<domain>/` serves nothing
 - Admin panel disabled (no `ADMIN_TOKEN`)
 - Optional mobile push: `PUSH_ENABLED=true` plus `PUSH_INSTALLATION_ID`/`PUSH_INSTALLATION_KEY` (free from https://bitwarden.com/host)
@@ -90,7 +90,7 @@ Baked into the image, overridable via any configuration path:
 
 - The database is external (`DATABASE_URL`); `/data` only needs to hold Tailscale node state (`I_REALLY_WANT_VOLATILE_STORAGE=true` is baked in — vaultwarden refuses volatile storage otherwise; set it `false` when `/data` has a real volume).
 - Secrets are only ever provided via environment variables; nothing is hardcoded or logged.
-- The Tailscale tarball is sha256-verified against its official checksum; the vaultwarden source and cmake tarballs are TLS-fetched from pinned tags.
+- All fetched artifacts are checksum-pinned: Tailscale (official `.sha256`), rclone (official `SHA256SUMS`), web vault (official `sha256sums.txt`), and the vaultwarden source + CMake tarballs (sha256 digests baked as build `ARG`s — a mismatch fails the build). Base images are digest-pinned.
 - Multi-arch: amd64 + arm64.
 
 ## Files

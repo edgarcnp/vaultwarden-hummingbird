@@ -4,7 +4,9 @@
 //! to the runtime base image. Optional dotenv config layer (SUPERVISOR_ENV_FILE):
 //! the supervisor owns the file and distributes it localized to each child.
 //! Optional S3 state sync (SUPERVISOR_S3_*, via baked rclone): /data identity
-//! files (tailscaled.state, rsa_key*) survive ephemeral redeploys.
+//! files (tailscaled.state, rsa_key*) survive ephemeral redeploys. The
+//! Tailscale authkey is staged to a 0600 file (never argv) and removed after
+//! `up`.
 //!
 //! Shutdown model (see `proc::process` / `proc::signals`): children run in
 //! their own process groups; a stop request (SIGTERM/SIGINT/SIGHUP/SIGQUIT)

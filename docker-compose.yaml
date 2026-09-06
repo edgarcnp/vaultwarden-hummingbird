@@ -18,6 +18,19 @@ services:
         WEB_VAULT: "false"
     image: vaultwarden-hummingbird:local
     restart: unless-stopped
+    # graceful stop needs TERM_GRACE (10s) + a final S3 state push (≤60s);
+    # Docker's default 10s would SIGKILL mid-teardown
+    stop_grace_period: 90s
+    # hardening: userspace networking needs no caps, so drop them all; the
+    # rootfs is read-only — everything writable lives in /data (volume) and
+    # /tmp (tmpfs: tailscaled socket + staged authkey file)
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
     ports:
       - "127.0.0.1:8080:8080" # bind localhost; Tailscale/ts.net handles remote access
     volumes:

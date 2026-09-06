@@ -8,12 +8,15 @@
 //!   - everything else             -> forwarded verbatim to the vaultwarden
 //!     child as its localized environment (any of the 139 upstream env names)
 //!
-//! Syntax: KEY=value, `#` comments, optional `export ` prefix, optional
-//! matching single/double quotes around values (quote values containing `#`).
+//! Syntax: KEY=value, `#` comments, optional `export ` or `export<TAB>`
+//! prefix, optional matching single/double quotes around values (quote
+//! values containing `#`).
 //!
 //! Precedence:
-//!   - supervisor knobs (TS_*/SUPERVISOR_*/PORT): process env > this file
-//!     (platform plumbing and secrets belong to env)
+//!   - supervisor knobs (TS_*/SUPERVISOR_*): process env > this file
+//!     (platform plumbing and secrets belong to env). PORT/ROCKET_PORT are
+//!     resolved separately in config::env (process env > file > 8080); a
+//!     file PORT is forwarded to the child but never read by the supervisor.
 //!   - vaultwarden keys: this file > container env (file is authoritative in
 //!     file mode; this is what makes image-baked posture defaults overridable)
 
@@ -23,7 +26,7 @@ use super::env::is_supervisor_key;
 use crate::util::log;
 
 /// Env var holding the dotenv file path (absent/empty = env-only mode).
-pub const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
+const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
 
 #[derive(Default)]
 pub struct FileConfig {
@@ -42,7 +45,11 @@ fn parse(raw: &str) -> BTreeMap<String, String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let line = line
+            .strip_prefix("export ")
+            .or_else(|| line.strip_prefix("export\t"))
+            .unwrap_or(line)
+            .trim();
         let Some((key, val)) = line.split_once('=') else {
             log::err(&format!("config: line {}: not KEY=value; ignored", n + 1));
             continue;

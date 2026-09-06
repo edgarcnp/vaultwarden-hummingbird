@@ -9,8 +9,11 @@
 //!   namespace-wide reaper (`reap_any`), never through std's targeted
 //!   `try_wait`/`wait`, which would race it over the same zombie.
 //! - Short-lived CLI children (`run_bounded`) keep std's Child instead: they
-//!   live and die strictly inside that helper, before the watch loop starts,
-//!   so there is no overlap in time or target with the namespace reaper.
+//!   are reaped via std inside that helper, and cannot overlap the namespace
+//!   reaper — the main thread is single-threaded, so while the helper polls,
+//!   `reap_any` is never called (even for rclone syncs inside the watch
+//!   loop, which run between two `reap_any` polls, never concurrently). They
+//!   are group leaders so a timeout kill reaches anything they spawned.
 //! - As PID 1, any orphan in the container re-parents to us; only `waitpid`
 //!   here (not std) can reap those, and skipping them would leak zombies.
 
@@ -175,9 +178,10 @@ mod tests {
     }
 
     /// End-to-end over real children: group signal reach, exit decoding, and
-    /// SIGKILL escalation. Kept as the suite's ONLY process-spawning test so
-    /// the `reap_any` inside `reap_until_gone` can never steal a parallel
-    /// test's child (see the module-level ownership notes).
+    /// SIGKILL escalation. The suite's only test of a *long-running* child
+    /// process group (the sync tests spawn a CLI that fails fast on a bogus
+    /// binary), so the `reap_any` inside `reap_until_gone` can never steal a
+    /// parallel test's child (see the module-level ownership notes).
     #[test]
     fn child_lifecycle_spawn_signal_reap_escalate() {
         // TERM to the group reaps a well-behaved child as 128+15.

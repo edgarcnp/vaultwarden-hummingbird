@@ -33,6 +33,12 @@ pub fn is_supervisor_key(key: &str) -> bool {
     key.starts_with("TS_") || key.starts_with("SUPERVISOR_")
 }
 
+/// Uppercased rclone remote name (the part before ':' in `remote:path`):
+/// prefix of the RCLONE_CONFIG_* backend env vars.
+fn remote_env_name(remote: &str) -> String {
+    remote.split(':').next().unwrap_or_default().to_uppercase()
+}
+
 /// S3-backed persistence for `/data` identity files (opt-in): tailscaled's
 /// node state and vaultwarden's RSA keys are synced via rclone to an
 /// S3-compatible bucket, restoring the same tailnet node and JWT-signing
@@ -59,7 +65,7 @@ impl SyncConfig {
         interval: Duration,
     ) -> Self {
         // remote name prefixes the RCLONE_CONFIG_* env vars (uppercased)
-        let name = remote.split(':').next().unwrap_or_default().to_uppercase();
+        let name = remote_env_name(&remote);
         let mut env = vec![
             ("RCLONE_CONFIG".to_string(), "/dev/null".to_string()),
             (format!("RCLONE_CONFIG_{name}_TYPE"), "s3".to_string()),
@@ -105,28 +111,34 @@ pub struct Config {
 
 impl Config {
     /// Merge order:
-    ///   supervisor knobs (TS_*/SUPERVISOR_*/PORT): process env > file > defaults
+    ///   supervisor knobs (TS_*/SUPERVISOR_*): process env > file > code defaults
+    ///   port: PORT env > ROCKET_PORT env > file ROCKET_PORT > 8080
     ///   vaultwarden keys: file > container env (applied in proc::run_vaultwarden)
+    /// Empty values (env or file) are treated as unset.
     pub fn from_env() -> Self {
         let file = FileConfig::load();
 
-        // platform PORT always wins (Render injects it; non-root can't bind 80)
-        let port = if let Ok(p) = env::var("PORT").or_else(|_| env::var("ROCKET_PORT")) {
-            p
-        } else if let Some(p) = file.child.get("ROCKET_PORT") {
-            p.clone()
-        } else {
-            "8080".into()
-        };
+        // platform PORT always wins (Render injects it; non-root can't bind 80).
+        // Empty env values are treated as unset — an empty port is never valid.
+        let port = env::var("PORT")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .or_else(|| env::var("ROCKET_PORT").ok().filter(|p| !p.is_empty()))
+            .or_else(|| {
+                file.child
+                    .get("ROCKET_PORT")
+                    .cloned()
+                    .filter(|p| !p.is_empty())
+            })
+            .unwrap_or_else(|| "8080".into());
 
         let knob = |key: &str, default: &str| -> String {
             env::var(key)
                 .ok()
-                .or_else(|| file.knobs.get(key).cloned())
+                .filter(|v| !v.is_empty())
+                .or_else(|| file.knobs.get(key).cloned().filter(|v| !v.is_empty()))
                 .unwrap_or_else(|| default.to_string())
         };
-
-        let data_folder = env::var("DATA_FOLDER").unwrap_or_else(|_| "/data".to_string());
 
         // S3 state sync: enabled by SUPERVISOR_S3_REMOTE; misconfigurations
         // degrade to sync disabled (never block the vault).
@@ -142,8 +154,8 @@ impl Config {
                      SECRET_ACCESS_KEY; state sync disabled",
                 );
                 None
-            } else {
-                let name = remote.split(':').next().unwrap_or_default().to_uppercase();
+            } else if let Some((name_raw, _)) = remote.split_once(':') {
+                let name = remote_env_name(name_raw);
                 if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     log::err(&format!(
                         "config: invalid SUPERVISOR_S3_REMOTE '{remote}' (remote name must be \
@@ -151,9 +163,17 @@ impl Config {
                     ));
                     None
                 } else {
-                    let secs: u64 = knob("SUPERVISOR_S3_SYNC_INTERVAL", "")
-                        .parse()
-                        .unwrap_or(SYNC_INTERVAL_DEFAULT);
+                    let raw_interval = knob("SUPERVISOR_S3_SYNC_INTERVAL", "");
+                    let secs: u64 = match raw_interval.parse() {
+                        Ok(secs) => secs,
+                        Err(_) => {
+                            log::err(&format!(
+                                "config: invalid SUPERVISOR_S3_SYNC_INTERVAL '{raw_interval}'; \
+                                 using default {SYNC_INTERVAL_DEFAULT}s"
+                            ));
+                            SYNC_INTERVAL_DEFAULT
+                        }
+                    };
                     Some(SyncConfig::new(
                         remote,
                         key_id,
@@ -162,11 +182,19 @@ impl Config {
                         Duration::from_secs(secs),
                     ))
                 }
+            } else {
+                log::err(&format!(
+                    "config: invalid SUPERVISOR_S3_REMOTE '{remote}' (must be remote:path); \
+                     state sync disabled"
+                ));
+                None
             }
         };
 
         Self {
-            state: knob("TS_STATE_FILE", &format!("{data_folder}/tailscaled.state")),
+            // Hard-pinned to the /data volume (the child's DATA_FOLDER and the
+            // sync scope are /data too); TS_STATE_FILE is the explicit override.
+            state: knob("TS_STATE_FILE", "/data/tailscaled.state"),
             socket: knob("TS_SOCKET", "/tmp/tailscaled.sock"),
             port,
             hostname: knob("TS_HOSTNAME", "vaultwarden"),
@@ -188,7 +216,6 @@ mod tests {
     const ENV_KEYS: &[&str] = &[
         "PORT",
         "ROCKET_PORT",
-        "DATA_FOLDER",
         "TS_STATE_FILE",
         "TS_SOCKET",
         "TS_HOSTNAME",
@@ -244,16 +271,19 @@ mod tests {
         assert!(cfg.serve && cfg.userspace);
         assert!(cfg.vw_env.is_empty());
 
-        // --- DATA_FOLDER relocates the state default ---
-        set("DATA_FOLDER", "/d");
-        assert_eq!(Config::from_env().state, "/d/tailscaled.state");
-
         // --- port precedence: PORT > ROCKET_PORT (process env) ---
         set("PORT", "3000");
         set("ROCKET_PORT", "1111");
         assert_eq!(Config::from_env().port, "3000");
         unsafe { env::remove_var("PORT") };
         assert_eq!(Config::from_env().port, "1111");
+
+        // --- empty env values are treated as unset, never override defaults ---
+        set("PORT", "");
+        set("ROCKET_PORT", "");
+        assert_eq!(Config::from_env().port, "8080");
+        unsafe { env::remove_var("PORT") };
+        unsafe { env::remove_var("ROCKET_PORT") };
 
         // --- file layer: process env > file > defaults ---
         clear();
@@ -336,5 +366,11 @@ mod tests {
             Config::from_env().sync.expect("sync enabled").interval,
             Duration::from_secs(SYNC_INTERVAL_DEFAULT)
         );
+
+        // --- S3 sync: remote without a colon is rejected even if the name
+        //     alone is alphanumeric (a colon-less remote would make rclone
+        //     write to a local path instead of the bucket) ---
+        set("SUPERVISOR_S3_REMOTE", "mybucket");
+        assert!(Config::from_env().sync.is_none());
     }
 }
