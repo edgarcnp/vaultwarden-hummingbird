@@ -39,6 +39,17 @@ fn non_empty(v: Option<String>) -> Option<String> {
     v.filter(|v| !v.is_empty())
 }
 
+/// Lenient boolean parse for the TS_* on/off knobs: the common spellings in
+/// any casing. Anything else (including empty — handled as unset by the
+/// caller) is `None`; callers warn and fall back to the default.
+fn parse_bool(v: &str) -> Option<bool> {
+    match v.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 /// Uppercased rclone remote name (the part before ':' in `remote:path`):
 /// prefix of the RCLONE_CONFIG_* backend env vars.
 fn remote_env_name(remote: &str) -> String {
@@ -119,7 +130,9 @@ impl Config {
     ///   supervisor knobs (TS_*/SUPERVISOR_*): process env > file > code defaults
     ///   port: PORT env > ROCKET_PORT env > file ROCKET_PORT > 8080
     ///   vaultwarden keys: file > container env (applied in proc::run_vaultwarden)
-    /// Empty values (env or file) are treated as unset.
+    /// Empty values (env or file) are treated as unset. Boolean knobs
+    /// (TS_SERVE/TS_USERSPACE) accept true/false/1/0/yes/no/on/off in any
+    /// casing; other values warn and take the default.
     pub fn from_env() -> Self {
         let file = FileConfig::load();
 
@@ -184,6 +197,23 @@ impl Config {
             }
         };
 
+        // Lenient bool knobs: misspellings warn and take the default rather
+        // than silently flipping the feature off.
+        let flag = |key: &str, default: bool| -> bool {
+            match knob(key, "") {
+                v if v.is_empty() => default,
+                v => match parse_bool(&v) {
+                    Some(b) => b,
+                    None => {
+                        log::err(&format!(
+                            "config: invalid {key} '{v}' (want true/false); using default {default}"
+                        ));
+                        default
+                    }
+                },
+            }
+        };
+
         Self {
             // Hard-pinned to the /data volume (the sync scope is /data too).
             state: knob("TS_STATE_FILE", "/data/tailscaled.state"),
@@ -191,8 +221,8 @@ impl Config {
             port,
             hostname: knob("TS_HOSTNAME", "vaultwarden"),
             authkey: knob("TS_AUTHKEY", ""),
-            serve: knob("TS_SERVE", "true") == "true",
-            userspace: knob("TS_USERSPACE", "true") == "true",
+            serve: flag("TS_SERVE", true),
+            userspace: flag("TS_USERSPACE", true),
             sync,
             vw_env: file.child.into_iter().collect(),
         }
@@ -352,5 +382,19 @@ mod tests {
         // instead of the bucket.
         set("SUPERVISOR_S3_REMOTE", "mybucket");
         assert!(Config::from_env().sync.is_none());
+
+        // Lenient bool knobs: common spellings in any casing parse, and a
+        // misspelling warns and takes the default instead of silently
+        // disabling the feature.
+        clear();
+        set("SUPERVISOR_ENV_FILE", "");
+        set("TS_SERVE", "YES");
+        set("TS_USERSPACE", "0");
+        let cfg = Config::from_env();
+        assert!(cfg.serve);
+        assert!(!cfg.userspace);
+        set("TS_SERVE", "definitely");
+        let cfg = Config::from_env();
+        assert!(cfg.serve);
     }
 }

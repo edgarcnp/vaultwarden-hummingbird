@@ -93,7 +93,7 @@ Baked into the image, overridable via any configuration path:
 
 ## Data & provenance
 
-- The database is external (`DATABASE_URL`); `/data` only needs to hold Tailscale node state (`I_REALLY_WANT_VOLATILE_STORAGE=true` is baked in — vaultwarden refuses volatile storage otherwise; set it `false` when `/data` has a real volume).
+- The database is external (`DATABASE_URL`); `/data` only needs to hold Tailscale node state (`I_REALLY_WANT_VOLATILE_STORAGE=true` is baked in — vaultwarden refuses volatile storage otherwise; set it `false` when `/data` has a real volume). Note the check is opt-out: *any* value of the variable (including `false`) disables it, which is why the compose file states it explicitly for its named volume.
 - Secrets are only ever provided via environment variables; nothing is hardcoded or logged.
 - All fetched artifacts are checksum-pinned: Tailscale (official `.sha256`), rclone (official `SHA256SUMS`), web vault (official `sha256sums.txt`), and the vaultwarden source + CMake tarballs (sha256 digests baked as build `ARG`s — a mismatch fails the build). Base images are digest-pinned.
 - Multi-arch: amd64 + arm64.

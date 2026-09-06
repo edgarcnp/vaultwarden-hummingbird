@@ -81,7 +81,9 @@ FROM ${BUILDER_IMAGE} AS supervisor
 WORKDIR /src
 COPY supervisor/Cargo.toml supervisor/Cargo.lock ./
 COPY supervisor/src ./src
-RUN cargo build --release && cp target/release/supervisor /out-supervisor
+# --locked: fail closed on Cargo.toml/Cargo.lock drift instead of silently
+# re-resolving (supply-chain parity with the sha256-pinned fetch stage)
+RUN cargo build --release --locked && cp target/release/supervisor /out-supervisor
 
 # Stage 3: vaultwarden from official source
 FROM ${BUILDER_IMAGE} AS vw-build

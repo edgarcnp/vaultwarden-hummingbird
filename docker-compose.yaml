@@ -35,6 +35,11 @@ services:
       - vw-data:/data
     environment:
       SUPERVISOR_ENV_FILE: /config/.env
+      # documentary opt-out for vaultwarden's persistent-volume check: /data
+      # here is the named vw-data volume, so the "forgot the volume" guard is
+      # not wanted (vaultwarden treats the var being set at all — any value —
+      # as the opt-out, so "false" is the honest spelling)
+      I_REALLY_WANT_VOLATILE_STORAGE: "false"
       # env_file: .env
 
 volumes:
