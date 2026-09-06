@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config::{TAILSCALE, TAILSCALED};
-use crate::proc::{Pid, run_bounded, spawn};
+use crate::proc::{run_bounded, spawn, Pid};
 use crate::util::log;
 
 /// tailscaled with no TUN device when `userspace` (PaaS sandboxes deny
@@ -23,10 +23,13 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pi
 /// `tailscale up` with hard timeout; failures are non-fatal for the vault.
 /// The authkey is staged into a 0600 file and passed as `--auth-key=file:...`
 /// — never argv, whose cmdline is world-readable in /proc — and removed
-/// afterwards.
+/// afterwards. `socket` is passed as the CLI's `--socket` (tailscaled runs
+/// on a non-default LocalAPI path; the CLI default is
+/// /var/run/tailscale/tailscaled.sock).
 pub fn tailscale_up(
     authkey: &str,
     hostname: &str,
+    socket: &str,
     timeout: Duration,
     abort: impl Fn() -> bool,
 ) -> bool {
@@ -38,6 +41,8 @@ pub fn tailscale_up(
         timeout,
         TAILSCALE,
         &[
+            "--socket",
+            socket,
             "up",
             &format!("--auth-key=file:{key_file}"),
             "--hostname",
@@ -82,11 +87,18 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
 }
 
 /// userspace mode has no inbound tailnet path without serve.
-pub fn tailscale_serve(port: &str, timeout: Duration, abort: impl Fn() -> bool) -> bool {
+pub fn tailscale_serve(
+    port: &str,
+    socket: &str,
+    timeout: Duration,
+    abort: impl Fn() -> bool,
+) -> bool {
     run_bounded(
         timeout,
         TAILSCALE,
         &[
+            "--socket",
+            socket,
             "serve",
             "--bg",
             "--https=443",

@@ -20,7 +20,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - ./.env:/config/.env:ro
+      - ./.env:/config/.env:ro,z
       - vw-data:/data
     environment:
       SUPERVISOR_ENV_FILE: /config/.env

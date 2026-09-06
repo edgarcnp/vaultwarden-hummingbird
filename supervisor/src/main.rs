@@ -58,13 +58,19 @@ fn main() {
         log::info("TS_AUTHKEY not set - starting without Tailscale");
     } else {
         log::info("authenticating tailscale node...");
-        if tailscale_up(&cfg.authkey, &cfg.hostname, config::AUTH_TIMEOUT, stopping) {
+        if tailscale_up(
+            &cfg.authkey,
+            &cfg.hostname,
+            &cfg.socket,
+            config::AUTH_TIMEOUT,
+            stopping,
+        ) {
             log::info("tailscale up: connected");
             if let Some(sync) = &cfg.sync {
                 sync_state(sync, stopping);
             }
             if cfg.serve {
-                let ok = tailscale_serve(&cfg.port, config::SERVE_TIMEOUT, stopping);
+                let ok = tailscale_serve(&cfg.port, &cfg.socket, config::SERVE_TIMEOUT, stopping);
                 log::info(if ok {
                     "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net"
                 } else {
