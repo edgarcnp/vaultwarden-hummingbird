@@ -3,8 +3,9 @@
 # Vaultwarden + Tailscale on Red Hat Hummingbird. Checksum-pinned official
 # sources, Rust supervisor as PID 1, web vault optional (WEB_VAULT=true).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder@sha256:6c5a4c3f0d419a2694c5f1d7482f17d2b7f76474f157af3a25061a3ed789380a
-ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest@sha256:8f4f90ae5941225e09ef034c4476bbe7918d084b72aaf78e0e198c36e7117270
+# Base images float on their tags: rebuilds pick up upstream CVE patches.
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder
+ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest
 ARG VW_VERSION=1.37.2
 # sha256 of the source tarball; bump with VW_VERSION
 ARG VW_SHA256=d607cc00066f7ea62b27a3c198e0259955fd5591adabccb8d3414d1f3d91ecd7
@@ -22,7 +23,8 @@ ARG RCLONE_VERSION=1.75.1
 # or a comma-separated combination.
 ARG DB=postgresql
 
-# Stage 1: fetch + verify release tarballs
+# Stage 1: fetch + verify release tarballs. Tailscale/rclone/web vault are
+# checksum-verified at build against official files (same origin), not pinned.
 FROM ${BUILDER_IMAGE} AS fetch
 # TARGETARCH is BuildKit-predefined; uname fallback for non-BuildKit builders
 ARG TARGETARCH

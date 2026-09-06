@@ -107,17 +107,17 @@
             "depNameTemplate": "pq-sys"
         },
         {
-            "customType": "regex",
-            "description": "Hummingbird base image tag+digest pins",
+            "description": "Hummingbird base image tag pins",
             "fileMatch": [
                 "^Dockerfile$"
             ],
             "matchStrings": [
-                "ARG BUILDER_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/rust):(?<currentValue>\\S+)@(?<currentDigest>sha256:[a-f0-9]+)",
-                "ARG RUNTIME_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/core-runtime):(?<currentValue>\\S+)@(?<currentDigest>sha256:[a-f0-9]+)"
+                "ARG BUILDER_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/rust):(?<currentValue>\\S+)",
+                "ARG RUNTIME_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/core-runtime):(?<currentValue>\\S+)"
             ],
             "datasourceTemplate": "docker",
-            "registryUrlTemplate": "https://registry.access.redhat.com"
+            "registryUrlTemplate": "https://registry.access.redhat.com",
+            "pinDigests": false
         }
     ]
 }
