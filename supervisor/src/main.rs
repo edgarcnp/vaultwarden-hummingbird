@@ -33,22 +33,19 @@ use util::{log, net};
 /// vaultwarden without it), then hand off to [`start_vw`], which blocks for
 /// the container's lifetime.
 fn main() {
-    install_signal_handlers(); // first: no window of unhandled signals as PID 1
+    install_signal_handlers();
     let cfg = Config::from_env();
 
-    // 0. S3 state restore (opt-in): same tailnet node + JWT keys as last run
     if let Some(sync) = &cfg.sync {
         restore_state(sync, stopping);
     }
 
-    // 1. tailscaled (userspace networking: no TUN device on PaaS)
     let Some(tsd) = spawn_tailscaled(&cfg.state, &cfg.socket, cfg.userspace) else {
         log::err("continuing without Tailscale");
         start_vw(&cfg, None)
     };
     log::info("tailscaled started (userspace networking)");
 
-    // 2. wait for the LocalAPI socket
     if !net::wait_daemon(&cfg.socket, config::DAEMON_WAIT, stopping) {
         if take_stop() {
             shutdown(Some(tsd), 0, None);
@@ -57,7 +54,6 @@ fn main() {
         start_vw(&cfg, Some(tsd))
     }
 
-    // 3. authenticate (bounded) + serve (inbound tailnet path)
     if cfg.authkey.is_empty() {
         log::info("TS_AUTHKEY not set - starting without Tailscale");
     } else {
@@ -65,7 +61,7 @@ fn main() {
         if tailscale_up(&cfg.authkey, &cfg.hostname, config::AUTH_TIMEOUT, stopping) {
             log::info("tailscale up: connected");
             if let Some(sync) = &cfg.sync {
-                sync_state(sync, stopping); // persist fresh node state early
+                sync_state(sync, stopping);
             }
             if cfg.serve {
                 let ok = tailscale_serve(&cfg.port, config::SERVE_TIMEOUT, stopping);
@@ -85,7 +81,6 @@ fn main() {
         }
     }
 
-    // 4. vaultwarden in foreground; supervisor blocks until it exits
     start_vw(&cfg, Some(tsd))
 }
 
@@ -108,7 +103,6 @@ fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
             if Some(pid) == tsd {
                 log::err("tailscaled exited unexpectedly; the vault keeps running");
             } else {
-                // Stray orphan (a helper some child left behind).
                 log::info(&format!("reaped stray pid {pid} ({})", exit_reason(raw)));
             }
             continue;
@@ -125,11 +119,8 @@ fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
             };
         }
         if !alive(vw) {
-            // Defensive: exited without a reaped status reaching this loop
-            // (should be impossible — we are the only reaper).
             break 'watch 1;
         }
-        // Periodic state push (identity files change rarely; cadence-bounded).
         if let Some(sync) = &cfg.sync
             && !sync.interval.is_zero()
             && last_sync.elapsed() >= sync.interval
@@ -155,7 +146,7 @@ fn shutdown(tsd: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
             log::err(&format!("tailscaled (pid {t}) did not exit cleanly"));
         }
     }
-    while reap_any().is_some() {} // drain any orphan that outlived its parent
+    while reap_any().is_some() {}
     // Final push AFTER children are gone; must not abort on the stop flag.
     if let Some(sync) = sync {
         sync_state(sync, || false);

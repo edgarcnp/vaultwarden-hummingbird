@@ -19,7 +19,6 @@ use crate::proc::{Pid, spawn};
 pub fn run_vaultwarden(port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
     let mut cmd = Command::new(VAULTWARDEN);
     cmd.env_clear();
-    // vars_os, not vars(): a non-UTF-8 container env must not panic PID 1.
     for (k, v) in env::vars_os() {
         if forwarded(&k) {
             cmd.env(k, v);
@@ -28,7 +27,7 @@ pub fn run_vaultwarden(port: &str, extra_env: &[(String, String)]) -> Option<Pid
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.env("ROCKET_PORT", port) // platform PORT always wins
+    cmd.env("ROCKET_PORT", port)
         .env("ROCKET_ADDRESS", "0.0.0.0")
         .env("DATA_FOLDER", "/data");
     spawn(&mut cmd)

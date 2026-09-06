@@ -1,7 +1,6 @@
 //! Config resolution: process env + optional supervisor-owned dotenv file.
 //!
-//! mod.rs is declarations only — the public surface is re-exports so callers
-//! never change on internal moves.
+//! mod.rs is declarations only; the public surface is re-exports.
 
 mod dotenv;
 mod env;

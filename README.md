@@ -14,6 +14,11 @@ podman build -t vaultwarden-hummingbird:local .        # or docker build
 
 # include the web vault (default is API-only)
 podman build --build-arg WEB_VAULT=true -t vaultwarden-hummingbird:local .
+
+# choose the DB backend(s) compiled into the binary (default: postgresql —
+# this image's posture is an external Postgres). Comma lists work too:
+# --build-arg DB="sqlite,mysql"
+podman build --build-arg DB=postgresql -t vaultwarden-hummingbird:local .
 ```
 
 ## Run

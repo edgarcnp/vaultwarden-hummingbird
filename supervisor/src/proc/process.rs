@@ -122,7 +122,6 @@ pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
     let mut deadline = Instant::now() + grace;
     let mut killed = false;
     loop {
-        // Targeted fast path; also covers "already reaped as a stray" via ECHILD.
         let mut status = 0;
         match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
             p if p == pid => return Gone::Reaped(status),
@@ -196,12 +195,11 @@ pub fn run_bounded_env(
         }
         std::thread::sleep(POLL);
     }
-    // Whole-group kill first (the child may have exited; helpers may live on),
-    // then the direct child, then reap.
+    // Whole-group kill first, then the direct child, then reap.
     let pid = child.id() as i32;
     unsafe { libc::kill(-pid, libc::SIGKILL) };
     let _ = child.kill();
-    let _ = child.wait(); // reap: no zombie
+    let _ = child.wait();
     false
 }
 
@@ -212,9 +210,9 @@ mod tests {
     #[test]
     fn exit_code_decodes_exit_and_signal_statuses() {
         assert_eq!(exit_code(0), 0);
-        assert_eq!(exit_code(3 << 8), 3); // WIFEXITED, code 3
-        assert_eq!(exit_code(15), 143); // WIFSIGNALED, SIGTERM -> 128+15
-        assert_eq!(exit_code((19 << 8) | 0x7f), 1); // WIFSTOPPED: defensive
+        assert_eq!(exit_code(3 << 8), 3);
+        assert_eq!(exit_code(15), 143);
+        assert_eq!(exit_code((19 << 8) | 0x7f), 1);
     }
 
     #[test]
@@ -226,34 +224,24 @@ mod tests {
 
     #[test]
     fn signal_group_refuses_own_namespace() {
-        // pid <= 1 must never reach kill(-1, …) — that would signal every
-        // process in the PID namespace, including us.
         assert!(!signal_group(0, libc::SIGTERM));
         assert!(!signal_group(1, libc::SIGTERM));
         assert!(!signal_group(-5, libc::SIGTERM));
     }
 
-    /// End-to-end over real children: group signal reach, exit decoding, and
-    /// SIGKILL escalation. The suite's only test of a *long-running* child
-    /// process group (the sync tests spawn a CLI that fails fast on a bogus
-    /// binary), so the `reap_any` inside `reap_until_gone` can never steal a
-    /// parallel test's child (see the module-level ownership notes).
     #[test]
     fn child_lifecycle_spawn_signal_reap_escalate() {
-        // TERM to the group reaps a well-behaved child as 128+15.
         let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
         assert!(signal_group(pid, libc::SIGTERM));
         match reap_until_gone(pid, Duration::from_secs(5)) {
             Gone::Reaped(raw) => assert_eq!(exit_code(raw), 143),
             gone => panic!("expected reap after SIGTERM, got {gone:?}"),
         }
-        // A reaped pid is ECHILD on the next targeted wait.
         assert_eq!(
             reap_until_gone(pid, Duration::from_millis(50)),
             Gone::Vanished
         );
 
-        // An unresponsive child is escalated to SIGKILL after the grace (128+9).
         let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
         match reap_until_gone(pid, Duration::from_millis(200)) {
             Gone::Reaped(raw) => assert_eq!(exit_code(raw), 137),

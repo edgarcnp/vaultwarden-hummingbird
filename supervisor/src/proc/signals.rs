@@ -20,8 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle(_: libc::c_int) {
-    // Async-signal-safe: a single relaxed-ish store is all we need; SeqCst
-    // keeps it simple and is uncontended.
     STOP_REQUESTED.store(true, Ordering::SeqCst);
 }
 

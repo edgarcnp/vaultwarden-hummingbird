@@ -1,8 +1,7 @@
 //! Child process management: tailscaled/tailscale, vaultwarden, signals,
 //! S3 state sync.
 //!
-//! mod.rs is declarations only — each child lives in its own module; the
-//! public surface is re-exports so callers never change on internal moves.
+//! mod.rs is declarations only; the public surface is re-exports.
 
 mod process;
 mod signals;

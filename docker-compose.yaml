@@ -1,12 +1,9 @@
-# Universal runner for the vaultwarden-hummingbird image (podman-compose /
-# docker compose). One config file: .env (from .env.example).
-#
-# Default mode = supervisor-owned: .env is mounted read-only and the
-# supervisor distributes it localized (TS_* stays with PID 1; the rest reaches
-# the vaultwarden child; secrets stay out of `docker inspect`).
-# Simpler alternative: comment the mount + SUPERVISOR_ENV_FILE and uncomment
+# Universal runner (podman-compose / docker compose). One config file:
+# .env (from .env.example), mounted read-only and distributed by the
+# supervisor (TS_* stays with PID 1; the rest reaches the vaultwarden child;
+# secrets stay out of `docker inspect`).
+# Alternative: comment the mount + SUPERVISOR_ENV_FILE and uncomment
 # `env_file:` — then all keys land in container env instead (TS_* included).
-#
 # The image is built with WEB_VAULT=false (API-only); flip to true to include
 # the browser vault.
 
@@ -32,15 +29,13 @@ services:
     tmpfs:
       - /tmp
     ports:
-      - "127.0.0.1:8080:8080" # bind localhost; Tailscale/ts.net handles remote access
+      - "127.0.0.1:8080:8080"
     volumes:
-      - ./.env:/config/.env:ro # supervisor-owned config (cp .env.example .env first)
+      - ./.env:/config/.env:ro
       - vw-data:/data
     environment:
       SUPERVISOR_ENV_FILE: /config/.env
-      # env_file: .env # alternative: plain container env (no localization)
-    # no healthcheck: core-runtime ships no shell/curl; use Render's /alive
-    # check on PaaS, or an external probe for self-host
+      # env_file: .env
 
 volumes:
   vw-data:

@@ -144,7 +144,6 @@ not a valid line
             cfg.child.get("SINGLE").map(String::as_str),
             Some("raw # value")
         );
-        // TS_*/SUPERVISOR_* stay with the supervisor, never reach the child
         assert!(!cfg.child.keys().any(|k| k.starts_with("TS_")));
         assert!(!cfg.child.keys().any(|k| k.starts_with("SUPERVISOR_")));
         assert_eq!(
