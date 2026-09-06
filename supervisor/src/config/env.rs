@@ -113,6 +113,13 @@ impl SyncConfig {
         ];
         if !endpoint.is_empty() {
             env.push((format!("RCLONE_CONFIG_{name}_ENDPOINT"), endpoint));
+            // A custom endpoint means a non-AWS S3 flavor; "Other" is
+            // rclone's generic fallback (works for R2/Ceph/Minio) and
+            // silences the per-run "provider not known" NOTICE.
+            env.push((
+                format!("RCLONE_CONFIG_{name}_PROVIDER"),
+                "Other".to_string(),
+            ));
         }
         Self {
             remote,
@@ -473,6 +480,7 @@ mod tests {
                     "RCLONE_CONFIG_R2_ENDPOINT".to_string(),
                     "https://acct.r2.cloudflarestorage.com".to_string()
                 ),
+                ("RCLONE_CONFIG_R2_PROVIDER".to_string(), "Other".to_string()),
             ]
         );
 

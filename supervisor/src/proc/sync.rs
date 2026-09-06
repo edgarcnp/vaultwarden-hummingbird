@@ -1,22 +1,33 @@
 //! rclone-backed S3 state sync (opt-in via SUPERVISOR_S3_*).
 //!
-//! Pulls /data identity files (tailscaled.state, rsa_key*) from the bucket at
-//! boot, pushes them after `up`, on a cadence, and at shutdown — so the same
-//! tailnet node and vaultwarden RSA signing keys survive ephemeral redeploys.
-//! The DB is external; everything else in /data is regenerable. The bucket
-//! holds secrets (node key, JWT signing key): keep it private, and run ONE
-//! container per bucket/path (a state file restored in two containers
+//! Pulls /data identity files (tailscaled.state, rsa_key*, tailscale TLS
+//! certs) from the bucket at boot, pushes them after `up`, on a cadence, and
+//! at shutdown — so the same tailnet node, vaultwarden RSA signing keys, and
+//! ts.net certificates survive ephemeral redeploys (skipping cert re-issuance
+//! keeps distance from Let's Encrypt's 5-duplicates-per-week limit). The DB
+//! is external; everything else in /data is regenerable. The bucket holds
+//! secrets (node key, JWT signing key, cert keys): keep it private, and run
+//! ONE container per bucket/path (a state file restored in two containers
 //! simultaneously means one node identity twice).
 //!
 //! Every failure is non-fatal: the vault runs regardless; worst case is a
-//! fresh node registration (re-auth) or one client re-login.
+//! fresh node registration (re-auth), one client re-login, or one ACME
+//! re-issuance.
 
-use crate::config::{RCLONE, SYNC_TIMEOUT, SyncConfig};
+use crate::config::{SyncConfig, RCLONE, SYNC_TIMEOUT};
 use crate::proc::run_bounded_env;
 use crate::util::log;
 
 /// /data files worth persisting (identity only; the DB lives elsewhere).
-const INCLUDES: [&str; 4] = ["--include", "tailscaled.state", "--include", "rsa_key*"];
+/// `certs/**` covers the ACME account key and the issued ts.net cert+key.
+const INCLUDES: [&str; 6] = [
+    "--include",
+    "tailscaled.state",
+    "--include",
+    "rsa_key*",
+    "--include",
+    "certs/**",
+];
 
 /// rclone argument vector for one copy operation. The backend config comes
 /// from env (RCLONE_CONFIG*), never argv, whose cmdline is world-readable.
