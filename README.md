@@ -62,6 +62,16 @@ Pull at boot, push on a cadence and at shutdown. Failures are non-fatal. Restore
 
 Ephemeral alternative: `TS_STATE_FILE=mem:` + an `ephemeral=true` authkey — fresh registration each boot.
 
+## DB keepalive (idle-suspending database hosts)
+
+Some managed Postgres free tiers suspend or power off an idle database; the next vault request then stalls until it wakes. The supervisor can run a periodic `SELECT 1` against `DATABASE_URL`:
+
+```sh
+SUPERVISOR_DB_KEEPALIVE=300   # seconds between pings; 0 or unset = off
+```
+
+Failures are non-fatal (logged only on state change). Postgres URLs only — the supervisor speaks the postgres wire protocol; sqlite/mysql DBs skip it.
+
 ## Defaults (overridable via any config path)
 
 - `SIGNUPS_ALLOWED=false` — flip to `true` to create your account, then flip back

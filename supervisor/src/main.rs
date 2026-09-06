@@ -101,6 +101,8 @@ fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
     };
 
     let mut last_sync = Instant::now();
+    let mut last_sync_keepalive = Instant::now();
+    let mut db_last_ok = None;
     let code = 'watch: loop {
         if let Some((pid, raw)) = reap_any() {
             if pid == vw {
@@ -133,6 +135,12 @@ fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
         {
             sync_state(sync, stopping);
             last_sync = Instant::now();
+        }
+        if let Some(db) = &cfg.db_keepalive
+            && last_sync_keepalive.elapsed() >= db.interval
+        {
+            proc::db_keepalive_tick(db, &mut db_last_ok);
+            last_sync_keepalive = Instant::now();
         }
         std::thread::sleep(POLL);
     };

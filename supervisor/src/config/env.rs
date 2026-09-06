@@ -25,6 +25,9 @@ pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 /// Default cadence (seconds) for periodic state pushes.
 pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;
+/// Hard timeout for one DB keepalive ping (bounded like every other phase;
+/// a hung DB must never stall the watch loop).
+pub const DB_PING_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Keys owned by the supervisor (localized to PID 1): they configure the
 /// supervisor/tailscale/S3-sync and are filtered out of the vaultwarden
@@ -119,6 +122,60 @@ impl SyncConfig {
     }
 }
 
+/// DB keepalive: issues a trivial query on a cadence so hosts that suspend
+/// an idle database (scale-to-zero / auto-stop) stay awake for the vault.
+/// Opt-in via SUPERVISOR_DB_KEEPALIVE (seconds; unset = off, 0 = off).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DbKeepalive {
+    /// vaultwarden's DATABASE_URL — the ping must reach the same DB the
+    /// vault uses; never logged (carries credentials)
+    pub url: String,
+    /// ping cadence
+    pub interval: Duration,
+}
+
+impl DbKeepalive {
+    /// Resolve from the raw knob value and the child's DATABASE_URL (if
+    /// any). `raw` empty or `0` disables; non-numeric values warn and
+    /// disable; a non-postgres URL (sqlite/mysql) disables silently unless
+    /// the knob was explicitly set, in which case it warns — the supervisor
+    /// only speaks the postgres wire protocol.
+    pub fn from_parts(raw: &str, db_url: Option<String>) -> Option<Self> {
+        let explicit = !raw.is_empty();
+        let interval = match raw.parse::<u64>() {
+            Ok(0) => return None,
+            Ok(secs) => secs,
+            Err(_) => {
+                if explicit {
+                    log::err(&format!(
+                        "config: invalid SUPERVISOR_DB_KEEPALIVE '{}' (want seconds); \
+                         keepalive disabled",
+                        log::sanitize(raw)
+                    ));
+                }
+                return None;
+            }
+        };
+        match db_url.as_deref().map(str::trim) {
+            Some(u) if u.starts_with("postgres://") || u.starts_with("postgresql://") => {
+                Some(Self {
+                    url: u.to_string(),
+                    interval: Duration::from_secs(interval),
+                })
+            }
+            _ => {
+                if explicit {
+                    log::err(
+                        "config: SUPERVISOR_DB_KEEPALIVE set but DATABASE_URL is not a \
+                         postgres URL; keepalive disabled",
+                    );
+                }
+                None
+            }
+        }
+    }
+}
+
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
     /// tailscaled state file (under the writable data volume)
@@ -138,6 +195,8 @@ pub struct Config {
     pub userspace: bool,
     /// S3 state sync (None = disabled)
     pub sync: Option<SyncConfig>,
+    /// DB keepalive ping (None = disabled)
+    pub db_keepalive: Option<DbKeepalive>,
     /// verbatim vaultwarden env names -> values (from the dotenv file, if any)
     pub vw_env: Vec<(String, String)>,
 }
@@ -245,6 +304,19 @@ impl Config {
             serve: flag("TS_SERVE", true),
             userspace: flag("TS_USERSPACE", true),
             sync,
+            // DATABASE_URL is a vaultwarden (child) key: file wins over
+            // process env, matching run_vaultwarden's child precedence —
+            // the ping must reach the same DB the vault uses.
+            // DATABASE_URL is a vaultwarden (child) key: file wins over
+            // process env, matching run_vaultwarden's child precedence —
+            // the ping must reach the same DB the vault uses.
+            db_keepalive: DbKeepalive::from_parts(
+                &knob("SUPERVISOR_DB_KEEPALIVE", ""),
+                file.child
+                    .get("DATABASE_URL")
+                    .cloned()
+                    .or_else(|| non_empty(env::var("DATABASE_URL").ok())),
+            ),
             vw_env: file.child.into_iter().collect(),
         }
     }
@@ -271,6 +343,7 @@ mod tests {
         "SUPERVISOR_S3_SECRET_ACCESS_KEY",
         "SUPERVISOR_S3_ENDPOINT",
         "SUPERVISOR_S3_SYNC_INTERVAL",
+        "SUPERVISOR_DB_KEEPALIVE",
     ];
 
     fn set(key: &str, val: &str) {
@@ -431,5 +504,45 @@ mod tests {
         set("TS_SERVE", "definitely");
         let cfg = Config::from_env();
         assert!(cfg.serve);
+    }
+
+    /// Keepalive resolution: off by default, cadence knob drives it, and it
+    /// only arms when the vault's DB is a postgres URL (the supervisor's
+    /// ping speaks the postgres wire protocol).
+    #[test]
+    fn db_keepalive_resolution() {
+        fn with(raw: &str, db: Option<&str>) -> Option<DbKeepalive> {
+            DbKeepalive::from_parts(raw, db.map(String::from))
+        }
+
+        // unset knob / empty / explicit 0: off regardless of DB
+        assert!(with("", Some("postgres://u:p@h/db")).is_none());
+        assert!(with("0", Some("postgres://u:p@h/db")).is_none());
+        assert!(with("", None).is_none());
+
+        // knob without a DB url: disabled, no phantom keepalive
+        assert!(with("300", None).is_none());
+
+        // non-postgres DB (sqlite/mysql) can't be pinged by the supervisor
+        assert!(with("300", Some("sqlite:///data/db.sqlite3")).is_none());
+        assert!(with("300", Some("mysql://u:p@h/db")).is_none());
+
+        // armed: cadence honored, URL carried verbatim
+        let ka =
+            with("300", Some("postgres://u:p@h:5432/db?sslmode=require")).expect("keepalive armed");
+        assert_eq!(ka.interval, Duration::from_secs(300));
+        assert_eq!(ka.url, "postgres://u:p@h:5432/db?sslmode=require");
+        assert!(with("300", Some("postgresql://u:p@h/db")).is_some());
+
+        // whitespace-padded URL is trimmed
+        assert_eq!(
+            with("300", Some("  postgres://u:p@h/db  "))
+                .expect("armed")
+                .url,
+            "postgres://u:p@h/db"
+        );
+
+        // invalid cadence: disabled (warn logged, non-fatal)
+        assert!(with("soon", Some("postgres://u:p@h/db")).is_none());
     }
 }

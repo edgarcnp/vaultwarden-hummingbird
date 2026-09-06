@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2"
+postgres = { version = "0.19", default-features = false }
+postgres_rustls = "0.1.6"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "custom-provider"] }
+webpki-roots = "1.0.9"
 
 [profile.release]
 opt-level = 3

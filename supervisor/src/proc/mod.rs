@@ -3,15 +3,17 @@
 //!
 //! mod.rs is declarations only; the public surface is re-exports.
 
+mod keepalive;
 mod process;
 mod signals;
 mod sync;
 mod tailscale;
 mod vaultwarden;
 
+pub use keepalive::tick as db_keepalive_tick;
 pub use process::{
-    Gone, POLL, Pid, TERM_GRACE, alive, exit_code, exit_reason, reap_any, reap_until_gone,
-    run_bounded, run_bounded_env, signal_group, spawn,
+    alive, exit_code, exit_reason, reap_any, reap_until_gone, run_bounded, run_bounded_env,
+    signal_group, spawn, Gone, Pid, POLL, TERM_GRACE,
 };
 pub use signals::{install_signal_handlers, stopping, take_stop};
 pub use sync::{restore_state, sync_state};
