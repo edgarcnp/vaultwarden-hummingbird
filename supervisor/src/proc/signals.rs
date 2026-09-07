@@ -26,9 +26,7 @@ use crate::util::log;
 
 static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
-/// The process-global stop flag. Created on first use, so a signal request
-/// observed before [`install_signal_handlers`] runs is simply not delivered
-/// (same as the kernel ignoring an unhandled signal for PID 1).
+/// The process-global stop flag, created on first use.
 fn flag() -> &'static Arc<AtomicBool> {
     STOP.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }

@@ -1,23 +1,20 @@
-//! Liveness probing of vaultwarden's own `/alive` (direct to the loopback
-//! port): the one bounded HTTP roundtrip shared by the gate's per-request
-//! verdict and the one-shot `--healthcheck`, so both exercise byte-identical
-//! requests.
+//! One bounded HTTP roundtrip to vaultwarden's loopback `/alive`: the
+//! status verdict shared byte-identically by the gate's per-request probe
+//! and the one-shot healthcheck. Nothing from the response (body, headers,
+//! timing) beyond the verdict escapes this module.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-/// Hard budget for one vaultwarden liveness probe (connect + status line).
-/// Under the gate's own read timeout so the probe can never be the reason a
-/// health check times out.
+/// Hard budget for one vaultwarden liveness probe (connect + status line),
+/// under the gate's own read timeout so the probe can never be the reason
+/// a health check times out.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One bounded HTTP roundtrip to `/alive` on `addr`: connect, send one
-/// request, read only the status line, report whether it is 2xx. Any
-/// failure — unreachable, hung (`timeout`), non-HTTP, non-2xx — is a plain
-/// `false`; nothing from the response (body, headers, timing details)
-/// beyond the status verdict escapes this function. Shared by the gate's
-/// per-request vault probe and the one-shot healthcheck path.
+/// Connect, send one request, read only the status line, report whether it
+/// is 2xx. Any failure — unreachable, hung, non-HTTP, non-2xx — is a plain
+/// `false`.
 pub fn get_alive(addr: std::net::SocketAddr, timeout: Duration) -> bool {
     let Ok(mut s) = TcpStream::connect_timeout(&addr, timeout) else {
         return false;

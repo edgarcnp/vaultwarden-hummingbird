@@ -1,15 +1,8 @@
-//! Supervisor-owned dotenv file layer (opt-in via SUPERVISOR_ENV_FILE).
-//!
-//! One universal format: the same .env that `--env-file`, compose `env_file:`
-//! and PaaS dashboards consume can be mounted for the supervisor, which
-//! distributes it:
-//!   - `TS_*`/`SUPERVISOR_*` keys -> its own knobs (localized to PID 1;
-//!     never reach the vaultwarden child, never appear in `podman inspect`)
-//!   - everything else            -> forwarded verbatim to the child
-//!
-//! Syntax: KEY=value, `#` comments, optional `export ` or `export<TAB>`
-//! prefix, optional matching single/double quotes around values (quote
-//! values containing `#`). Precedence is resolved in `config::env`.
+//! Supervisor-owned dotenv file (SUPERVISOR_ENV_FILE), split after parse:
+//! `TS_*`/`SUPERVISOR_*` keys -> supervisor knobs (never the child, never
+//! `podman inspect`); everything else -> forwarded verbatim to the
+//! vaultwarden child. Syntax: KEY=value, `#` comments, optional `export `
+//! prefix, optional matching quotes around values.
 
 use std::collections::BTreeMap;
 
@@ -23,12 +16,12 @@ const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
 pub struct FileConfig {
     /// supervisor knobs (TS_*/SUPERVISOR_* keys)
     pub knobs: BTreeMap<String, String>,
-    /// verbatim vaultwarden env names -> values (forwarded to the child)
+    /// verbatim vaultwarden env (forwarded to the child)
     pub child: BTreeMap<String, String>,
 }
 
-/// Parse dotenv syntax (see module docs); invalid lines are logged and
-/// skipped, later duplicates win.
+/// Parse dotenv syntax; invalid lines are logged and skipped, later
+/// duplicates win.
 fn parse(raw: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for (n, line) in raw.lines().enumerate() {

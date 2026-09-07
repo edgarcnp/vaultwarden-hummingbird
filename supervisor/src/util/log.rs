@@ -1,24 +1,23 @@
 //! Minimal stdout/stderr logging, prefixed for container log scraping.
-//!
-//! `panic=abort` is set (PID 1 must die loudly, not limp), so a `println!`
-//! panic on a closed/broken stdout would take the whole container down.
-//! Log writes therefore ignore errors instead of panicking.
+//! Log writes ignore errors instead of panicking: `panic=abort` means a
+//! `println!` panic on a broken stdout would take PID 1 (and the container)
+//! down with it.
 
 use std::io::Write;
 
-/// Log an informational line to stdout. Never panics: a broken stdout
-/// (closed pipe, full disk) drops the line instead of killing PID 1.
+/// Log an informational line to stdout (never panics; a broken stdout drops
+/// the line instead of killing PID 1).
 pub fn info(msg: &str) {
     let _ = writeln!(std::io::stdout().lock(), "[supervisor] {msg}");
 }
 
-/// Log an error line to stderr. Never panics (same rationale as [`info`]).
+/// Log an error line to stderr (never panics, same rationale as [`info`]).
 pub fn err(msg: &str) {
     let _ = writeln!(std::io::stderr().lock(), "[supervisor] {msg}");
 }
 
 /// Escape control characters in untrusted values before logging: a newline
-/// in user input (env var, .env value) must not forge additional log lines.
+/// in user input must not forge additional log lines.
 pub fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

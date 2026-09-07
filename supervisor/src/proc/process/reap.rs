@@ -15,16 +15,12 @@ use super::child::{POLL, Pid, signal_group};
 use crate::util::log;
 
 /// After SIGKILL (uncatchable), wait this long for the reap before giving
-/// up; an uninterruptible (D-state) process is the container runtime's
-/// problem, and must not hang our own exit.
+/// up; a D-state process is the container runtime's problem, not ours.
 const KILL_GRACE: Duration = Duration::from_secs(5);
 
-/// Reap one pending zombie from anywhere in the namespace. `None` means
-/// nothing reapable right now (`StillAlive` = children alive but no zombie
-/// yet, `ECHILD` = no children, `EINTR` = retry on the next tick).
-///
-/// Never call this from tests: the namespace-wide `waitpid` would also reap
-/// the test harness's own children.
+/// Reap one pending zombie from anywhere in the namespace; `None` = nothing
+/// reapable right now. Never call from tests: this would also reap the test
+/// harness's children.
 pub fn reap_any() -> Option<(Pid, WaitStatus)> {
     match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
         Ok(status) => status.pid().map(|p| (p.as_raw(), status)),
@@ -32,9 +28,8 @@ pub fn reap_any() -> Option<(Pid, WaitStatus)> {
     }
 }
 
-/// Container exit code for a wait status: the child's own code, or the
-/// shell convention 128+signal when it died to a signal (a SIGTERM'd
-/// service reports 143 — same as tini / plain Docker behavior).
+/// Container exit code: the child's own code, or 128+signal (a SIGTERM'd
+/// service reports 143 — same as tini / plain Docker).
 pub fn exit_code(status: WaitStatus) -> i32 {
     match status {
         WaitStatus::Exited(_, code) => code,

@@ -8,16 +8,12 @@ use crate::config::{VAULTWARDEN, is_supervisor_key};
 use crate::proc::{Pid, spawn};
 
 /// vaultwarden in the foreground with a *localized* environment: container
-/// env minus supervisor-owned keys (TS_*/SUPERVISOR_*), then dotenv-file vars
-/// (authoritative in file mode — this is what makes image-baked posture
-/// defaults overridable), then hard invariants: ROCKET_PORT (the internal
-/// vault port, public + 1), ROCKET_ADDRESS (loopback-only: the API is
-/// reachable solely via `tailscale serve`, which dials 127.0.0.1 in the same
-/// netns), DATA_FOLDER.
-///
-/// Own process-group leader (see [`spawn`]) so shutdown signals reach the
-/// whole group. Spawn failure returns `None`; the caller tears down what is
-/// already running and exits 1.
+/// env minus supervisor-owned keys, then dotenv-file vars (authoritative —
+/// this makes image-baked posture defaults overridable), then hard
+/// invariants: ROCKET_PORT (internal vault port), ROCKET_ADDRESS
+/// (loopback-only: the API is reachable solely via `tailscale serve`),
+/// DATA_FOLDER. Spawn failure returns `None`; the caller tears down and
+/// exits 1.
 pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
     let mut cmd = Command::new(VAULTWARDEN);
     cmd.env_clear();
@@ -35,11 +31,9 @@ pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Opti
     spawn(&mut cmd)
 }
 
-/// Whether a container-env key is forwarded to the child: everything except
-/// supervisor-owned keys. Non-UTF-8 keys are dropped: a key the supervisor
-/// can't read must never reach the child (a mangled `TS_*` secret would
-/// otherwise leak into its env), and `vars_os` keeps it a non-issue instead
-/// of a panic.
+/// Forward everything except supervisor-owned keys. Non-UTF-8 keys are
+/// dropped: a key the supervisor can't read must never reach the child
+/// (a mangled `TS_*` secret would otherwise leak into its env).
 fn forwarded(key: &OsStr) -> bool {
     key.to_str().is_some_and(|k| !is_supervisor_key(k))
 }
@@ -51,8 +45,7 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     /// Supervisor-owned keys are filtered even when not valid UTF-8; the
-    /// `vars_os` + `OsStr` path must not panic on them (PID 1 has
-    /// panic="abort") and a mangled TS_* secret must not leak into the child.
+    /// `vars_os` path must not panic on them (PID 1 has panic="abort").
     #[test]
     fn non_utf8_supervisor_keys_are_filtered() {
         let weird = OsString::from_vec(vec![0x54, 0x53, 0x5f, 0xff]); // "TS_\xff"

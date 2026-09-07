@@ -1,18 +1,12 @@
-//! PID 1 supervisor: tailscaled (userspace) + tailscale up/serve + vaultwarden,
-//! for shell-less, package-manager-less Red Hat bases (Hummingbird
-//! core-runtime / UBI micro / distroless; glibc version-locked to the base).
-//! Optional dotenv layer (SUPERVISOR_ENV_FILE): the supervisor owns the file
-//! and distributes it localized to each child. Optional S3 state sync
-//! (SUPERVISOR_S3_*): /data identity files survive ephemeral redeploys. The
-//! Tailscale authkey is staged to a 0600 file (never argv) and removed after
-//! `up`.
+//! PID 1 supervisor: tailscaled (userspace) + tailscale up/serve +
+//! loopback-only vaultwarden. Optional dotenv layer (SUPERVISOR_ENV_FILE)
+//! and S3 state sync (SUPERVISOR_S3_*) so /data identity survives ephemeral
+//! redeploys. The authkey is staged to a 0600 file (never argv) and removed
+//! after `up`.
 //!
-//! Shutdown model (see `proc::process` / `proc::signals` / `proc::watch`):
-//! children run in their own process groups; a stop request
-//! (SIGTERM/SIGINT/SIGHUP/SIGQUIT) is observed on the main thread, which
-//! drives a full teardown — TERM to every child group, escalation to KILL
-//! after a grace period, and namespace-wide reaping so no orphan or zombie
-//! outlives the container.
+//! Shutdown model: children run in their own process groups; a stop request
+//! (SIGTERM/SIGINT/SIGHUP/SIGQUIT) is observed by the main thread, which
+//! drives TERM -> KILL escalation and namespace-wide reaping.
 
 mod config;
 mod proc;
@@ -25,21 +19,16 @@ use proc::{
 };
 use util::{log, net};
 
-/// One-shot `--healthcheck` mode (the image's HEALTHCHECK exec-form): probe
-/// the gate chain end-to-end and exit by verdict — 0 iff the gate answers
-/// 2xx. Runs before any boot side effect: no children are spawned and
-/// Tailscale is untouched. Config resolution is a pure env/file read, so
-/// the probe targets exactly the port the running supervisor's gate binds
-/// (`PORT` > `ROCKET_PORT` env > dotenv-file `ROCKET_PORT` > 8080).
+/// One-shot `--healthcheck` mode: exit 0 iff the gate chain answers 2xx.
+/// Runs before any boot side effect; config resolution is a pure read, so
+/// the probe targets exactly the port the running supervisor binds.
 fn healthcheck() -> ! {
     let cfg = Config::from_env();
     std::process::exit(if gate_healthcheck(&cfg.port) { 0 } else { 1 })
 }
 
-/// Boot sequence: arm signals, load config, restore S3 state (opt-in), bring
-/// up Tailscale (best effort — every failure path degrades to running
-/// vaultwarden without it), then hand off to [`start_vw`], which blocks for
-/// the container's lifetime.
+/// Boot: arm signals, load config, restore S3 state, bring up Tailscale
+/// (best effort), then block in [`start_vw`] for the container's lifetime.
 fn main() {
     if std::env::args_os()
         .nth(1)

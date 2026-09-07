@@ -3,16 +3,16 @@
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-/// Authoritative readiness check: can we connect() to the LocalAPI socket?
-/// A CLI probe would false-negative on a fresh, logged-out daemon (exit != 0).
-/// A successful connection is immediately dropped, closing the fd.
+/// Authoritative readiness check: connect() to the LocalAPI socket (the fd
+/// closes on drop). A CLI probe would false-negative on a fresh, logged-out
+/// daemon (exit != 0).
 fn unix_socket_alive(path: &str) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
-/// Poll the LocalAPI socket until tailscaled is listening (or timeout).
-/// `abort` is checked each tick so a stop request never waits out the wait
-/// (the caller distinguishes the two outcomes itself).
+/// Poll the LocalAPI socket until tailscaled is listening, or until
+/// timeout/abort (`abort` is checked each tick so a stop request never
+/// waits out the wait; the caller distinguishes the two outcomes).
 pub fn wait_daemon(socket: &str, timeout: Duration, abort: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     loop {

@@ -1,5 +1,9 @@
 //! The exposure server: bind the public port, answer `/alive` with the
-//! vault's verdict, refuse everything else.
+//! vault's verdict, refuse everything else. std-only (no HTTP crate); the
+//! surface is deliberately two responses wide. Denied requests are not
+//! logged (platform health probes and drive-by scanners would otherwise
+//! dominate the container log). Every path is bounded: read/probe timeouts,
+//! capped request size, `Connection: close`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -9,19 +13,18 @@ use super::probe::{PROBE_TIMEOUT, get_alive};
 
 use crate::util::log;
 
-/// One bounded read buffer for the request head; anything past this is
-/// noise — the decision only needs the first line.
+/// One bounded read buffer for the request head; the decision only needs
+/// the first line.
 const REQ_CAP: usize = 2048;
 /// No request may hold a gatekeeper thread for longer than this.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// Probe result when vaultwarden does not answer 2xx (down, hung, or the
-/// probe failed): health checks must see the vault, not just the container.
+/// Probe result when vaultwarden does not answer 2xx: health checks must
+/// see the vault, not just the container.
 const VAULT_DOWN: (&str, &str) = ("503", "Service Unavailable");
 
-/// Bind the exposed port on `0.0.0.0`. Failure here means the deployment
-/// itself is broken (health checks unreachable), so the caller exits rather
-/// than running a vault nobody can probe. An unparseable port is a bind
-/// error, never a silent ephemeral fallback.
+/// Bind the exposed port on `0.0.0.0`. Failure means the deployment is
+/// broken (health checks unreachable); the caller exits. An unparseable
+/// port is a bind error, never a silent ephemeral fallback.
 pub fn bind(port: &str) -> std::io::Result<TcpListener> {
     let port: u16 = port
         .parse()
@@ -29,11 +32,11 @@ pub fn bind(port: &str) -> std::io::Result<TcpListener> {
     TcpListener::bind(("0.0.0.0", port))
 }
 
-/// Serve the bound listener forever, probing vaultwarden at `vault`
-/// (loopback socket addr) for `/alive`. Detached-thread contract: the
-/// container's lifetime is the listener's lifetime; shutdown closes the
-/// process, not the loop. One thread per connection (probes are rare;
-/// thread lifetime is capped by [`READ_TIMEOUT`]).
+/// Serve the bound listener forever, probing vaultwarden at `vault` for
+/// `/alive`. Detached-thread contract: the container's lifetime is the
+/// listener's lifetime; shutdown closes the process, not the loop. One
+/// thread per connection (probes are rare; thread lifetime capped by
+/// [`READ_TIMEOUT`]).
 pub fn serve(listener: TcpListener, vault: Option<std::net::SocketAddr>) {
     for stream in listener.incoming() {
         match stream {
@@ -51,12 +54,11 @@ pub fn describe(exposed: &str, vault: &str) {
     ));
 }
 
-/// One request, one response, connection closed. Only the first line of the
-/// request head is inspected (`METHOD /path HTTP/x.y`); a malformed,
-/// truncated, or oversized request is just another denied request — the
-/// probe (and thus vaultwarden) is never touched by non-`/alive` traffic. A
-/// read error (timeout, reset) closes the connection without a response —
-/// there is nothing to answer.
+/// One request, one response, connection closed. Only the first request
+/// line is inspected; malformed, truncated, or oversized requests are just
+/// another denied request — the probe (and thus vaultwarden) is never
+/// touched by non-`/alive` traffic. A read error closes the connection
+/// without a response — there is nothing to answer.
 pub(super) fn handle(mut stream: TcpStream, vault: Option<std::net::SocketAddr>) {
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let mut buf = [0u8; REQ_CAP];
@@ -93,11 +95,8 @@ pub(super) fn handle(mut stream: TcpStream, vault: Option<std::net::SocketAddr>)
     );
 }
 
-/// Bounded liveness probe of vaultwarden's own `/alive` (direct to the
-/// loopback port): one [`get_alive`] roundtrip under [`PROBE_TIMEOUT`]. Any
-/// failure — unreachable, hung, non-HTTP, non-2xx — is a plain `false`; the
-/// caller answers `503`. Health checks must see the vault, not just the
-/// container.
+/// Bounded liveness probe of vaultwarden's `/alive`; any failure is a
+/// plain `false` (the caller answers 503).
 fn probe_vault(vault: Option<std::net::SocketAddr>) -> bool {
     vault.is_some_and(|addr| get_alive(addr, PROBE_TIMEOUT))
 }
@@ -115,9 +114,8 @@ fn line_of(bytes: &[u8]) -> String {
 
 /// The request target's path per RFC 7230 §5.3: origin-form `/path?query`
 /// passes through (minus query); absolute-form
-/// `scheme://authority/path?query` (proxied clients) contributes the part
-/// after the authority. Authority-form and asterisk-form never match
-/// `/alive`; anything unparseable denies the request.
+/// `scheme://authority/path?query` contributes the part after the
+/// authority. Authority-form and asterisk-form never match `/alive`.
 fn target_path(target: &str) -> &str {
     let rest = match target.split_once("://") {
         Some((_, r)) => r,

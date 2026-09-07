@@ -67,10 +67,9 @@ pub(super) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
     }
 }
 
-/// S3-backed persistence for `/data` identity files (opt-in): tailscaled's
-/// node state and vaultwarden's RSA keys are synced via rclone to an
-/// S3-compatible bucket, restoring the same tailnet node and JWT-signing
-/// keys across ephemeral redeploys. Single instance per bucket.
+/// S3-backed persistence for /data identity files (opt-in): the same
+/// tailnet node and vaultwarden RSA keys survive ephemeral redeploys.
+/// Single instance per bucket.
 pub struct SyncConfig {
     /// rclone destination `remote:path` (e.g. `r2:vw-state`)
     pub remote: String,
@@ -81,10 +80,9 @@ pub struct SyncConfig {
 }
 
 impl SyncConfig {
-    /// Build from raw knob values; `endpoint` empty means the provider's
-    /// default (e.g. AWS). The rclone child gets backend config via env
-    /// vars — never argv, whose cmdline is world-readable in /proc.
-    /// `RCLONE_CONFIG=/dev/null` disables the config file (env-only remotes).
+    /// Build from raw knob values; empty `endpoint` = provider default.
+    /// Backend config rides env — never argv, which is world-readable
+    /// in /proc. `RCLONE_CONFIG=/dev/null` disables the config file.
     pub fn new(
         remote: String,
         key_id: String,

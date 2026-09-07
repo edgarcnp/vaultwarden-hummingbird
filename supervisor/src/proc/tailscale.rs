@@ -9,12 +9,9 @@ use crate::config::{TAILSCALE, TAILSCALED};
 use crate::proc::{Pid, run_bounded, spawn};
 use crate::util::log;
 
-/// tailscaled with no TUN device when `userspace` (PaaS sandboxes deny
-/// /dev/net/tun); spawned as its own process group (see [`spawn`]).
-/// `--statedir` gives tailscaled its writable var root (TLS cert cache,
-/// Taildrop); without it `tailscale serve` HTTPS fails with
-/// "no TailscaleVarRoot". Derived from the state file's dir, which lives
-/// on the persistent /data volume.
+/// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
+/// /dev/net/tun). `--statedir` (derived from the state file's dir, on the
+/// persistent volume) is required for `tailscale serve` HTTPS cert caching.
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pid> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
@@ -31,11 +28,10 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pi
 }
 
 /// `tailscale up` with hard timeout; failures are non-fatal for the vault.
-/// The authkey is staged into a 0600 file and passed as `--auth-key=file:...`
-/// — never argv, whose cmdline is world-readable in /proc — and removed
-/// afterwards. `socket` is passed as the CLI's `--socket` (tailscaled runs
-/// on a non-default LocalAPI path; the CLI default is
-/// /var/run/tailscale/tailscaled.sock).
+/// The authkey is staged to a 0600 file and passed as `--auth-key=file:`
+/// (never argv — /proc cmdline is world-readable) and removed afterwards.
+/// `socket` is the CLI's `--socket`: tailscaled runs on a non-default
+/// LocalAPI path.
 pub fn tailscale_up(
     authkey: &str,
     hostname: &str,
@@ -65,8 +61,8 @@ pub fn tailscale_up(
     ok
 }
 
-/// Stage the authkey under a unique 0600 file in /tmp. `up` runs once, but
-/// the sequence number keeps paths collision-proof for tests and retries.
+/// Stage the authkey under a unique 0600 file in /tmp; the sequence number
+/// keeps paths collision-proof for tests and retries.
 fn stage_authkey(authkey: &str) -> Option<String> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = format!(
@@ -96,7 +92,8 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// userspace mode has no inbound tailnet path without serve.
+/// `tailscale serve`: inbound tailnet path for the loopback vault
+/// (userspace mode has none without it).
 pub fn tailscale_serve(
     port: &str,
     socket: &str,

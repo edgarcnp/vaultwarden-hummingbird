@@ -1,8 +1,6 @@
-//! Supervisor config resolution: merge the process env, the optional
-//! dotenv-file knobs, and code defaults into a validated [`Config`] (all
-//! lookups done once at boot). The pieces live in sibling modules:
-//! `consts` (static values), `sync` / `keepalive` (feature settings),
-//! `dotenv` (the file layer).
+//! Config resolution: merge process env + optional dotenv file + code
+//! defaults into a validated [`Config`] once at boot. Siblings: `consts`
+//! (static values), `sync`/`keepalive` (feature settings), `dotenv` (file).
 
 use std::env;
 
@@ -11,22 +9,19 @@ use super::keepalive::DbKeepalive;
 use super::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
-/// Keys owned by the supervisor (localized to PID 1): they configure the
-/// supervisor/tailscale/S3-sync and are filtered out of the vaultwarden
-/// child's env.
+/// Supervisor-owned keys (localized to PID 1): filtered out of the
+/// vaultwarden child's env.
 pub fn is_supervisor_key(key: &str) -> bool {
     key.starts_with("TS_") || key.starts_with("SUPERVISOR_")
 }
 
-/// `Some(v)` only for non-empty values: empty env/file entries are treated
-/// as unset everywhere (an empty port or remote is never valid).
+/// `Some(v)` only for non-empty: empty entries are treated as unset.
 fn non_empty(v: Option<String>) -> Option<String> {
     v.filter(|v| !v.is_empty())
 }
 
-/// `Some(v)` only for a valid TCP port: 1-65535, digits only. A non-numeric
-/// or out-of-range value logs a warning and falls back to the default
-/// instead of breaking `tailscale serve` or the vaultwarden listener.
+/// `Some(v)` only for a valid 1-65535 port; invalid values warn and fall
+/// back to the default instead of breaking listeners.
 fn valid_port(v: Option<String>) -> Option<String> {
     let v = non_empty(v)?;
     match v.parse::<u16>() {
@@ -41,9 +36,7 @@ fn valid_port(v: Option<String>) -> Option<String> {
     }
 }
 
-/// Lenient boolean parse for the TS_* on/off knobs: the common spellings in
-/// any casing. Anything else (including empty — handled as unset by the
-/// caller) is `None`; callers warn and fall back to the default.
+/// Lenient on/off knob parse; `None` = callers warn and use their default.
 fn parse_bool(v: &str) -> Option<bool> {
     match v.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
@@ -56,22 +49,18 @@ fn parse_bool(v: &str) -> Option<bool> {
 pub struct Config {
     /// tailscaled state file (under the writable data volume)
     pub state: String,
-    /// LocalAPI unix socket (must live on a writable, non-volume path)
+    /// LocalAPI unix socket (writable, non-volume path)
     pub socket: String,
-    /// exposed (gatekeeper) listen port: PORT wins, then ROCKET_PORT, else
-    /// 8080 (non-root cannot bind 80)
+    /// exposed (gatekeeper) port: PORT > ROCKET_PORT > 8080
     pub port: String,
-    /// vaultwarden's own port, derived as `port + 1` and bound loopback-only
-    /// (only `tailscale serve` and the gatekeeper's proxy-free design touch
-    /// it). None = the exposed port leaves no room (65535): boot must fail
-    /// closed — the caller refuses to run rather than co-binding or exposing
-    /// vaultwarden directly.
+    /// vaultwarden's port (`port + 1`, loopback-only). None = exposed port
+    /// is 65535: boot must fail closed.
     pub vault_port: Option<String>,
     /// node name announced to the tailnet (`TS_HOSTNAME`)
     pub hostname: String,
     /// Tailscale auth key or OAuth client secret (`TS_AUTHKEY`; empty = skip `up`)
     pub authkey: String,
-    /// configure `tailscale serve` after a successful up (inbound tailnet path)
+    /// configure `tailscale serve` after a successful up
     pub serve: bool,
     /// userspace networking: no TUN device on PaaS platforms
     pub userspace: bool,
@@ -79,26 +68,20 @@ pub struct Config {
     pub sync: Option<SyncConfig>,
     /// DB keepalive ping (None = disabled)
     pub db_keepalive: Option<DbKeepalive>,
-    /// verbatim vaultwarden env names -> values (from the dotenv file, if any)
+    /// verbatim vaultwarden env (from the dotenv file, if any)
     pub vw_env: Vec<(String, String)>,
 }
 
 impl Config {
-    /// Merge order:
-    ///   supervisor knobs (TS_*/SUPERVISOR_*): process env > file > code defaults
-    ///   port: PORT env > ROCKET_PORT env > file ROCKET_PORT > 8080
-    ///   vault_port: port + 1 (internal, loopback-only)
-    ///   vaultwarden keys: file > container env (applied in proc::run_vaultwarden)
-    /// Empty values (env or file) are treated as unset. Boolean knobs
-    /// (TS_SERVE/TS_USERSPACE) accept true/false/1/0/yes/no/on/off in any
-    /// casing; other values warn and take the default.
+    /// Merge order: knobs = env > file > default; port = PORT > ROCKET_PORT
+    /// (env) > file ROCKET_PORT > 8080; vaultwarden keys = file > env.
+    /// Empty = unset; bad booleans warn and take the default.
     pub fn from_env() -> Self {
         Self::build(FileConfig::load(), |k| env::var(k).ok())
     }
 
-    /// [`from_env`] with the env source injected. Tests pass a map instead
-    /// of the process env: `std::env::set_var` is unsafe (and racy against
-    /// any thread reading the env concurrently), so tests never mutate it.
+    /// [`Self::from_env`] with the env source injected: tests pass a map,
+    /// never mutating the process env (unsafe and racy).
     fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Self {
         let port = valid_port(lookup("PORT"))
             .or_else(|| valid_port(lookup("ROCKET_PORT")))
@@ -118,8 +101,6 @@ impl Config {
 
         let sync = resolve_sync(&knob);
 
-        // Lenient bool knobs: misspellings warn and take the default rather
-        // than silently flipping the feature off.
         let flag = |key: &str, default: bool| -> bool {
             match knob(key, "") {
                 v if v.is_empty() => default,
@@ -137,7 +118,7 @@ impl Config {
         };
 
         Self {
-            // Hard-pinned to the /data volume (the sync scope is /data too).
+            // hard-pinned to the volume; the sync scope is /data too
             state: knob("TS_STATE_FILE", "/data/tailscaled.state"),
             socket: knob("TS_SOCKET", "/tmp/tailscaled.sock"),
             port,
@@ -147,9 +128,8 @@ impl Config {
             serve: flag("TS_SERVE", true),
             userspace: flag("TS_USERSPACE", true),
             sync,
-            // DATABASE_URL is a vaultwarden (child) key: file wins over
-            // process env, matching run_vaultwarden's child precedence —
-            // the ping must reach the same DB the vault uses.
+            // child key: file wins over env — the ping must reach the same
+            // DB the vault uses
             db_keepalive: DbKeepalive::from_parts(
                 &knob("SUPERVISOR_DB_KEEPALIVE", ""),
                 file.child
@@ -169,10 +149,8 @@ mod tests {
 
     use super::*;
 
-    /// Config from an explicit variable map + optional dotenv file layer.
-    /// Tests never touch the process env: `std::env::set_var` is unsafe
-    /// (and racy against any concurrent env reader), so merge-order
-    /// coverage goes through [`Config::build`] with an injected lookup.
+    /// Config from an explicit variable map + optional dotenv file layer
+    /// (never the process env — see [`Config::build`]).
     fn mk(vars: &[(&str, &str)]) -> Config {
         mk_with_file(vars, FileConfig::default())
     }
@@ -235,8 +213,7 @@ mod tests {
         let cfg = mk(&[("PORT", ""), ("ROCKET_PORT", "")]);
         assert_eq!(cfg.port, "8080");
 
-        // 65535 leaves no room above the exposed port: the derivation yields
-        // None, which the caller must treat as refuse-to-start (fail closed).
+        // 65535 leaves no room above the exposed port: fail closed.
         let cfg = mk(&[("PORT", "65535")]);
         assert_eq!(cfg.port, "65535");
         assert_eq!(cfg.vault_port, None);
@@ -279,13 +256,11 @@ mod tests {
 
     #[test]
     fn lenient_bool_knobs() {
-        // Common spellings in any casing parse.
         let cfg = mk(&[("TS_SERVE", "YES"), ("TS_USERSPACE", "0")]);
         assert!(cfg.serve);
         assert!(!cfg.userspace);
 
-        // A misspelling warns and takes the default instead of silently
-        // disabling the feature.
+        // misspelling warns and takes the default
         let cfg = mk(&[("TS_SERVE", "definitely")]);
         assert!(cfg.serve);
     }

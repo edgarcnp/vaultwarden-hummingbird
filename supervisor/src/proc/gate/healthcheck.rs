@@ -1,7 +1,7 @@
-//! One-shot `--healthcheck` mode (the image's HEALTHCHECK exec-form): probe
-//! the full chain end-to-end — the gatekeeper on `exposed` (loopback), which
-//! itself probes vaultwarden's loopback `/alive` — and report the verdict a
-//! platform health probe would get.
+//! One-shot `--healthcheck` mode (the image's HEALTHCHECK exec-form):
+//! probe the full chain end-to-end — this binary's gatekeeper on `exposed`
+//! (loopback), which itself probes vaultwarden's loopback `/alive` — and
+//! report the verdict a platform health probe would get.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -11,21 +11,14 @@ use super::probe::{PROBE_TIMEOUT, get_alive};
 use crate::proc::POLL;
 use crate::util::log;
 
-/// Hard overall deadline for the one-shot `--healthcheck` probe: a boot-time
-/// gate that is not yet bound is retried until this expires. A probe can
-/// start just before the deadline and still run [`PROBE_TIMEOUT`], so the
-/// worst case is budget + probe; 6 + 2 = 8s stays well under the image's
-/// HEALTHCHECK timeout (10s) — the probe can never be the reason a health
-/// check times out.
+/// Hard overall deadline: a boot-time gate that is not yet bound is retried
+/// until this expires. Worst case is budget + probe; 6 + 2 = 8s stays under
+/// the image's 10s HEALTHCHECK timeout — the probe can never be the reason
+/// a health check times out.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(6);
 
-/// One-shot `--healthcheck` mode: probe the full chain end-to-end and
-/// report the verdict a platform health probe would get. While the gate is
-/// not yet bound (early boot) or reports the vault still starting, retry
-/// until [`HEALTHCHECK_TIMEOUT`]; a timeout is `false`, never a hang, and
-/// the runtime stays well under the image's 10s HEALTHCHECK timeout. Must
-/// be called before any boot side effect: spawns no children, touches no
-/// Tailscale state. An unparseable port is a failed check, never a panic.
+/// Must be called before any boot side effect: spawns no children, touches
+/// no Tailscale state. An unparseable port is a failed check, never a panic.
 pub fn healthcheck(exposed: &str) -> bool {
     let port = match exposed.parse::<u16>() {
         // 0 is never a real listener (boot-time `valid_port` rejects it too).
@@ -42,10 +35,9 @@ pub fn healthcheck(exposed: &str) -> bool {
     healthcheck_until(addr, HEALTHCHECK_TIMEOUT)
 }
 
-/// The healthcheck retry loop with an explicit budget (tests shrink it to
-/// keep the suite fast). Termination is by construction: each iteration
-/// checks the deadline, and the probe itself is bounded by
-/// [`PROBE_TIMEOUT`].
+/// The retry loop with an explicit budget (tests shrink it to keep the
+/// suite fast). Termination is by construction: each iteration checks the
+/// deadline, and the probe itself is bounded by [`PROBE_TIMEOUT`].
 fn healthcheck_until(addr: SocketAddr, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {

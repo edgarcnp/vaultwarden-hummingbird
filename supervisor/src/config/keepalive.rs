@@ -19,11 +19,9 @@ pub struct DbKeepalive {
 }
 
 impl DbKeepalive {
-    /// Resolve from the raw knob value and the child's DATABASE_URL (if
-    /// any). `raw` empty or `0` disables; non-numeric values warn and
-    /// disable; a non-postgres URL (sqlite/mysql) disables silently unless
-    /// the knob was explicitly set, in which case it warns — the supervisor
-    /// only speaks the postgres wire protocol.
+    /// Empty/0 = off; non-numeric warns and disables; a non-postgres URL
+    /// disables (warns only when the knob was explicitly set) — the
+    /// supervisor speaks only the postgres wire protocol.
     pub fn from_parts(raw: &str, db_url: Option<String>) -> Option<Self> {
         let explicit = !raw.is_empty();
         let interval = match raw.parse::<u64>() {

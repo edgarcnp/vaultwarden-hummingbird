@@ -1,16 +1,11 @@
-//! DB keepalive ping (opt-in via SUPERVISOR_DB_KEEPALIVE, seconds).
-//!
-//! Some managed Postgres providers suspend or power off an idle database;
-//! a suspended DB delays vaultwarden's first query after the suspension.
-//! On the configured cadence this opens a fresh connection and runs
-//! `SELECT 1` so the provider sees steady client activity. Failures are
-//! non-fatal: the vault runs regardless.
+//! DB keepalive ping (opt-in via SUPERVISOR_DB_KEEPALIVE, seconds): a
+//! trivial query on a cadence so hosts that suspend an idle database
+//! (scale-to-zero) stay awake for the vault. Failures are non-fatal.
 //!
 //! TLS uses rustls with bundled webpki roots (no system CA dependency),
-//! relaxing certificate verification to libpq's `sslmode=require` semantics:
-//! the connection must be TLS-encrypted, but a server-presented cert that
-//! doesn't chain to a public root (typical for managed providers) is
-//! accepted — matching what vaultwarden itself negotiates.
+//! relaxed to libpq's `sslmode=require`: encryption mandatory, cert
+//! chaining not verified (typical for managed providers, matching what
+//! vaultwarden itself negotiates with the same DATABASE_URL).
 
 use std::sync::Arc;
 
@@ -20,10 +15,9 @@ use rustls::client::danger::ServerCertVerifier;
 use crate::config::{DB_PING_TIMEOUT, DbKeepalive};
 use crate::util::log;
 
-/// One keepalive cycle: fresh connection + `SELECT 1`. Runs inline in the
-/// watch loop, bounded by [`DB_PING_TIMEOUT`]. Steady success stays silent
-/// (a short cadence would otherwise spam the logs); every failure and every
-/// recovery is logged on state change.
+/// One keepalive cycle: fresh connection + `SELECT 1`, bounded by
+/// [`DB_PING_TIMEOUT`]. Steady success stays silent (a short cadence would
+/// otherwise spam the logs); failures and recoveries log on state change.
 pub fn tick(cfg: &DbKeepalive, last_ok: &mut Option<bool>) {
     let ok = ping(&cfg.url);
     if *last_ok != Some(ok) {
@@ -44,8 +38,7 @@ fn ping(url: &str) -> bool {
     pg.connect_timeout(DB_PING_TIMEOUT);
     let connect = match pg.get_ssl_mode() {
         postgres::config::SslMode::Disable => pg.connect(postgres::NoTls),
-        // sslmode=require/verify-* all ride the TLS connector; verification
-        // strictness lives inside [`tls`]
+        // require/verify-* all ride the TLS connector; strictness lives in tls()
         _ => pg.connect(tls()),
     };
     let Ok(mut client) = connect else {
@@ -54,10 +47,9 @@ fn ping(url: &str) -> bool {
     client.simple_query("SELECT 1").is_ok()
 }
 
-/// TLS connector with encryption and no root-of-trust check — libpq's
-/// `sslmode=require` semantics. Managed providers commonly present a
-/// private CA, and vaultwarden (same DATABASE_URL) connects the same way;
-/// the ping only needs the provider to register the client activity.
+/// TLS connector: encryption, no root-of-trust check (libpq's
+/// `sslmode=require`). The ping only needs the provider to register
+/// client activity.
 fn tls() -> postgres_rustls::MakeTlsConnector {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -136,10 +128,8 @@ mod tests {
         assert!(!ping("not-a-url"));
     }
 
-    /// State-change logging: the first tick from a failed state logs, a
-    /// repeat failure at the same state must not re-log. We can't observe
-    /// logs here, so exercise the transition logic indirectly: tick must
-    /// not panic on consecutive failures and must update the state.
+    /// State-change logging exercised indirectly: tick must not panic on
+    /// consecutive failures and must update the state.
     #[test]
     fn tick_tracks_state_across_failures() {
         let cfg = DbKeepalive {

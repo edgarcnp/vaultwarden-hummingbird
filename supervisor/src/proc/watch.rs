@@ -1,6 +1,6 @@
-//! The vault watch loop and the container teardown: the single reaper of
-//! the PID namespace, periodic state sync, DB keepalive ticks, and the
-//! ordered shutdown that brings every child down before exiting.
+//! The vault watch loop and container teardown: the single reaper of the
+//! PID namespace, periodic state sync, DB keepalive ticks, and the ordered
+//! shutdown that brings every child down before exiting.
 
 use std::process::exit;
 use std::time::Instant;
@@ -17,13 +17,11 @@ use crate::util::log;
 
 /// Hand off to vaultwarden and supervise it: bind the exposed-port
 /// gatekeeper (the only `0.0.0.0` listener), start the loopback-only vault,
-/// then the watch loop — the single reaper of the PID namespace (orphans
-/// re-parent to us as PID 1), observes vaultwarden's exit or a stop request,
-/// drives periodic state sync, then tears down tailscaled and exits with
+/// then watch — observing vaultwarden's exit or a stop request, driving
+/// periodic sync, then tearing down tailscaled and exiting with
 /// vaultwarden's code.
 pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
-    // Fail closed on a missing internal port: without it there is no secure
-    // way to run the vault (co-binding would expose it, refusing is honest).
+    // fail closed on a missing internal port: co-binding would expose the vault
     let Some(vault_port) = &cfg.vault_port else {
         log::err("no room for the internal vault port above the exposed port; refusing to start");
         shutdown(tsd, 1, None)
@@ -39,9 +37,6 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
         }
     };
     gate_describe(&cfg.port, vault_port);
-    // The probe target: vaultwarden's loopback listener. A port that failed
-    // to parse would mean a broken config — fail closed like every other
-    // invalid-port path.
     let Ok(vault_addr) = vault_port
         .parse::<u16>()
         .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
@@ -106,10 +101,10 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
     shutdown(tsd, code, cfg.sync.as_ref())
 }
 
-/// Bring every child down and exit the container. TERM each child group,
-/// escalate to KILL after `TERM_GRACE`, drain strays, make a final (best
-/// effort) state push, then exit with `code`. Safe for children that are
-/// already dead (group kill + reap are no-ops).
+/// Bring every child down and exit the container: TERM each child group,
+/// escalate to KILL after `TERM_GRACE`, drain strays, make a final
+/// best-effort state push, then exit with `code`. Safe for children that
+/// are already dead (group kill + reap are no-ops).
 pub fn shutdown(tsd: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
     log::info("shutting down");
     if let Some(t) = tsd {
@@ -119,7 +114,7 @@ pub fn shutdown(tsd: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
         }
     }
     while reap_any().is_some() {}
-    // Final push AFTER children are gone; must not abort on the stop flag.
+    // final push AFTER children are gone; must not abort on the stop flag
     if let Some(sync) = sync {
         sync_state(sync, || false);
     }
