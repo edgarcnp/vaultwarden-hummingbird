@@ -95,15 +95,27 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
 /// `tailscale serve`: inbound tailnet path for the loopback vault
 /// (userspace mode has none without it). With `service` set (`TS_SERVICE`),
 /// the node advertises itself as a host of `svc:<name>` — the Service-host
-/// form; the CLI implies `--bg`, requires a tagged node and admin-console
-/// Service definition, and shows up as pending approval in the console.
+/// form. An advertisement registered before the service existed in the
+/// admin console can wedge the host registration console-side ("no Service
+/// hosts" forever), so any stale `svc:<name>` config is cleared first; a
+/// fresh advertise then re-registers cleanly. The CLI implies `--bg`,
+/// requires a tagged node and admin-console Service definition (plus
+/// approval, or an `autoApprovers.services` policy).
 pub fn tailscale_serve(
     port: &str,
     service: Option<&str>,
     socket: &str,
     timeout: Duration,
-    abort: impl Fn() -> bool,
+    abort: &impl Fn() -> bool,
 ) -> bool {
+    if let Some(svc) = service {
+        let _ = run_bounded(
+            timeout,
+            TAILSCALE,
+            &["--socket", socket, "serve", "clear", svc],
+            abort,
+        );
+    }
     let target = format!("http://127.0.0.1:{port}");
     let svc_arg = service.map(|svc| format!("--service={svc}"));
     let mut args: Vec<&str> = vec!["--socket", socket, "serve"];

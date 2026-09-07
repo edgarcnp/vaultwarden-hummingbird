@@ -83,7 +83,7 @@ fn main() {
                     cfg.service.as_deref(),
                     &cfg.socket,
                     config::SERVE_TIMEOUT,
-                    stopping,
+                    &stopping,
                 );
                 let msg = if ok {
                     match &cfg.service {
