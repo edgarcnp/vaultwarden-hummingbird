@@ -18,9 +18,10 @@ ARG CMAKE_VERSION=4.3.0
 ARG CMAKE_SHA256_X86_64=201bdabe17a54e017f119cffa247648e9c44327e52473c2cc60a88fded94652a
 ARG CMAKE_SHA256_AARCH64=26fe3011f497eb9398115dcabcc094685e634b1841f7c01dc01c5a89b8b0ea0d
 ARG RCLONE_VERSION=1.75.1
-# DB backends compiled into vaultwarden: postgresql (default), sqlite, mysql,
-# or a comma-separated combination.
-ARG DB=postgresql
+# DB backends compiled into vaultwarden: postgresql, sqlite, mysql, or a
+# comma-separated combination. Default: all three, so a bare build matches
+# upstream's feature set.
+ARG DB=postgresql,sqlite,mysql
 
 # Stage 1: fetch + verify release tarballs. Tailscale/rclone/web vault are
 # checksum-verified at build against official files (same origin), not pinned.

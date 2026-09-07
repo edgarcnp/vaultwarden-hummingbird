@@ -8,8 +8,8 @@ Hardened container image: [Vaultwarden](https://github.com/dani-garcia/vaultward
 podman build -t vaultwarden-hummingbird:local .   # picks up Containerfile
 
 # options (build args; via compose, set WEB_VAULT in .env instead)
-WEB_VAULT=true         # web vault on by default; false = API-only
-DB=postgresql          # postgresql | sqlite | mysql, comma list ok
+WEB_VAULT=true                          # web vault on by default; false = API-only
+DB=postgresql,sqlite,mysql              # all on by default; subset via comma list
 ```
 
 ## Run
