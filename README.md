@@ -7,8 +7,8 @@ Hardened container image: [Vaultwarden](https://github.com/dani-garcia/vaultward
 ```sh
 podman build -t vaultwarden-hummingbird:local .   # picks up Containerfile
 
-# options (build args)
-WEB_VAULT=true         # include web vault (default: API-only)
+# options (build args; via compose, set WEB_VAULT in .env instead)
+WEB_VAULT=true         # web vault on by default; false = API-only
 DB=postgresql          # postgresql | sqlite | mysql, comma list ok
 ```
 
@@ -39,7 +39,7 @@ reachable solely via `tailscale serve` over the tailnet.
 
 ## Configuration
 
-One file: `.env` (from `.env.example`). Keys are plain vaultwarden env names — full list in vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template).
+One file: `.env` (from `.env.example`). Keys are plain vaultwarden env names — full list in vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template). Build args come from the same file: compose interpolates `WEB_VAULT` for the image build (rebuild required).
 
 Supply it via the compose default (mount + `SUPERVISOR_ENV_FILE`), container env (`--env-file`), or a PaaS dashboard. In supervisor mode, `TS_*`/`SUPERVISOR_*` keys stay with PID 1 — never in `docker inspect`.
 
@@ -80,7 +80,7 @@ Failures are non-fatal (logged only on state change). Postgres URLs only — the
 
 - `SIGNUPS_ALLOWED=false` — flip to `true` to create your account, then flip back
 - No orgs, no attachments; Sends allowed (`SENDS_ALLOWED=false` to disable)
-- Web vault off by default — official Bitwarden apps talk to the API directly
+- Web vault on by default (`WEB_VAULT=false` for API-only; UI files are baked at build)
 - Admin panel disabled (no `ADMIN_TOKEN`)
 - Optional mobile push: `PUSH_ENABLED=true` + `PUSH_INSTALLATION_ID`/`PUSH_INSTALLATION_KEY` (free from https://bitwarden.com/host)
 

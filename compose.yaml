@@ -1,13 +1,14 @@
 # One config file (.env, from .env.example), mounted read-only; the
 # supervisor distributes it: TS_*/SUPERVISOR_* stay with PID 1, the rest
-# reaches vaultwarden. Alternative: env_file: .env (all keys in container env).
+# reaches vaultwarden. Build args interpolate from .env too (WEB_VAULT).
+# Alternative: env_file: .env (all keys in container env).
 services:
   vaultwarden:
     build:
       context: .
       dockerfile: Containerfile
       args:
-        WEB_VAULT: "false"
+        WEB_VAULT: "${WEB_VAULT:-true}"
     image: vaultwarden-hummingbird:local
     restart: unless-stopped
     stop_grace_period: 90s   # TERM_GRACE + final S3 state push
@@ -27,8 +28,6 @@ services:
       - vw-data:/data
     environment:
       SUPERVISOR_ENV_FILE: /config/.env
-      # opt-out of vaultwarden's volatile-storage check (any value disables it)
-      I_REALLY_WANT_VOLATILE_STORAGE: "false"
       # env_file: .env
 
 volumes:

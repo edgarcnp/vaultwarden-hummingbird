@@ -1,5 +1,6 @@
 # Vaultwarden + Tailscale on Red Hat Hummingbird. Checksum-pinned official
-# sources, Rust supervisor as PID 1, web vault optional (WEB_VAULT=true).
+# sources, Rust supervisor as PID 1, web vault on by default (WEB_VAULT=false
+# for API-only).
 
 # Base images float on their tags: rebuilds pick up upstream CVE patches.
 ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder
@@ -10,7 +11,7 @@ ARG VW_SHA256=d607cc00066f7ea62b27a3c198e0259955fd5591adabccb8d3414d1f3d91ecd7
 # NOTE: Renovate has no manager for the digests; its PRs fail the build
 # until they are updated by hand.
 ARG WEB_VAULT_VERSION=v2026.7.0
-ARG WEB_VAULT=false
+ARG WEB_VAULT=true
 ARG TAILSCALE_VERSION=1.102.3
 ARG CMAKE_VERSION=4.3.0
 # per-arch sha256; bump with CMAKE_VERSION
