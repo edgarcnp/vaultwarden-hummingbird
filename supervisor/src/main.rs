@@ -20,16 +20,34 @@ mod util;
 
 use config::Config;
 use proc::{
-    install_signal_handlers, restore_state, shutdown, spawn_tailscaled, start_vw, stopping,
-    sync_state, tailscale_serve, tailscale_up, take_stop,
+    gate_healthcheck, install_signal_handlers, restore_state, shutdown, spawn_tailscaled, start_vw,
+    stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
 };
 use util::{log, net};
+
+/// One-shot `--healthcheck` mode (the image's HEALTHCHECK exec-form): probe
+/// the gate chain end-to-end and exit by verdict — 0 iff the gate answers
+/// 2xx. Runs before any boot side effect: no children are spawned and
+/// Tailscale is untouched. Config resolution is a pure env/file read, so
+/// the probe targets exactly the port the running supervisor's gate binds
+/// (`PORT` > `ROCKET_PORT` env > dotenv-file `ROCKET_PORT` > 8080).
+fn healthcheck() -> ! {
+    let cfg = Config::from_env();
+    std::process::exit(if gate_healthcheck(&cfg.port) { 0 } else { 1 })
+}
 
 /// Boot sequence: arm signals, load config, restore S3 state (opt-in), bring
 /// up Tailscale (best effort — every failure path degrades to running
 /// vaultwarden without it), then hand off to [`start_vw`], which blocks for
 /// the container's lifetime.
 fn main() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg.as_os_str() == std::ffi::OsStr::new("--healthcheck"))
+    {
+        healthcheck();
+    }
+
     install_signal_handlers();
     let cfg = Config::from_env();
 

@@ -12,7 +12,10 @@ mod tailscale;
 mod vaultwarden;
 mod watch;
 
-pub use gate::{bind as gate_bind, describe as gate_describe, serve as gate_serve};
+pub use gate::{
+    bind as gate_bind, describe as gate_describe, healthcheck as gate_healthcheck,
+    serve as gate_serve,
+};
 
 pub use keepalive::tick as db_keepalive_tick;
 pub use process::{

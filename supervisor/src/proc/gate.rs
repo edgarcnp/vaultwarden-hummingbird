@@ -16,7 +16,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::util::log;
 
@@ -29,6 +29,13 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Under the gate's own [`READ_TIMEOUT`] so the probe can never be the
 /// reason a health check times out.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Hard overall deadline for the one-shot `--healthcheck` probe: a boot-time
+/// gate that is not yet bound is retried until this expires. A probe can
+/// start just before the deadline and still run [`PROBE_TIMEOUT`], so the
+/// worst case is budget + probe; 6 + 2 = 8s stays well under the image's
+/// HEALTHCHECK timeout (10s) — the probe can never be the reason a health
+/// check times out.
+const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(6);
 /// Probe result when vaultwarden does not answer 2xx (down, hung, or the
 /// probe failed): health checks must see the vault, not just the container.
 const VAULT_DOWN: (&str, &str) = ("503", "Service Unavailable");
@@ -108,20 +115,28 @@ fn handle(mut stream: TcpStream, vault: Option<std::net::SocketAddr>) {
     );
 }
 
-/// Bounded liveness probe of vaultwarden's own `/alive`: connect, send one
-/// request, read only the status line. Any failure — unreachable, hung
-/// ([`PROBE_TIMEOUT`]), non-HTTP, non-2xx — is a plain `false`; the caller
-/// answers `503`. Nothing from the vault's response (body, headers, timing
-/// details) beyond the status verdict reaches the gate's answer.
+/// Bounded liveness probe of vaultwarden's own `/alive` (direct to the
+/// loopback port): one [`get_alive`] roundtrip under [`PROBE_TIMEOUT`]. Any
+/// failure — unreachable, hung, non-HTTP, non-2xx — is a plain `false`; the
+/// caller answers `503`. Health checks must see the vault, not just the
+/// container.
 fn probe_vault(vault: Option<std::net::SocketAddr>) -> bool {
-    let Some(addr) = vault else {
+    vault.is_some_and(|addr| get_alive(addr, PROBE_TIMEOUT))
+}
+
+/// One bounded HTTP roundtrip to `/alive` on `addr`: connect, send one
+/// request, read only the status line, report whether it is 2xx. Any
+/// failure — unreachable, hung (`timeout`), non-HTTP, non-2xx — is a plain
+/// `false`; nothing from the response (body, headers, timing details)
+/// beyond the status verdict escapes this function. Shared by the gate's
+/// per-request vault probe and the one-shot [`healthcheck`] path, so both
+/// exercise byte-identical requests.
+fn get_alive(addr: std::net::SocketAddr, timeout: Duration) -> bool {
+    let Ok(mut s) = TcpStream::connect_timeout(&addr, timeout) else {
         return false;
     };
-    let Ok(mut s) = TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) else {
-        return false;
-    };
-    let _ = s.set_read_timeout(Some(PROBE_TIMEOUT));
-    let _ = s.set_write_timeout(Some(PROBE_TIMEOUT));
+    let _ = s.set_read_timeout(Some(timeout));
+    let _ = s.set_write_timeout(Some(timeout));
     if s.write_all(b"GET /alive HTTP/1.1\r\nHost: vault\r\nConnection: close\r\n\r\n")
         .is_err()
     {
@@ -147,6 +162,48 @@ fn probe_vault(vault: Option<std::net::SocketAddr>) -> bool {
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse::<u16>().ok())
         .is_some_and(|c| (200..300).contains(&c))
+}
+
+/// One-shot `--healthcheck` mode (the image's HEALTHCHECK exec-form): probe
+/// the full chain end-to-end — this binary's gatekeeper on `exposed`
+/// (loopback), which itself probes vaultwarden's loopback `/alive` — and
+/// report the verdict a platform health probe would get. While the gate is
+/// not yet bound (early boot) or reports the vault still starting, retry
+/// until [`HEALTHCHECK_TIMEOUT`]; a timeout is `false`, never a hang, and
+/// the runtime stays well under the image's 10s HEALTHCHECK timeout. Must
+/// be called before any boot side effect: spawns no children, touches no
+/// Tailscale state. An unparseable port is a failed check, never a panic.
+pub fn healthcheck(exposed: &str) -> bool {
+    let port = match exposed.parse::<u16>() {
+        // 0 is never a real listener (boot-time `valid_port` rejects it too).
+        Ok(p @ 1..) => p,
+        _ => {
+            log::err(&format!(
+                "healthcheck: invalid exposed port '{}'",
+                log::sanitize(exposed)
+            ));
+            return false;
+        }
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    healthcheck_until(addr, HEALTHCHECK_TIMEOUT)
+}
+
+/// The healthcheck retry loop with an explicit budget (tests shrink it to
+/// keep the suite fast). Termination is by construction: each iteration
+/// checks the deadline, and the probe itself is bounded by
+/// [`PROBE_TIMEOUT`].
+fn healthcheck_until(addr: std::net::SocketAddr, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if get_alive(addr, PROBE_TIMEOUT) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(super::POLL);
+    }
 }
 
 /// First request line as trimmed UTF-8 (empty on undecodable input).
@@ -181,7 +238,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::{Shutdown, SocketAddr};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// A stand-in vaultwarden: one-shot listener answering `status`.
     fn fake_vault(status: &'static str) -> SocketAddr {
@@ -339,5 +396,71 @@ mod tests {
         let listener = bind("0").expect("ephemeral bind");
         let port = listener.local_addr().unwrap().port();
         assert!(bind(&port.to_string()).is_err());
+    }
+
+    /// A stand-in gatekeeper: serves the real `handle` on an ephemeral
+    /// listener for every connection (the healthcheck retries, so one-shot
+    /// serving would not do), probing `vault` exactly like the real gate.
+    /// Returns the exposed port.
+    fn fake_gate(vault: Option<SocketAddr>) -> u16 {
+        let listener = bind("0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                drop(std::thread::spawn(move || handle(stream, vault)));
+            }
+        }));
+        port
+    }
+
+    #[test]
+    fn healthcheck_answers_true_when_the_chain_is_healthy() {
+        let port = fake_gate(Some(fake_vault("200 OK")));
+        assert!(healthcheck_until(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            Duration::from_secs(2)
+        ));
+    }
+
+    /// The gate answers 503 while the vault is down or starting: the
+    /// verdict is `false`, but only after the full budget — a probe that
+    /// fires during the boot window gets the chance to see the vault come
+    /// up instead of failing a healthy boot.
+    #[test]
+    fn healthcheck_answers_false_when_the_vault_is_down() {
+        for vault in [None, Some(fake_vault("500 Internal Server Error"))] {
+            let port = fake_gate(vault);
+            assert!(
+                !healthcheck_until(
+                    format!("127.0.0.1:{port}").parse().unwrap(),
+                    Duration::from_millis(300)
+                ),
+                "{vault:?}"
+            );
+        }
+    }
+
+    /// A gate that is not yet bound (early boot) must be retried until the
+    /// budget runs out — and the probe must never hang past it.
+    #[test]
+    fn healthcheck_is_bounded_when_the_gate_is_not_bound() {
+        // Claim an ephemeral port, then release it: nothing listens there.
+        let free = bind("0").unwrap();
+        let addr = format!("127.0.0.1:{}", free.local_addr().unwrap().port());
+        drop(free);
+        let budget = Duration::from_millis(300);
+        let start = Instant::now();
+        assert!(!healthcheck_until(addr.parse().unwrap(), budget));
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "healthcheck did not return within 30s"
+        );
+    }
+
+    #[test]
+    fn healthcheck_rejects_an_invalid_exposed_port() {
+        for port in ["", "not-a-port", "0", "65536", "-1"] {
+            assert!(!healthcheck(port), "{port}");
+        }
     }
 }
