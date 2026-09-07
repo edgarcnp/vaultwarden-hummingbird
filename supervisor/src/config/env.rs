@@ -95,10 +95,15 @@ impl Config {
     /// (TS_SERVE/TS_USERSPACE) accept true/false/1/0/yes/no/on/off in any
     /// casing; other values warn and take the default.
     pub fn from_env() -> Self {
-        let file = FileConfig::load();
+        Self::build(FileConfig::load(), |k| env::var(k).ok())
+    }
 
-        let port = valid_port(env::var("PORT").ok())
-            .or_else(|| valid_port(env::var("ROCKET_PORT").ok()))
+    /// [`from_env`] with the env source injected. Tests pass a map instead
+    /// of the process env: `std::env::set_var` is unsafe (and racy against
+    /// any thread reading the env concurrently), so tests never mutate it.
+    fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let port = valid_port(lookup("PORT"))
+            .or_else(|| valid_port(lookup("ROCKET_PORT")))
             .or_else(|| valid_port(file.child.get("ROCKET_PORT").cloned()))
             .unwrap_or_else(|| "8080".into());
         let vault_port = port
@@ -108,7 +113,7 @@ impl Config {
             .map(|p| p.to_string());
 
         let knob = |key: &str, default: &str| -> String {
-            non_empty(env::var(key).ok())
+            non_empty(lookup(key))
                 .or_else(|| non_empty(file.knobs.get(key).cloned()))
                 .unwrap_or_else(|| default.to_string())
         };
@@ -152,7 +157,7 @@ impl Config {
                 file.child
                     .get("DATABASE_URL")
                     .cloned()
-                    .or_else(|| non_empty(env::var("DATABASE_URL").ok())),
+                    .or_else(|| non_empty(lookup("DATABASE_URL"))),
             ),
             vw_env: file.child.into_iter().collect(),
         }
@@ -215,36 +220,25 @@ fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeMap;
     use std::fs;
 
-    /// Every key `Config::from_env` / `FileConfig::load` may read.
-    const ENV_KEYS: &[&str] = &[
-        "PORT",
-        "ROCKET_PORT",
-        "TS_STATE_FILE",
-        "TS_SOCKET",
-        "TS_HOSTNAME",
-        "TS_AUTHKEY",
-        "TS_SERVE",
-        "TS_USERSPACE",
-        "SUPERVISOR_ENV_FILE",
-        "SUPERVISOR_S3_REMOTE",
-        "SUPERVISOR_S3_ACCESS_KEY_ID",
-        "SUPERVISOR_S3_SECRET_ACCESS_KEY",
-        "SUPERVISOR_S3_ENDPOINT",
-        "SUPERVISOR_S3_SYNC_INTERVAL",
-        "SUPERVISOR_DB_KEEPALIVE",
-    ];
+    use super::*;
 
-    fn set(key: &str, val: &str) {
-        unsafe { env::set_var(key, val) };
+    /// Config from an explicit variable map + optional dotenv file layer.
+    /// Tests never touch the process env: `std::env::set_var` is unsafe
+    /// (and racy against any concurrent env reader), so merge-order
+    /// coverage goes through [`Config::build`] with an injected lookup.
+    fn mk(vars: &[(&str, &str)]) -> Config {
+        mk_with_file(vars, FileConfig::default())
     }
 
-    fn clear() {
-        for key in ENV_KEYS {
-            unsafe { env::remove_var(key) };
-        }
+    fn mk_with_file(vars: &[(&str, &str)], file: FileConfig) -> Config {
+        let map: BTreeMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Config::build(file, move |k| map.get(k).cloned())
     }
 
     #[test]
@@ -276,13 +270,9 @@ mod tests {
         assert_eq!(valid_port(Some("abc".into())), None);
     }
 
-    /// All env mutation lives in this one test: `std::env` is process-global
-    /// and libtest runs tests in parallel threads.
     #[test]
-    fn from_env_merge_order() {
-        clear();
-        set("SUPERVISOR_ENV_FILE", "");
-        let cfg = Config::from_env();
+    fn defaults_and_merge_order() {
+        let cfg = mk(&[]);
         assert_eq!(cfg.port, "8080");
         assert_eq!(cfg.vault_port.as_deref(), Some("8081"));
         assert_eq!(cfg.socket, "/tmp/tailscaled.sock");
@@ -291,38 +281,34 @@ mod tests {
         assert_eq!(cfg.authkey, "");
         assert!(cfg.serve && cfg.userspace);
         assert!(cfg.vw_env.is_empty());
+        assert!(cfg.sync.is_none());
 
-        set("PORT", "3000");
-        set("ROCKET_PORT", "1111");
-        let cfg = Config::from_env();
+        let cfg = mk(&[("PORT", "3000"), ("ROCKET_PORT", "1111")]);
         assert_eq!(cfg.port, "3000");
         assert_eq!(cfg.vault_port.as_deref(), Some("3001"));
-        unsafe { env::remove_var("PORT") };
-        assert_eq!(Config::from_env().port, "1111");
-
-        set("PORT", "");
-        set("ROCKET_PORT", "");
-        assert_eq!(Config::from_env().port, "8080");
-        unsafe { env::remove_var("PORT") };
-        unsafe { env::remove_var("ROCKET_PORT") };
+        let cfg = mk(&[("ROCKET_PORT", "1111")]);
+        assert_eq!(cfg.port, "1111");
+        let cfg = mk(&[("PORT", ""), ("ROCKET_PORT", "")]);
+        assert_eq!(cfg.port, "8080");
 
         // 65535 leaves no room above the exposed port: the derivation yields
         // None, which the caller must treat as refuse-to-start (fail closed).
-        set("PORT", "65535");
-        let cfg = Config::from_env();
+        let cfg = mk(&[("PORT", "65535")]);
         assert_eq!(cfg.port, "65535");
         assert_eq!(cfg.vault_port, None);
-        unsafe { env::remove_var("PORT") };
+    }
 
-        clear();
-        let path = env::temp_dir().join(format!("vw-sup-cfg-{}.env", std::process::id()));
+    #[test]
+    fn dotenv_file_merges_below_process_env() {
+        let path = std::env::temp_dir().join(format!("vw-sup-cfg-{}.env", std::process::id()));
         fs::write(
             &path,
             "ROCKET_PORT=2222\nTS_HOSTNAME=file-host\nTS_AUTHKEY=file-key\nTS_SERVE=false\nDOMAIN=https://f.example\n",
         )
         .unwrap();
-        set("SUPERVISOR_ENV_FILE", path.to_str().unwrap());
-        let cfg = Config::from_env();
+        let path_str = path.to_str().unwrap();
+
+        let cfg = mk_with_file(&[], FileConfig::load_from(Some(path_str)));
         assert_eq!(cfg.port, "2222");
         assert_eq!(cfg.hostname, "file-host");
         assert_eq!(cfg.authkey, "file-key");
@@ -337,25 +323,33 @@ mod tests {
         );
         assert!(cfg.vw_env.iter().any(|(k, _)| k == "ROCKET_PORT"));
         assert!(!cfg.vw_env.iter().any(|(k, _)| is_supervisor_key(k)));
-        set("TS_HOSTNAME", "env-host");
-        assert_eq!(Config::from_env().hostname, "env-host");
-        let _ = fs::remove_file(&path);
 
-        clear();
-        set("SUPERVISOR_ENV_FILE", "");
-        assert!(Config::from_env().sync.is_none());
-
-        set("SUPERVISOR_S3_REMOTE", "r2:vw-state");
-        assert!(Config::from_env().sync.is_none());
-
-        set("SUPERVISOR_S3_ACCESS_KEY_ID", "id");
-        set("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret");
-        set(
-            "SUPERVISOR_S3_ENDPOINT",
-            "https://acct.r2.cloudflarestorage.com",
+        // process env wins over the file for supervisor knobs
+        let cfg = mk_with_file(
+            &[("TS_HOSTNAME", "env-host")],
+            FileConfig::load_from(Some(path_str)),
         );
-        set("SUPERVISOR_S3_SYNC_INTERVAL", "90");
-        let sync = Config::from_env().sync.expect("sync enabled");
+        assert_eq!(cfg.hostname, "env-host");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn s3_sync_knobs() {
+        // remote without credentials: sync disabled
+        let cfg = mk(&[("SUPERVISOR_S3_REMOTE", "r2:vw-state")]);
+        assert!(cfg.sync.is_none());
+
+        let mut vars: Vec<(&str, &str)> = vec![
+            ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
+            ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
+            ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
+            (
+                "SUPERVISOR_S3_ENDPOINT",
+                "https://acct.r2.cloudflarestorage.com",
+            ),
+            ("SUPERVISOR_S3_SYNC_INTERVAL", "90"),
+        ];
+        let sync = mk(&vars).sync.expect("sync enabled");
         assert_eq!(sync.remote, "r2:vw-state");
         assert_eq!(sync.interval, Duration::from_secs(90));
         assert_eq!(
@@ -379,33 +373,30 @@ mod tests {
             ]
         );
 
-        set("SUPERVISOR_S3_REMOTE", "no-colon-here");
-        assert!(Config::from_env().sync.is_none());
-
-        set("SUPERVISOR_S3_REMOTE", "r2:vw-state");
-        set("SUPERVISOR_S3_SYNC_INTERVAL", "not-a-number");
+        *vars.last_mut().unwrap() = ("SUPERVISOR_S3_SYNC_INTERVAL", "not-a-number");
         assert_eq!(
-            Config::from_env().sync.expect("sync enabled").interval,
+            mk(&vars).sync.expect("sync enabled").interval,
             Duration::from_secs(SYNC_INTERVAL_DEFAULT)
         );
 
         // A colon-less remote would make rclone write to a local path
         // instead of the bucket.
-        set("SUPERVISOR_S3_REMOTE", "mybucket");
-        assert!(Config::from_env().sync.is_none());
+        *vars.first_mut().unwrap() = ("SUPERVISOR_S3_REMOTE", "mybucket");
+        assert!(mk(&vars).sync.is_none());
+        *vars.first_mut().unwrap() = ("SUPERVISOR_S3_REMOTE", "no-colon-here");
+        assert!(mk(&vars).sync.is_none());
+    }
 
-        // Lenient bool knobs: common spellings in any casing parse, and a
-        // misspelling warns and takes the default instead of silently
-        // disabling the feature.
-        clear();
-        set("SUPERVISOR_ENV_FILE", "");
-        set("TS_SERVE", "YES");
-        set("TS_USERSPACE", "0");
-        let cfg = Config::from_env();
+    #[test]
+    fn lenient_bool_knobs() {
+        // Common spellings in any casing parse.
+        let cfg = mk(&[("TS_SERVE", "YES"), ("TS_USERSPACE", "0")]);
         assert!(cfg.serve);
         assert!(!cfg.userspace);
-        set("TS_SERVE", "definitely");
-        let cfg = Config::from_env();
+
+        // A misspelling warns and takes the default instead of silently
+        // disabling the feature.
+        let cfg = mk(&[("TS_SERVE", "definitely")]);
         assert!(cfg.serve);
     }
 }

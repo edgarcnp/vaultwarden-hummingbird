@@ -1,8 +1,8 @@
-//! Signal wiring for PID 1, armed with `sigaction` (not `signal`, whose
-//! semantics vary by libc).
+//! Signal wiring for PID 1, registered through `signal-hook`'s flag API:
+//! its handler does exactly one async-signal-safe thing — set the flag —
+//! which is precisely the contract this module needs.
 //!
-//! Design: the handler does exactly one async-signal-safe thing — raise the
-//! stop flag. All signal *delivery* (forwarding to children, escalation,
+//! All signal *delivery* (forwarding to children, escalation,
 //! reaping) happens on the main thread, which owns the child pids as plain
 //! locals and polls [`take_stop`]. No shared pid tables, no arming gates,
 //! no registration windows: a signal arriving in ANY phase is observed at
@@ -15,37 +15,46 @@
 //! are left alone (reaping is a poll; std write errors are handled
 //! in-process).
 
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use signal_hook::flag;
 
-extern "C" fn handle(_: libc::c_int) {
-    STOP_REQUESTED.store(true, Ordering::SeqCst);
+use crate::util::log;
+
+static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// The process-global stop flag. Created on first use, so a signal request
+/// observed before [`install_signal_handlers`] runs is simply not delivered
+/// (same as the kernel ignoring an unhandled signal for PID 1).
+fn flag() -> &'static Arc<AtomicBool> {
+    STOP.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
 
-/// Arm the stop handlers. Call once, first thing in `main` — as PID 1 an
-/// unhandled signal is ignored by the kernel, so there is no crash risk
-/// before this, only a dropped request.
+/// Arm the stop handlers. Call once, first thing in `main`.
 pub fn install_signal_handlers() {
-    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-    action.sa_sigaction = handle as extern "C" fn(libc::c_int) as usize;
-    action.sa_flags = libc::SA_RESTART;
-    unsafe { libc::sigemptyset(&mut action.sa_mask) };
-    for &sig in &[libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
-        unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) };
+    for sig in [SIGTERM, SIGINT, SIGHUP, SIGQUIT] {
+        match flag::register(sig, Arc::clone(flag())) {
+            // SigId is Copy (no Drop): the registration lives for the whole
+            // process, which is what a PID 1 wants.
+            Ok(_) => {}
+            Err(e) => log::err(&format!("signal {sig} registration failed: {e}")),
+        }
     }
 }
 
 /// Consume the stop request: true at most once. The main loop's only
 /// signal interface.
 pub fn take_stop() -> bool {
-    STOP_REQUESTED.swap(false, Ordering::SeqCst)
+    flag().swap(false, Ordering::SeqCst)
 }
 
 /// Peek without consuming — used by bounded phases that must abort early
 /// but leave acting on the request to the main loop.
 pub fn stopping() -> bool {
-    STOP_REQUESTED.load(Ordering::SeqCst)
+    flag().load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -56,7 +65,7 @@ mod tests {
     fn take_stop_consumes_once() {
         assert!(!stopping());
         assert!(!take_stop());
-        STOP_REQUESTED.store(true, Ordering::SeqCst);
+        flag().store(true, Ordering::SeqCst);
         assert!(stopping());
         assert!(take_stop());
         assert!(!stopping());

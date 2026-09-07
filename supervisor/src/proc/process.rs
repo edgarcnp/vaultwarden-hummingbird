@@ -10,12 +10,23 @@
 //!   the helper; the main thread is single-threaded, so the two never
 //!   overlap. They are also group leaders, so a timeout kill reaches
 //!   anything they spawned.
-//! - As PID 1, any orphan re-parents to us; only `waitpid` here (not std)
-//!   reaps those, and skipping them would leak zombies.
+//! - As PID 1, any orphan re-parents to us; only the namespace-wide
+//!   `waitpid` here (not std) reaps those, and skipping them would leak
+//!   zombies.
+//!
+//! All syscalls go through `nix`, a safe typed wrapper — no `unsafe` in
+//! this crate.
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+use nix::errno::Errno;
+use nix::sys::signal::{Signal, kill, killpg};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+// nix's typed pid wrapper; the crate's public `Pid` is a plain i32 alias,
+// so nix calls convert at the boundary.
+use nix::unistd::Pid as NixPid;
 
 use crate::util::log;
 
@@ -52,62 +63,62 @@ pub fn spawn(cmd: &mut Command) -> Option<Pid> {
     }
 }
 
-/// Liveness probe (not a reap): signal 0 checks existence only.
+/// Liveness probe (not a reap): `None` sends signal 0, which checks
+/// existence only. `Err` covers both nonexistence and EPERM — as PID 1 the
+/// latter cannot happen for our own children.
 pub fn alive(pid: Pid) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    kill(NixPid::from_raw(pid), None).is_ok()
 }
 
 /// Reap one pending zombie from anywhere in the namespace. `None` means
-/// nothing reapable right now (0 = children alive but no zombie yet,
-/// -1 = ECHILD/EINTR).
+/// nothing reapable right now (`StillAlive` = children alive but no zombie
+/// yet, `ECHILD` = no children, `EINTR` = retry on the next tick).
 ///
-/// Never call this from tests: `waitpid(-1, …)` would also reap the test
-/// harness's own children.
-pub fn reap_any() -> Option<(Pid, i32)> {
-    let mut status = 0;
-    let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-    (pid > 0).then_some((pid, status))
+/// Never call this from tests: the namespace-wide `waitpid` would also reap
+/// the test harness's own children.
+pub fn reap_any() -> Option<(Pid, WaitStatus)> {
+    match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+        Ok(status) => status.pid().map(|p| (p.as_raw(), status)),
+        Err(_) => None,
+    }
 }
 
-/// Container exit code for a raw wait status: the child's own code, or the
+/// Container exit code for a wait status: the child's own code, or the
 /// shell convention 128+signal when it died to a signal (a SIGTERM'd
 /// service reports 143 — same as tini / plain Docker behavior).
-pub fn exit_code(raw: i32) -> i32 {
-    if libc::WIFEXITED(raw) {
-        libc::WEXITSTATUS(raw)
-    } else if libc::WIFSIGNALED(raw) {
-        128 + libc::WTERMSIG(raw)
-    } else {
-        1
+pub fn exit_code(status: WaitStatus) -> i32 {
+    match status {
+        WaitStatus::Exited(_, code) => code,
+        WaitStatus::Signaled(_, sig, _) => 128 + sig as i32,
+        _ => 1,
     }
 }
 
 /// Human-readable wait status for logs.
-pub fn exit_reason(raw: i32) -> String {
-    if libc::WIFEXITED(raw) {
-        format!("exit status {}", libc::WEXITSTATUS(raw))
-    } else if libc::WIFSIGNALED(raw) {
-        format!("terminated by signal {}", libc::WTERMSIG(raw))
-    } else {
-        format!("wait status {raw:#x}")
+pub fn exit_reason(status: WaitStatus) -> String {
+    match status {
+        WaitStatus::Exited(_, code) => format!("exit status {code}"),
+        WaitStatus::Signaled(_, sig, _) => format!("terminated by signal {}", sig as i32),
+        other => format!("wait status {other:?}"),
     }
 }
 
 /// Signal the whole process group of a child spawned via [`spawn`] (its pgid
 /// equals its pid), falling back to the bare pid if the group vanished.
-/// Refuses pid <= 1: `kill(-1, …)` would signal every process in the namespace.
-pub fn signal_group(pid: Pid, sig: libc::c_int) -> bool {
+/// Refuses pid <= 1: `killpg(1, …)` semantics are platform-specific and
+/// `kill(-1, …)` would signal every process in the namespace.
+pub fn signal_group(pid: Pid, sig: Signal) -> bool {
     if pid <= 1 {
         return false;
     }
-    unsafe { libc::kill(-pid, sig) == 0 || libc::kill(pid, sig) == 0 }
+    killpg(NixPid::from_raw(pid), sig).is_ok() || kill(NixPid::from_raw(pid), sig).is_ok()
 }
 
 /// Outcome of waiting for a child to be reaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gone {
-    /// Reaped here; raw wait status.
-    Reaped(i32),
+    /// Reaped here; wait status.
+    Reaped(WaitStatus),
     /// Already gone (e.g. reaped elsewhere as a stray).
     Vanished,
     /// Still unreapable after SIGKILL + grace (uninterruptible D-state);
@@ -122,17 +133,15 @@ pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
     let mut deadline = Instant::now() + grace;
     let mut killed = false;
     loop {
-        let mut status = 0;
-        match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
-            p if p == pid => return Gone::Reaped(status),
-            -1 if std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) => {
-                return Gone::Vanished;
-            }
-            _ => {}
+        match waitpid(Some(NixPid::from_raw(pid)), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => {}
+            Ok(status) => return Gone::Reaped(status),
+            Err(Errno::ECHILD) => return Gone::Vanished,
+            Err(_) => {}
         }
-        while let Some((p, raw)) = reap_any() {
+        while let Some((p, status)) = reap_any() {
             if p == pid {
-                return Gone::Reaped(raw);
+                return Gone::Reaped(status);
             }
         }
         let now = Instant::now();
@@ -141,7 +150,7 @@ pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
                 log::err(&format!("pid {pid} unreapable; continuing shutdown"));
                 return Gone::Stuck;
             }
-            signal_group(pid, libc::SIGKILL);
+            signal_group(pid, Signal::SIGKILL);
             killed = true;
             deadline = now + KILL_GRACE;
         }
@@ -197,7 +206,7 @@ pub fn run_bounded_env(
     }
     // Whole-group kill first, then the direct child, then reap.
     let pid = child.id() as i32;
-    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    let _ = killpg(NixPid::from_raw(pid), Signal::SIGKILL);
     let _ = child.kill();
     let _ = child.wait();
     false
@@ -209,32 +218,40 @@ mod tests {
 
     #[test]
     fn exit_code_decodes_exit_and_signal_statuses() {
-        assert_eq!(exit_code(0), 0);
-        assert_eq!(exit_code(3 << 8), 3);
-        assert_eq!(exit_code(15), 143);
-        assert_eq!(exit_code((19 << 8) | 0x7f), 1);
+        let p = NixPid::from_raw(1);
+        assert_eq!(exit_code(WaitStatus::Exited(p, 0)), 0);
+        assert_eq!(exit_code(WaitStatus::Exited(p, 3)), 3);
+        assert_eq!(
+            exit_code(WaitStatus::Signaled(p, Signal::SIGTERM, false)),
+            143
+        );
+        assert_eq!(exit_code(WaitStatus::Stopped(p, Signal::SIGSTOP)), 1);
     }
 
     #[test]
     fn exit_reason_is_human_readable() {
-        assert_eq!(exit_reason(0), "exit status 0");
-        assert_eq!(exit_reason(3 << 8), "exit status 3");
-        assert_eq!(exit_reason(15), "terminated by signal 15");
+        let p = NixPid::from_raw(1);
+        assert_eq!(exit_reason(WaitStatus::Exited(p, 0)), "exit status 0");
+        assert_eq!(exit_reason(WaitStatus::Exited(p, 3)), "exit status 3");
+        assert_eq!(
+            exit_reason(WaitStatus::Signaled(p, Signal::SIGTERM, false)),
+            "terminated by signal 15"
+        );
     }
 
     #[test]
     fn signal_group_refuses_own_namespace() {
-        assert!(!signal_group(0, libc::SIGTERM));
-        assert!(!signal_group(1, libc::SIGTERM));
-        assert!(!signal_group(-5, libc::SIGTERM));
+        assert!(!signal_group(0, Signal::SIGTERM));
+        assert!(!signal_group(1, Signal::SIGTERM));
+        assert!(!signal_group(-5, Signal::SIGTERM));
     }
 
     #[test]
     fn child_lifecycle_spawn_signal_reap_escalate() {
         let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
-        assert!(signal_group(pid, libc::SIGTERM));
+        assert!(signal_group(pid, Signal::SIGTERM));
         match reap_until_gone(pid, Duration::from_secs(5)) {
-            Gone::Reaped(raw) => assert_eq!(exit_code(raw), 143),
+            Gone::Reaped(status) => assert_eq!(exit_code(status), 143),
             gone => panic!("expected reap after SIGTERM, got {gone:?}"),
         }
         assert_eq!(
@@ -244,7 +261,7 @@ mod tests {
 
         let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
         match reap_until_gone(pid, Duration::from_millis(200)) {
-            Gone::Reaped(raw) => assert_eq!(exit_code(raw), 137),
+            Gone::Reaped(status) => assert_eq!(exit_code(status), 137),
             gone => panic!("expected SIGKILL escalation, got {gone:?}"),
         }
     }

@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-libc = "0.2"
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 postgres = { version = "0.19", default-features = false }
 postgres_rustls = "0.1.6"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "custom-provider"] }
+signal-hook = "0.4"
 webpki-roots = "1.0.9"
 
 [profile.release]

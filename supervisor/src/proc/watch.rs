@@ -5,6 +5,8 @@
 use std::process::exit;
 use std::time::Instant;
 
+use nix::sys::signal::Signal;
+
 use crate::config::{Config, SyncConfig};
 use crate::proc::{
     Gone, POLL, Pid, TERM_GRACE, alive, db_keepalive_tick, exit_code, exit_reason, gate_bind,
@@ -74,9 +76,9 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
         if take_stop() {
             log::info("stop requested; terminating children");
             if let Some(t) = tsd {
-                signal_group(t, libc::SIGTERM);
+                signal_group(t, Signal::SIGTERM);
             }
-            signal_group(vw, libc::SIGTERM);
+            signal_group(vw, Signal::SIGTERM);
             break 'watch match reap_until_gone(vw, TERM_GRACE) {
                 Gone::Reaped(raw) => exit_code(raw),
                 _ => 1,
@@ -111,7 +113,7 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
 pub fn shutdown(tsd: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
     log::info("shutting down");
     if let Some(t) = tsd {
-        signal_group(t, libc::SIGTERM);
+        signal_group(t, Signal::SIGTERM);
         if matches!(reap_until_gone(t, TERM_GRACE), Gone::Stuck) {
             log::err(&format!("tailscaled (pid {t}) did not exit cleanly"));
         }
