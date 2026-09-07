@@ -10,8 +10,8 @@ on:
     tags:
       - "v*"
   schedule:
-    # Sundays 04:23 UTC — off-peak, not on the hour.
-    - cron: "23 4 * * 0"
+    # Saturdays 03:00 UTC — off-peak.
+    - cron: "0 3 * * 6"
 
 # Per-arch images from a stale run must not overwrite a good manifest list.
 concurrency:
