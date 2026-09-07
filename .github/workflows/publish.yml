@@ -1,0 +1,87 @@
+# Build and publish the multi-arch image to ghcr.io. The workflow changes
+# no versions: it builds whatever ARG pins the Containerfile holds (Renovate
+# owns the bumps). Weekly cron rebuilds the same pins so the floating base
+# images keep picking up upstream CVE patches.
+name: publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  schedule:
+    # Sundays 04:23 UTC — off-peak, not on the hour.
+    - cron: "23 4 * * 0"
+
+# Per-arch images from a stale run must not overwrite a good manifest list.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build/${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      # ghcr.io rejects uppercase in image paths; repository names can
+      # carry it.
+      - name: Normalize the image reference
+        run: echo "IMAGE=ghcr.io/$(printf '%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Podman login to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build
+        run: |
+          # --format docker: HEALTHCHECK is an OCI-invalid field; podman's
+          # default OCI format silently drops it (verified on podman 5.8).
+          podman build \
+            --format docker \
+            --platform linux/${{ matrix.arch }} \
+            --tag "$IMAGE:${GITHUB_REF_NAME}-${{ matrix.arch }}" \
+            .
+
+      - name: Verify the healthcheck survived the build
+        run: |
+          test "$(podman inspect "$IMAGE:${GITHUB_REF_NAME}-${{ matrix.arch }}" \
+            --format '{{json .HealthCheck.Test}}')" != "null"
+
+      - name: Push per-arch tag
+        run: podman push "$IMAGE:${GITHUB_REF_NAME}-${{ matrix.arch }}"
+
+  manifest:
+    name: manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Normalize the image reference
+        run: echo "IMAGE=ghcr.io/$(printf '%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Podman login to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Create and push the manifest list
+        run: |
+          # Strip the ref prefix so both `v1.2.3` and `main` collapse to a
+          # usable tag (`v1.2.3` on tag pushes, `main` on manual runs).
+          VER="${GITHUB_REF_NAME#v}"
+          podman manifest create "$IMAGE:${VER}"
+          for arch in amd64 arm64; do
+            podman manifest add "$IMAGE:${VER}" "docker://$IMAGE:${GITHUB_REF_NAME}-${arch}"
+          done
+          podman manifest push "$IMAGE:${VER}" "docker://$IMAGE:${VER}"
+          podman manifest push "$IMAGE:${VER}" "docker://$IMAGE:latest"

@@ -2,10 +2,29 @@
 
 Hardened container image: [Vaultwarden](https://github.com/dani-garcia/vaultwarden) + [Tailscale](https://tailscale.com) on Red Hat Hummingbird images ([images.redhat.com](https://images.redhat.com/)). Built from official, checksum-pinned sources. Runs as non-root uid 65532, no shell, no package manager.
 
+## Pre-built image
+
+CI publishes a multi-arch image (amd64 + arm64) on every `v*` tag, plus a
+weekly rebuild of the same pins so base-image CVE patches keep flowing:
+
+```sh
+podman run --rm -p 127.0.0.1:8080:8080 \
+  ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
+```
+
+Notes:
+
+- The weekly cron refreshes `:latest`, but consumers must still re-pull to
+  pick it up.
+- First publish creates the ghcr package as **private**; flip it to public
+  once (repo → Packages → package settings) so anonymous pulls work.
+
 ## Build
 
 ```sh
-podman build -t vaultwarden-hummingbird:local .   # picks up Containerfile
+# --format docker: HEALTHCHECK is an OCI-invalid field; podman's default
+# OCI image format silently drops it.
+podman build --format docker -t vaultwarden-hummingbird:local .   # picks up Containerfile
 
 # options (build args; via compose, set WEB_VAULT in .env instead)
 WEB_VAULT=true                          # web vault on by default; false = API-only
@@ -87,6 +106,6 @@ Failures are non-fatal (logged only on state change). Postgres URLs only — the
 ## Files
 
 - `Containerfile` — 4 stages: fetch & verify → supervisor → vaultwarden → minimal runtime
-- `supervisor/` — Rust PID 1: exposed-port gatekeeper (`/alive` only), tailscaled + `up`/`serve` + loopback-only vaultwarden, with clean SIGTERM teardown
+- `supervisor/` — Rust PID 1: exposed-port gatekeeper (`/alive` only, doubles as the container healthcheck via `--healthcheck`), tailscaled + `up`/`serve` + loopback-only vaultwarden, with clean SIGTERM teardown
 - `.env.example` — the one config file; `compose.yaml` — local runner (podman/docker compose)
-- `render.yaml` — optional Render blueprint
+- `.github/workflows/publish.yml` — multi-arch build + ghcr publish (tag push, manual, weekly cron)
