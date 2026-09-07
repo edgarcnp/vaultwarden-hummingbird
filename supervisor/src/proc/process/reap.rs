@@ -1,74 +1,23 @@
-//! Process primitives for a PID 1 supervisor: spawning, reaping, group
-//! signaling, liveness, and bounded child runs.
-//!
-//! Reaping is race-free by ownership:
-//! - Long-running children ([`spawn`]) are process-group leaders; their
-//!   `std::process::Child` handle is dropped on purpose — statuses come only
-//!   from the namespace-wide reaper ([`reap_any`]), never std's targeted
-//!   `try_wait`/`wait`, which would race it over the same zombie.
-//! - Bounded CLI children ([`run_bounded_env`]) are reaped via std inside
-//!   the helper; the main thread is single-threaded, so the two never
-//!   overlap. They are also group leaders, so a timeout kill reaches
-//!   anything they spawned.
-//! - As PID 1, any orphan re-parents to us; only the namespace-wide
-//!   `waitpid` here (not std) reaps those, and skipping them would leak
-//!   zombies.
-//!
-//! All syscalls go through `nix`, a safe typed wrapper — no `unsafe` in
-//! this crate.
+//! Namespace-wide reaping and wait-status decoding: as PID 1 every orphan
+//! re-parents to us, so the reaper drains strays as well as our own
+//! children.
 
-use std::os::unix::process::CommandExt;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
-use nix::sys::signal::{Signal, kill, killpg};
+use nix::sys::signal::Signal;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 // nix's typed pid wrapper; the crate's public `Pid` is a plain i32 alias,
 // so nix calls convert at the boundary.
 use nix::unistd::Pid as NixPid;
 
+use super::{POLL, Pid, signal_group};
 use crate::util::log;
-
-/// Poll cadence of the reap/watch loops: `waitpid(WNOHANG)` is cheap, this
-/// only bounds signal-observation and shutdown latency.
-pub const POLL: Duration = Duration::from_millis(100);
-
-/// Grace before SIGTERM escalates to SIGKILL on teardown (matches Docker's
-/// default 10s stop timeout; only pathological children ever reach it).
-pub const TERM_GRACE: Duration = Duration::from_secs(10);
 
 /// After SIGKILL (uncatchable), wait this long for the reap before giving
 /// up; an uninterruptible (D-state) process is the container runtime's
 /// problem, and must not hang our own exit.
-pub const KILL_GRACE: Duration = Duration::from_secs(5);
-
-/// Child process id (also its process-group id, see [`spawn`]).
-pub type Pid = i32;
-
-/// Spawn `cmd` as the leader of its own process group and return its pid.
-/// Doing it in the child (`process_group(0)`) closes the classic race where
-/// the child execs before the parent could `setpgid` it.
-pub fn spawn(cmd: &mut Command) -> Option<Pid> {
-    cmd.process_group(0);
-    match cmd.spawn() {
-        Ok(child) => Some(child.id() as Pid),
-        Err(e) => {
-            log::err(&format!(
-                "{} spawn failed: {e}",
-                cmd.get_program().to_string_lossy()
-            ));
-            None
-        }
-    }
-}
-
-/// Liveness probe (not a reap): `None` sends signal 0, which checks
-/// existence only. `Err` covers both nonexistence and EPERM — as PID 1 the
-/// latter cannot happen for our own children.
-pub fn alive(pid: Pid) -> bool {
-    kill(NixPid::from_raw(pid), None).is_ok()
-}
+const KILL_GRACE: Duration = Duration::from_secs(5);
 
 /// Reap one pending zombie from anywhere in the namespace. `None` means
 /// nothing reapable right now (`StillAlive` = children alive but no zombie
@@ -101,17 +50,6 @@ pub fn exit_reason(status: WaitStatus) -> String {
         WaitStatus::Signaled(_, sig, _) => format!("terminated by signal {}", sig as i32),
         other => format!("wait status {other:?}"),
     }
-}
-
-/// Signal the whole process group of a child spawned via [`spawn`] (its pgid
-/// equals its pid), falling back to the bare pid if the group vanished.
-/// Refuses pid <= 1: `killpg(1, …)` semantics are platform-specific and
-/// `kill(-1, …)` would signal every process in the namespace.
-pub fn signal_group(pid: Pid, sig: Signal) -> bool {
-    if pid <= 1 {
-        return false;
-    }
-    killpg(NixPid::from_raw(pid), sig).is_ok() || kill(NixPid::from_raw(pid), sig).is_ok()
 }
 
 /// Outcome of waiting for a child to be reaped.
@@ -158,62 +96,11 @@ pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
     }
 }
 
-/// Run a child to completion with a hard timeout; kill on expiry. Aborts
-/// early when `abort` fires, so a stop request never waits out a bounded
-/// phase. stdio is inherited so failures stay visible in container logs.
-pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn() -> bool) -> bool {
-    run_bounded_env(timeout, prog, args, &[], abort)
-}
-
-/// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
-/// The child runs as its own process-group leader, so the expiry/abort kill
-/// reaches anything it spawned, not just the direct child.
-pub fn run_bounded_env(
-    timeout: Duration,
-    prog: &str,
-    args: &[&str],
-    extra_env: &[(String, String)],
-    abort: impl Fn() -> bool,
-) -> bool {
-    let mut cmd = Command::new(prog);
-    cmd.args(args).process_group(0);
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            log::err(&format!("{prog} spawn failed: {e}"));
-            return false;
-        }
-    };
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(st)) => return st.success(),
-            Ok(None) => {}
-            Err(_) => return false,
-        }
-        if abort() {
-            log::info(&format!("stop requested; aborting {prog}"));
-            break;
-        }
-        if start.elapsed() > timeout {
-            log::err(&format!("{prog} timed out after {timeout:?}"));
-            break;
-        }
-        std::thread::sleep(POLL);
-    }
-    // Whole-group kill first, then the direct child, then reap.
-    let pid = child.id() as i32;
-    let _ = killpg(NixPid::from_raw(pid), Signal::SIGKILL);
-    let _ = child.kill();
-    let _ = child.wait();
-    false
-}
-
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
+    use super::super::spawn;
     use super::*;
 
     #[test]
