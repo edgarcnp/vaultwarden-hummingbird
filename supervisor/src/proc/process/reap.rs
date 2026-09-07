@@ -11,7 +11,7 @@ use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 // so nix calls convert at the boundary.
 use nix::unistd::Pid as NixPid;
 
-use super::{POLL, Pid, signal_group};
+use super::child::{POLL, Pid, signal_group};
 use crate::util::log;
 
 /// After SIGKILL (uncatchable), wait this long for the reap before giving
@@ -100,7 +100,7 @@ pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
 mod tests {
     use std::process::Command;
 
-    use super::super::spawn;
+    use super::super::child::spawn;
     use super::*;
 
     #[test]

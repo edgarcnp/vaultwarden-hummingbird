@@ -4,7 +4,7 @@ use std::net::{Shutdown, SocketAddr};
 use std::time::{Duration, Instant};
 
 use super::probe::fake_vault;
-use super::{bind, handle};
+use super::server::{bind, handle};
 
 /// Ephemeral listener + one request -> full response (read to EOF).
 /// `vault = None` doubles as a probe canary: if `/alive` ever reached

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid as NixPid;
 
-use super::POLL;
+use super::child::POLL;
 use crate::util::log;
 
 /// Run a child to completion with a hard timeout; kill on expiry. Aborts

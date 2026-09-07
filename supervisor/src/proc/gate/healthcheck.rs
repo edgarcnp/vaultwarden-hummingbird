@@ -65,7 +65,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::probe::fake_vault;
-    use super::super::{bind, handle};
+    use super::super::server::{bind, handle};
     use super::{healthcheck, healthcheck_until};
 
     /// A stand-in gatekeeper: serves the real `handle` on an ephemeral
