@@ -2,10 +2,16 @@
 //!
 //! mod.rs is declarations only; the public surface is re-exports.
 
+mod consts;
 mod dotenv;
 mod env;
+mod keepalive;
+mod sync;
 
-pub use env::{
-    is_supervisor_key, Config, DbKeepalive, SyncConfig, AUTH_TIMEOUT, DAEMON_WAIT, DB_PING_TIMEOUT,
-    RCLONE, SERVE_TIMEOUT, SYNC_TIMEOUT, TAILSCALE, TAILSCALED, VAULTWARDEN,
+pub use consts::{
+    AUTH_TIMEOUT, DAEMON_WAIT, DB_PING_TIMEOUT, RCLONE, SERVE_TIMEOUT, SYNC_TIMEOUT, TAILSCALE,
+    TAILSCALED, VAULTWARDEN,
 };
+pub use env::{Config, is_supervisor_key};
+pub use keepalive::DbKeepalive;
+pub use sync::SyncConfig;

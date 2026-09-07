@@ -1,33 +1,17 @@
-//! Config resolution: process env + optional supervisor-owned dotenv file.
+//! Supervisor config resolution: merge the process env, the optional
+//! dotenv-file knobs, and code defaults into a validated [`Config`] (all
+//! lookups done once at boot). The pieces live in sibling modules:
+//! `consts` (static values), `sync` / `keepalive` (feature settings),
+//! `dotenv` (the file layer).
 
 use std::env;
 use std::time::Duration;
 
+use super::consts::SYNC_INTERVAL_DEFAULT;
 use super::dotenv::FileConfig;
+use super::keepalive::DbKeepalive;
+use super::sync::{SyncConfig, remote_env_name};
 use crate::util::log;
-
-/// Hard-coded child binary paths (baked into the image, no PATH lookup).
-pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
-/// `tailscale` CLI (drives `up`/`serve` over the LocalAPI socket).
-pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
-/// vaultwarden server binary (the payload this container exists to run).
-pub const VAULTWARDEN: &str = "/vaultwarden";
-/// rclone binary (S3 state sync; baked into the image by the fetch stage).
-pub const RCLONE: &str = "/usr/local/bin/rclone";
-
-/// Hard timeouts: never let a hung tailscaled block the vault.
-pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
-/// Hard timeout for `tailscale serve`.
-pub const SERVE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Hard timeout waiting for tailscaled's LocalAPI socket.
-pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
-/// Hard timeout for one rclone state-sync operation.
-pub const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
-/// Default cadence (seconds) for periodic state pushes.
-pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;
-/// Hard timeout for one DB keepalive ping (bounded like every other phase;
-/// a hung DB must never stall the watch loop).
-pub const DB_PING_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Keys owned by the supervisor (localized to PID 1): they configure the
 /// supervisor/tailscale/S3-sync and are filtered out of the vaultwarden
@@ -67,119 +51,6 @@ fn parse_bool(v: &str) -> Option<bool> {
         "true" | "1" | "yes" | "on" => Some(true),
         "false" | "0" | "no" | "off" => Some(false),
         _ => None,
-    }
-}
-
-/// Uppercased rclone remote name (the part before ':' in `remote:path`):
-/// prefix of the RCLONE_CONFIG_* backend env vars.
-fn remote_env_name(remote: &str) -> String {
-    remote.split(':').next().unwrap_or_default().to_uppercase()
-}
-
-/// S3-backed persistence for `/data` identity files (opt-in): tailscaled's
-/// node state and vaultwarden's RSA keys are synced via rclone to an
-/// S3-compatible bucket, restoring the same tailnet node and JWT-signing
-/// keys across ephemeral redeploys. Single instance per bucket.
-pub struct SyncConfig {
-    /// rclone destination `remote:path` (e.g. `r2:vw-state`)
-    pub remote: String,
-    /// backend env for the rclone child (RCLONE_CONFIG_*; carries secrets)
-    pub env: Vec<(String, String)>,
-    /// periodic push cadence (0 disables periodic pushes)
-    pub interval: Duration,
-}
-
-impl SyncConfig {
-    /// Build from raw knob values; `endpoint` empty means the provider's
-    /// default (e.g. AWS). The rclone child gets backend config via env
-    /// vars — never argv, whose cmdline is world-readable in /proc.
-    /// `RCLONE_CONFIG=/dev/null` disables the config file (env-only remotes).
-    pub fn new(
-        remote: String,
-        key_id: String,
-        key_secret: String,
-        endpoint: String,
-        interval: Duration,
-    ) -> Self {
-        let name = remote_env_name(&remote);
-        let mut env = vec![
-            ("RCLONE_CONFIG".to_string(), "/dev/null".to_string()),
-            (format!("RCLONE_CONFIG_{name}_TYPE"), "s3".to_string()),
-            (format!("RCLONE_CONFIG_{name}_ACCESS_KEY_ID"), key_id),
-            (
-                format!("RCLONE_CONFIG_{name}_SECRET_ACCESS_KEY"),
-                key_secret,
-            ),
-        ];
-        if !endpoint.is_empty() {
-            env.push((format!("RCLONE_CONFIG_{name}_ENDPOINT"), endpoint));
-            // A custom endpoint means a non-AWS S3 flavor; "Other" is
-            // rclone's generic fallback (works for R2/Ceph/Minio) and
-            // silences the per-run "provider not known" NOTICE.
-            env.push((
-                format!("RCLONE_CONFIG_{name}_PROVIDER"),
-                "Other".to_string(),
-            ));
-        }
-        Self {
-            remote,
-            env,
-            interval,
-        }
-    }
-}
-
-/// DB keepalive: issues a trivial query on a cadence so hosts that suspend
-/// an idle database (scale-to-zero / auto-stop) stay awake for the vault.
-/// Opt-in via SUPERVISOR_DB_KEEPALIVE (seconds; unset = off, 0 = off).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DbKeepalive {
-    /// vaultwarden's DATABASE_URL — the ping must reach the same DB the
-    /// vault uses; never logged (carries credentials)
-    pub url: String,
-    /// ping cadence
-    pub interval: Duration,
-}
-
-impl DbKeepalive {
-    /// Resolve from the raw knob value and the child's DATABASE_URL (if
-    /// any). `raw` empty or `0` disables; non-numeric values warn and
-    /// disable; a non-postgres URL (sqlite/mysql) disables silently unless
-    /// the knob was explicitly set, in which case it warns — the supervisor
-    /// only speaks the postgres wire protocol.
-    pub fn from_parts(raw: &str, db_url: Option<String>) -> Option<Self> {
-        let explicit = !raw.is_empty();
-        let interval = match raw.parse::<u64>() {
-            Ok(0) => return None,
-            Ok(secs) => secs,
-            Err(_) => {
-                if explicit {
-                    log::err(&format!(
-                        "config: invalid SUPERVISOR_DB_KEEPALIVE '{}' (want seconds); \
-                         keepalive disabled",
-                        log::sanitize(raw)
-                    ));
-                }
-                return None;
-            }
-        };
-        match db_url.as_deref().map(str::trim) {
-            Some(u) if u.starts_with("postgres://") || u.starts_with("postgresql://") => {
-                Some(Self {
-                    url: u.to_string(),
-                    interval: Duration::from_secs(interval),
-                })
-            }
-            _ => {
-                if explicit {
-                    log::err(
-                        "config: SUPERVISOR_DB_KEEPALIVE set but DATABASE_URL is not a \
-                         postgres URL; keepalive disabled",
-                    );
-                }
-                None
-            }
-        }
     }
 }
 
@@ -242,58 +113,7 @@ impl Config {
                 .unwrap_or_else(|| default.to_string())
         };
 
-        // Misconfigurations degrade to sync disabled (never block the vault).
-        let sync = {
-            let remote = knob("SUPERVISOR_S3_REMOTE", "");
-            let key_id = knob("SUPERVISOR_S3_ACCESS_KEY_ID", "");
-            let key_secret = knob("SUPERVISOR_S3_SECRET_ACCESS_KEY", "");
-            if remote.is_empty() {
-                None
-            } else if key_id.is_empty() || key_secret.is_empty() {
-                log::err(
-                    "config: SUPERVISOR_S3_REMOTE set without SUPERVISOR_S3_ACCESS_KEY_ID/\
-                     SECRET_ACCESS_KEY; state sync disabled",
-                );
-                None
-            } else if let Some((name_raw, _)) = remote.split_once(':') {
-                let name = remote_env_name(name_raw);
-                if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    log::err(&format!(
-                        "config: invalid SUPERVISOR_S3_REMOTE '{}' (remote name must be \
-                         alphanumeric); state sync disabled",
-                        log::sanitize(&remote)
-                    ));
-                    None
-                } else {
-                    let raw_interval = knob("SUPERVISOR_S3_SYNC_INTERVAL", "");
-                    let secs: u64 = match raw_interval.parse() {
-                        Ok(secs) => secs,
-                        Err(_) => {
-                            log::err(&format!(
-                                "config: invalid SUPERVISOR_S3_SYNC_INTERVAL '{}'; \
-                                 using default {SYNC_INTERVAL_DEFAULT}s",
-                                log::sanitize(&raw_interval)
-                            ));
-                            SYNC_INTERVAL_DEFAULT
-                        }
-                    };
-                    Some(SyncConfig::new(
-                        remote,
-                        key_id,
-                        key_secret,
-                        knob("SUPERVISOR_S3_ENDPOINT", ""),
-                        Duration::from_secs(secs),
-                    ))
-                }
-            } else {
-                log::err(&format!(
-                    "config: invalid SUPERVISOR_S3_REMOTE '{}' (must be remote:path); \
-                     state sync disabled",
-                    log::sanitize(&remote)
-                ));
-                None
-            }
-        };
+        let sync = resolve_sync(&knob);
 
         // Lenient bool knobs: misspellings warn and take the default rather
         // than silently flipping the feature off.
@@ -327,9 +147,6 @@ impl Config {
             // DATABASE_URL is a vaultwarden (child) key: file wins over
             // process env, matching run_vaultwarden's child precedence —
             // the ping must reach the same DB the vault uses.
-            // DATABASE_URL is a vaultwarden (child) key: file wins over
-            // process env, matching run_vaultwarden's child precedence —
-            // the ping must reach the same DB the vault uses.
             db_keepalive: DbKeepalive::from_parts(
                 &knob("SUPERVISOR_DB_KEEPALIVE", ""),
                 file.child
@@ -339,6 +156,60 @@ impl Config {
             ),
             vw_env: file.child.into_iter().collect(),
         }
+    }
+}
+
+/// Resolve the S3 state-sync knobs into a [`SyncConfig`]. Misconfigurations
+/// degrade to sync disabled (never block the vault).
+fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
+    let remote = knob("SUPERVISOR_S3_REMOTE", "");
+    let key_id = knob("SUPERVISOR_S3_ACCESS_KEY_ID", "");
+    let key_secret = knob("SUPERVISOR_S3_SECRET_ACCESS_KEY", "");
+    if remote.is_empty() {
+        None
+    } else if key_id.is_empty() || key_secret.is_empty() {
+        log::err(
+            "config: SUPERVISOR_S3_REMOTE set without SUPERVISOR_S3_ACCESS_KEY_ID/\
+             SECRET_ACCESS_KEY; state sync disabled",
+        );
+        None
+    } else if let Some((name_raw, _)) = remote.split_once(':') {
+        let name = remote_env_name(name_raw);
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            log::err(&format!(
+                "config: invalid SUPERVISOR_S3_REMOTE '{}' (remote name must be \
+                 alphanumeric); state sync disabled",
+                log::sanitize(&remote)
+            ));
+            None
+        } else {
+            let raw_interval = knob("SUPERVISOR_S3_SYNC_INTERVAL", "");
+            let secs: u64 = match raw_interval.parse() {
+                Ok(secs) => secs,
+                Err(_) => {
+                    log::err(&format!(
+                        "config: invalid SUPERVISOR_S3_SYNC_INTERVAL '{}'; \
+                         using default {SYNC_INTERVAL_DEFAULT}s",
+                        log::sanitize(&raw_interval)
+                    ));
+                    SYNC_INTERVAL_DEFAULT
+                }
+            };
+            Some(SyncConfig::new(
+                remote,
+                key_id,
+                key_secret,
+                knob("SUPERVISOR_S3_ENDPOINT", ""),
+                Duration::from_secs(secs),
+            ))
+        }
+    } else {
+        log::err(&format!(
+            "config: invalid SUPERVISOR_S3_REMOTE '{}' (must be remote:path); \
+             state sync disabled",
+            log::sanitize(&remote)
+        ));
+        None
     }
 }
 
@@ -536,45 +407,5 @@ mod tests {
         set("TS_SERVE", "definitely");
         let cfg = Config::from_env();
         assert!(cfg.serve);
-    }
-
-    /// Keepalive resolution: off by default, cadence knob drives it, and it
-    /// only arms when the vault's DB is a postgres URL (the supervisor's
-    /// ping speaks the postgres wire protocol).
-    #[test]
-    fn db_keepalive_resolution() {
-        fn with(raw: &str, db: Option<&str>) -> Option<DbKeepalive> {
-            DbKeepalive::from_parts(raw, db.map(String::from))
-        }
-
-        // unset knob / empty / explicit 0: off regardless of DB
-        assert!(with("", Some("postgres://u:p@h/db")).is_none());
-        assert!(with("0", Some("postgres://u:p@h/db")).is_none());
-        assert!(with("", None).is_none());
-
-        // knob without a DB url: disabled, no phantom keepalive
-        assert!(with("300", None).is_none());
-
-        // non-postgres DB (sqlite/mysql) can't be pinged by the supervisor
-        assert!(with("300", Some("sqlite:///data/db.sqlite3")).is_none());
-        assert!(with("300", Some("mysql://u:p@h/db")).is_none());
-
-        // armed: cadence honored, URL carried verbatim
-        let ka =
-            with("300", Some("postgres://u:p@h:5432/db?sslmode=require")).expect("keepalive armed");
-        assert_eq!(ka.interval, Duration::from_secs(300));
-        assert_eq!(ka.url, "postgres://u:p@h:5432/db?sslmode=require");
-        assert!(with("300", Some("postgresql://u:p@h/db")).is_some());
-
-        // whitespace-padded URL is trimmed
-        assert_eq!(
-            with("300", Some("  postgres://u:p@h/db  "))
-                .expect("armed")
-                .url,
-            "postgres://u:p@h/db"
-        );
-
-        // invalid cadence: disabled (warn logged, non-fatal)
-        assert!(with("soon", Some("postgres://u:p@h/db")).is_none());
     }
 }
