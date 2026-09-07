@@ -17,7 +17,7 @@ use std::sync::Arc;
 use postgres::Config as PgConfig;
 use rustls::client::danger::ServerCertVerifier;
 
-use crate::config::{DbKeepalive, DB_PING_TIMEOUT};
+use crate::config::{DB_PING_TIMEOUT, DbKeepalive};
 use crate::util::log;
 
 /// One keepalive cycle: fresh connection + `SELECT 1`. Runs inline in the

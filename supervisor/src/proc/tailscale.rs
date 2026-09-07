@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config::{TAILSCALE, TAILSCALED};
-use crate::proc::{run_bounded, spawn, Pid};
+use crate::proc::{Pid, run_bounded, spawn};
 use crate::util::log;
 
 /// tailscaled with no TUN device when `userspace` (PaaS sandboxes deny

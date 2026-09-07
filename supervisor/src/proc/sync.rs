@@ -14,7 +14,7 @@
 //! fresh node registration (re-auth), one client re-login, or one ACME
 //! re-issuance.
 
-use crate::config::{SyncConfig, RCLONE, SYNC_TIMEOUT};
+use crate::config::{RCLONE, SYNC_TIMEOUT, SyncConfig};
 use crate::proc::run_bounded_env;
 use crate::util::log;
 
