@@ -12,6 +12,15 @@ services:
     image: vaultwarden-hummingbird:local
     restart: unless-stopped
     stop_grace_period: 90s   # TERM_GRACE + final S3 state push
+    # Explicit here (not just inherited from the image): podman's default
+    # OCI image format drops HEALTHCHECK; compose-level definition works
+    # with any backend/format. Same probe as the Containerfile directive.
+    healthcheck:
+      test: ["CMD", "/entrypoint", "--healthcheck"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
     cap_drop:
       - ALL
     security_opt:

@@ -1,7 +1,6 @@
 .git
 supervisor/target
 *.md
-render.yaml
 compose.yaml
 .env
 .env.example

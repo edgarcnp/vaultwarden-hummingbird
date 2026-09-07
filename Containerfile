@@ -175,3 +175,10 @@ EXPOSE 8080
 
 USER 65532:0
 ENTRYPOINT ["/entrypoint"]
+
+# Container-native health: the supervisor dials its own gate in one-shot
+# mode (`/entrypoint --healthcheck`), which reports 200 only when
+# vaultwarden's own /alive answers 2xx — the full chain, probed without a
+# shell (exec form; the runtime image has no curl/wget).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
+    CMD ["/entrypoint", "--healthcheck"]
