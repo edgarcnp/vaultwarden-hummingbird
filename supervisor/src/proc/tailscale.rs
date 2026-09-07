@@ -93,26 +93,27 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
 }
 
 /// `tailscale serve`: inbound tailnet path for the loopback vault
-/// (userspace mode has none without it).
+/// (userspace mode has none without it). With `service` set (`TS_SERVICE`),
+/// the node advertises itself as a host of `svc:<name>` — the Service-host
+/// form; the CLI implies `--bg`, requires a tagged node and admin-console
+/// Service definition, and shows up as pending approval in the console.
 pub fn tailscale_serve(
     port: &str,
+    service: Option<&str>,
     socket: &str,
     timeout: Duration,
     abort: impl Fn() -> bool,
 ) -> bool {
-    run_bounded(
-        timeout,
-        TAILSCALE,
-        &[
-            "--socket",
-            socket,
-            "serve",
-            "--bg",
-            "--https=443",
-            &format!("http://127.0.0.1:{port}"),
-        ],
-        abort,
-    )
+    let target = format!("http://127.0.0.1:{port}");
+    let svc_arg = service.map(|svc| format!("--service={svc}"));
+    let mut args: Vec<&str> = vec!["--socket", socket, "serve"];
+    match &svc_arg {
+        Some(flag) => args.push(flag),
+        None => args.push("--bg"),
+    }
+    args.push("--https=443");
+    args.push(&target);
+    run_bounded(timeout, TAILSCALE, &args, abort)
 }
 
 #[cfg(test)]

@@ -78,12 +78,28 @@ fn main() {
                     log::err("no room for the internal vault port; refusing to start");
                     shutdown(Some(tsd), 1, None)
                 };
-                let ok = tailscale_serve(vault_port, &cfg.socket, config::SERVE_TIMEOUT, stopping);
-                log::info(if ok {
-                    "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net"
+                let ok = tailscale_serve(
+                    vault_port,
+                    cfg.service.as_deref(),
+                    &cfg.socket,
+                    config::SERVE_TIMEOUT,
+                    stopping,
+                );
+                let msg = if ok {
+                    match &cfg.service {
+                        Some(svc) => format!(
+                            "tailscale serve: advertised {svc} (needs console definition + approval)"
+                        ),
+                        None => {
+                            "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net"
+                                .into()
+                        }
+                    }
                 } else {
                     "tailscale serve failed (needs MagicDNS + HTTPS certs enabled); continuing"
-                });
+                        .into()
+                };
+                log::info(&msg);
             }
         } else {
             if take_stop() {

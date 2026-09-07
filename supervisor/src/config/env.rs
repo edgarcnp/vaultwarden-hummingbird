@@ -45,6 +45,19 @@ fn parse_bool(v: &str) -> Option<bool> {
     }
 }
 
+/// Tailscale Service reference from `TS_SERVICE`: a bare name or an already
+/// prefixed `svc:<name>` becomes `svc:<name>`; anything else (empty, bare
+/// `svc:`) warns and disables the advertisement.
+fn resolve_service(v: Option<String>) -> Option<String> {
+    let v = non_empty(v)?;
+    let name = v.strip_prefix("svc:").unwrap_or(&v);
+    if name.is_empty() {
+        log::err("config: invalid TS_SERVICE 'svc:' (want svc:<name>); not advertising a service");
+        return None;
+    }
+    Some(format!("svc:{name}"))
+}
+
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
     /// tailscaled state file (under the writable data volume)
@@ -62,6 +75,9 @@ pub struct Config {
     pub authkey: String,
     /// configure `tailscale serve` after a successful up
     pub serve: bool,
+    /// advertise this node as a host of `svc:<name>` via `tailscale serve
+    /// --service` (`TS_SERVICE`; None = classic device-level serve only)
+    pub service: Option<String>,
     /// userspace networking: no TUN device on PaaS platforms
     pub userspace: bool,
     /// S3 state sync (None = disabled)
@@ -123,9 +139,12 @@ impl Config {
             socket: knob("TS_SOCKET", "/tmp/tailscaled.sock"),
             port,
             vault_port,
-            hostname: knob("TS_HOSTNAME", "vaultwarden"),
+            hostname: knob("TS_HOSTNAME", "vaultwarden-hummingbird"),
             authkey: knob("TS_AUTHKEY", ""),
             serve: flag("TS_SERVE", true),
+            service: resolve_service(
+                lookup("TS_SERVICE").or_else(|| file.knobs.get("TS_SERVICE").cloned()),
+            ),
             userspace: flag("TS_USERSPACE", true),
             sync,
             // child key: file wins over env — the ping must reach the same
@@ -199,9 +218,10 @@ mod tests {
         assert_eq!(cfg.vault_port.as_deref(), Some("8081"));
         assert_eq!(cfg.socket, "/tmp/tailscaled.sock");
         assert_eq!(cfg.state, "/data/tailscaled.state");
-        assert_eq!(cfg.hostname, "vaultwarden");
+        assert_eq!(cfg.hostname, "vaultwarden-hummingbird");
         assert_eq!(cfg.authkey, "");
         assert!(cfg.serve && cfg.userspace);
+        assert_eq!(cfg.service, None);
         assert!(cfg.vw_env.is_empty());
         assert!(cfg.sync.is_none());
 
@@ -263,5 +283,44 @@ mod tests {
         // misspelling warns and takes the default
         let cfg = mk(&[("TS_SERVE", "definitely")]);
         assert!(cfg.serve);
+    }
+
+    #[test]
+    fn service_reference_resolution() {
+        assert_eq!(
+            resolve_service(Some("vaultwarden".into())),
+            Some("svc:vaultwarden".into())
+        );
+        assert_eq!(
+            resolve_service(Some("svc:vaultwarden".into())),
+            Some("svc:vaultwarden".into())
+        );
+        // unset and empty mean the same: classic serve only
+        assert_eq!(resolve_service(None), None);
+        assert_eq!(resolve_service(Some(String::new())), None);
+        // a bare prefix is a misconfiguration: warn, don't advertise
+        assert_eq!(resolve_service(Some("svc:".into())), None);
+    }
+
+    #[test]
+    fn service_knob_merges_over_the_file() {
+        let cfg = mk_with_file(
+            &[],
+            FileConfig::load_from(Some(&env_dotenv("TS_SERVICE=file-svc\n"))),
+        );
+        assert_eq!(cfg.service.as_deref(), Some("svc:file-svc"));
+
+        let cfg = mk_with_file(
+            &[("TS_SERVICE", "env-svc")],
+            FileConfig::load_from(Some(&env_dotenv("TS_SERVICE=file-svc\n"))),
+        );
+        assert_eq!(cfg.service.as_deref(), Some("svc:env-svc"));
+    }
+
+    /// One-key dotenv file for the merge tests above.
+    fn env_dotenv(contents: &str) -> String {
+        let path = std::env::temp_dir().join(format!("vw-sup-svc-{}.env", std::process::id()));
+        fs::write(&path, contents).unwrap();
+        path.to_str().unwrap().to_string()
     }
 }

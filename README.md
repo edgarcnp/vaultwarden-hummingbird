@@ -66,8 +66,9 @@ Supply it via the compose default (mount + `SUPERVISOR_ENV_FILE`), container env
 
 - `tailscaled` runs in userspace networking (no TUN, no caps). `TS_USERSPACE=false` for TUN mode.
 - Inbound access via `tailscale serve` (automatic after `up`; `TS_SERVE=false` to disable) → `https://<hostname>.<tailnet>.ts.net`. Needs MagicDNS + HTTPS certs on the tailnet.
+- Optional Tailscale **Service** advertisement (`TS_SERVICE=vaultwarden`): the node advertises itself as a host of `svc:vaultwarden` (`tailscale serve --service`). Requires a tag-based authkey, the Service defined on the admin console [Services page](https://console.tailscale.com/admin/services) (endpoint `tcp:443`), and admin approval or an `autoApprovers.services` policy.
 - Bad/missing `TS_AUTHKEY` is non-fatal: the vault runs without Tailscale.
-- Knobs: `TS_HOSTNAME`, `TS_SERVE`, `TS_USERSPACE`, `TS_SOCKET`, `TS_STATE_FILE`.
+- Knobs: `TS_HOSTNAME`, `TS_SERVE`, `TS_SERVICE`, `TS_USERSPACE`, `TS_SOCKET`, `TS_STATE_FILE`.
 
 ## S3 state sync (volume-less hosts)
 
