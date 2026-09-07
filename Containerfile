@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # Vaultwarden + Tailscale on Red Hat Hummingbird. Checksum-pinned official
 # sources, Rust supervisor as PID 1, web vault optional (WEB_VAULT=true).
 
@@ -156,7 +154,9 @@ COPY --from=fetch /out/web-vault /web-vault
 # uid 65532 pre-exists in /etc/passwd
 COPY --from=fetch --chown=65532:0 /data /data
 
-# defaults; env vars override
+# defaults; env vars override. ROCKET_ADDRESS is also hard-pinned to
+# 127.0.0.1 by the supervisor at spawn (defense in depth: the image default
+# must not reintroduce a 0.0.0.0 API listener if run without the supervisor).
 ENV DATA_FOLDER=/data \
     SIGNUPS_ALLOWED=false \
     ORG_CREATION_USERS=none \
@@ -166,7 +166,7 @@ ENV DATA_FOLDER=/data \
     WEB_VAULT_FOLDER=/web-vault \
     I_REALLY_WANT_VOLATILE_STORAGE=true \
     TZ=UTC \
-    ROCKET_ADDRESS=0.0.0.0
+    ROCKET_ADDRESS=127.0.0.1
 
 VOLUME /data
 EXPOSE 8080

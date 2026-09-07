@@ -5,6 +5,7 @@ services:
   vaultwarden:
     build:
       context: .
+      dockerfile: Containerfile
       args:
         WEB_VAULT: "false"
     image: vaultwarden-hummingbird:local
@@ -18,6 +19,8 @@ services:
     tmpfs:
       - /tmp
     ports:
+      # Exposed port serves /alive only (supervisor gatekeeper); the API is
+      # tailnet-only via tailscale serve.
       - "127.0.0.1:8080:8080"
     volumes:
       - ./.env:/config/.env:ro,z

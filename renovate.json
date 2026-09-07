@@ -35,7 +35,7 @@
             "customType": "regex",
             "description": "vaultwarden source pin",
             "fileMatch": [
-                "^Dockerfile$"
+                "^Containerfile$"
             ],
             "matchStrings": [
                 "ARG VW_VERSION=(?<currentValue>\\S+)"
@@ -47,7 +47,7 @@
             "customType": "regex",
             "description": "web-vault pin",
             "fileMatch": [
-                "^Dockerfile$"
+                "^Containerfile$"
             ],
             "matchStrings": [
                 "ARG WEB_VAULT_VERSION=(?<currentValue>\\S+)"
@@ -59,7 +59,7 @@
             "customType": "regex",
             "description": "tailscale pin (ARG strips the upstream v prefix)",
             "fileMatch": [
-                "^Dockerfile$"
+                "^Containerfile$"
             ],
             "matchStrings": [
                 "ARG TAILSCALE_VERSION=(?<currentValue>\\S+)"
@@ -72,7 +72,7 @@
             "customType": "regex",
             "description": "Kitware cmake pin (ARG strips the upstream v prefix)",
             "fileMatch": [
-                "^Dockerfile$"
+                "^Containerfile$"
             ],
             "matchStrings": [
                 "ARG CMAKE_VERSION=(?<currentValue>\\S+)"
@@ -85,7 +85,7 @@
             "customType": "regex",
             "description": "rclone pin (ARG strips the upstream v prefix)",
             "fileMatch": [
-                "^Dockerfile$"
+                "^Containerfile$"
             ],
             "matchStrings": [
                 "ARG RCLONE_VERSION=(?<currentValue>\\S+)"
@@ -98,7 +98,7 @@
             "customType": "regex",
             "description": "pq-sys exact pin (cargo add in the vw-build stage)",
             "fileMatch": [
-                "^Dockerfile$"
+                "^Containerfile$"
             ],
             "matchStrings": [
                 "cargo add pq-sys@=(?<currentValue>\\S+)"
@@ -109,7 +109,7 @@
         {
             "description": "Hummingbird base image tag pins",
             "fileMatch": [
-                "^Dockerfile$"
+                "^Containerfile$"
             ],
             "matchStrings": [
                 "ARG BUILDER_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/rust):(?<currentValue>\\S+)",

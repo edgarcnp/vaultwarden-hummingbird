@@ -5,7 +5,7 @@ Hardened container image: [Vaultwarden](https://github.com/dani-garcia/vaultward
 ## Build
 
 ```sh
-podman build -t vaultwarden-hummingbird:local .   # or docker
+podman build -t vaultwarden-hummingbird:local .   # picks up Containerfile
 
 # options (build args)
 WEB_VAULT=true         # include web vault (default: API-only)
@@ -28,10 +28,14 @@ podman run --rm -p 127.0.0.1:8080:8080 \
 
 # or compose
 cp .env.example .env   # fill in, keep out of git
-docker compose up -d
+podman compose up -d   # or docker compose
 ```
 
-Port: 8080 (`PORT` from the platform wins, else `ROCKET_PORT`).
+Port: 8080 (`PORT` from the platform wins, else `ROCKET_PORT`). Only
+`/alive` is answered on the exposed port — a status-only verdict: 200 while
+vaultwarden serves, 503 when it does not; every other path → 403, and no
+vault response data is forwarded. The Bitwarden API itself is loopback-only,
+reachable solely via `tailscale serve` over the tailnet.
 
 ## Configuration
 
@@ -82,7 +86,7 @@ Failures are non-fatal (logged only on state change). Postgres URLs only — the
 
 ## Files
 
-- `Dockerfile` — 4 stages: fetch & verify → supervisor → vaultwarden → minimal runtime
-- `supervisor/` — Rust PID 1: tailscaled + `up`/`serve` + vaultwarden, with clean SIGTERM teardown
-- `.env.example` — the one config file; `docker-compose.yaml` — local runner
+- `Containerfile` — 4 stages: fetch & verify → supervisor → vaultwarden → minimal runtime
+- `supervisor/` — Rust PID 1: exposed-port gatekeeper (`/alive` only), tailscaled + `up`/`serve` + loopback-only vaultwarden, with clean SIGTERM teardown
+- `.env.example` — the one config file; `compose.yaml` — local runner (podman/docker compose)
 - `render.yaml` — optional Render blueprint

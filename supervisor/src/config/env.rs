@@ -189,9 +189,15 @@ pub struct Config {
     pub state: String,
     /// LocalAPI unix socket (must live on a writable, non-volume path)
     pub socket: String,
-    /// vaultwarden listen port: PORT wins, then ROCKET_PORT, else 8080
-    /// (non-root cannot bind 80)
+    /// exposed (gatekeeper) listen port: PORT wins, then ROCKET_PORT, else
+    /// 8080 (non-root cannot bind 80)
     pub port: String,
+    /// vaultwarden's own port, derived as `port + 1` and bound loopback-only
+    /// (only `tailscale serve` and the gatekeeper's proxy-free design touch
+    /// it). None = the exposed port leaves no room (65535): boot must fail
+    /// closed — the caller refuses to run rather than co-binding or exposing
+    /// vaultwarden directly.
+    pub vault_port: Option<String>,
     /// node name announced to the tailnet (`TS_HOSTNAME`)
     pub hostname: String,
     /// Tailscale auth key or OAuth client secret (`TS_AUTHKEY`; empty = skip `up`)
@@ -212,6 +218,7 @@ impl Config {
     /// Merge order:
     ///   supervisor knobs (TS_*/SUPERVISOR_*): process env > file > code defaults
     ///   port: PORT env > ROCKET_PORT env > file ROCKET_PORT > 8080
+    ///   vault_port: port + 1 (internal, loopback-only)
     ///   vaultwarden keys: file > container env (applied in proc::run_vaultwarden)
     /// Empty values (env or file) are treated as unset. Boolean knobs
     /// (TS_SERVE/TS_USERSPACE) accept true/false/1/0/yes/no/on/off in any
@@ -223,6 +230,11 @@ impl Config {
             .or_else(|| valid_port(env::var("ROCKET_PORT").ok()))
             .or_else(|| valid_port(file.child.get("ROCKET_PORT").cloned()))
             .unwrap_or_else(|| "8080".into());
+        let vault_port = port
+            .parse::<u16>()
+            .ok()
+            .and_then(|p| p.checked_add(1))
+            .map(|p| p.to_string());
 
         let knob = |key: &str, default: &str| -> String {
             non_empty(env::var(key).ok())
@@ -306,6 +318,7 @@ impl Config {
             state: knob("TS_STATE_FILE", "/data/tailscaled.state"),
             socket: knob("TS_SOCKET", "/tmp/tailscaled.sock"),
             port,
+            vault_port,
             hostname: knob("TS_HOSTNAME", "vaultwarden"),
             authkey: knob("TS_AUTHKEY", ""),
             serve: flag("TS_SERVE", true),
@@ -400,6 +413,7 @@ mod tests {
         set("SUPERVISOR_ENV_FILE", "");
         let cfg = Config::from_env();
         assert_eq!(cfg.port, "8080");
+        assert_eq!(cfg.vault_port.as_deref(), Some("8081"));
         assert_eq!(cfg.socket, "/tmp/tailscaled.sock");
         assert_eq!(cfg.state, "/data/tailscaled.state");
         assert_eq!(cfg.hostname, "vaultwarden");
@@ -409,7 +423,9 @@ mod tests {
 
         set("PORT", "3000");
         set("ROCKET_PORT", "1111");
-        assert_eq!(Config::from_env().port, "3000");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.port, "3000");
+        assert_eq!(cfg.vault_port.as_deref(), Some("3001"));
         unsafe { env::remove_var("PORT") };
         assert_eq!(Config::from_env().port, "1111");
 
@@ -418,6 +434,14 @@ mod tests {
         assert_eq!(Config::from_env().port, "8080");
         unsafe { env::remove_var("PORT") };
         unsafe { env::remove_var("ROCKET_PORT") };
+
+        // 65535 leaves no room above the exposed port: the derivation yields
+        // None, which the caller must treat as refuse-to-start (fail closed).
+        set("PORT", "65535");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.port, "65535");
+        assert_eq!(cfg.vault_port, None);
+        unsafe { env::remove_var("PORT") };
 
         clear();
         let path = env::temp_dir().join(format!("vw-sup-cfg-{}.env", std::process::id()));

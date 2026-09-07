@@ -22,9 +22,9 @@ use std::time::Instant;
 
 use config::{Config, SyncConfig};
 use proc::{
-    Gone, POLL, Pid, TERM_GRACE, alive, exit_code, exit_reason, install_signal_handlers, reap_any,
-    reap_until_gone, restore_state, run_vaultwarden, signal_group, spawn_tailscaled, stopping,
-    sync_state, tailscale_serve, tailscale_up, take_stop,
+    Gone, POLL, Pid, TERM_GRACE, alive, exit_code, exit_reason, gate_bind, gate_describe,
+    gate_serve, install_signal_handlers, reap_any, reap_until_gone, restore_state, run_vaultwarden,
+    signal_group, spawn_tailscaled, stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
 };
 use util::{log, net};
 
@@ -70,7 +70,11 @@ fn main() {
                 sync_state(sync, stopping);
             }
             if cfg.serve {
-                let ok = tailscale_serve(&cfg.port, &cfg.socket, config::SERVE_TIMEOUT, stopping);
+                let Some(vault_port) = &cfg.vault_port else {
+                    log::err("no room for the internal vault port; refusing to start");
+                    shutdown(Some(tsd), 1, None)
+                };
+                let ok = tailscale_serve(vault_port, &cfg.socket, config::SERVE_TIMEOUT, stopping);
                 log::info(if ok {
                     "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net"
                 } else {
@@ -90,13 +94,46 @@ fn main() {
     start_vw(&cfg, Some(tsd))
 }
 
-/// Hand off to vaultwarden and supervise it: the watch loop is the single
-/// reaper of the PID namespace (orphans re-parent to us as PID 1), observes
-/// vaultwarden's exit or a stop request, drives periodic state sync, then
-/// tears down tailscaled and exits with vaultwarden's code.
+/// Hand off to vaultwarden and supervise it: bind the exposed-port
+/// gatekeeper (the only `0.0.0.0` listener), start the loopback-only vault,
+/// then the watch loop — the single reaper of the PID namespace (orphans
+/// re-parent to us as PID 1), observes vaultwarden's exit or a stop request,
+/// drives periodic state sync, then tears down tailscaled and exits with
+/// vaultwarden's code.
 fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
+    // Fail closed on a missing internal port: without it there is no secure
+    // way to run the vault (co-binding would expose it, refusing is honest).
+    let Some(vault_port) = &cfg.vault_port else {
+        log::err("no room for the internal vault port above the exposed port; refusing to start");
+        shutdown(tsd, 1, None)
+    };
+    let gate = match gate_bind(&cfg.port) {
+        Ok(g) => g,
+        Err(e) => {
+            log::err(&format!(
+                "gatekeeper bind failed on 0.0.0.0:{}: {e}",
+                log::sanitize(&cfg.port)
+            ));
+            shutdown(tsd, 1, None)
+        }
+    };
+    gate_describe(&cfg.port, vault_port);
+    // The probe target: vaultwarden's loopback listener. A port that failed
+    // to parse would mean a broken config — fail closed like every other
+    // invalid-port path.
+    let Ok(vault_addr) = vault_port
+        .parse::<u16>()
+        .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
+    else {
+        log::err("internal vault port is not a valid port; refusing to start");
+        shutdown(tsd, 1, None)
+    };
+    drop(std::thread::spawn(move || {
+        gate_serve(gate, Some(vault_addr))
+    }));
+
     log::info("starting vaultwarden");
-    let Some(vw) = run_vaultwarden(&cfg.port, &cfg.vw_env) else {
+    let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
         shutdown(tsd, 1, None)
     };
 

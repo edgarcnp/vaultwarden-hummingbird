@@ -2,6 +2,6 @@
 supervisor/target
 *.md
 render.yaml
-docker-compose.yaml
+compose.yaml
 .env
 .env.example

@@ -4,19 +4,21 @@ use std::env;
 use std::ffi::OsStr;
 use std::process::Command;
 
-use crate::config::{VAULTWARDEN, is_supervisor_key};
-use crate::proc::{Pid, spawn};
+use crate::config::{is_supervisor_key, VAULTWARDEN};
+use crate::proc::{spawn, Pid};
 
 /// vaultwarden in the foreground with a *localized* environment: container
 /// env minus supervisor-owned keys (TS_*/SUPERVISOR_*), then dotenv-file vars
 /// (authoritative in file mode — this is what makes image-baked posture
-/// defaults overridable), then hard invariants: ROCKET_PORT (from PORT),
-/// ROCKET_ADDRESS, DATA_FOLDER.
+/// defaults overridable), then hard invariants: ROCKET_PORT (the internal
+/// vault port, public + 1), ROCKET_ADDRESS (loopback-only: the API is
+/// reachable solely via `tailscale serve`, which dials 127.0.0.1 in the same
+/// netns), DATA_FOLDER.
 ///
 /// Own process-group leader (see [`spawn`]) so shutdown signals reach the
 /// whole group. Spawn failure returns `None`; the caller tears down what is
 /// already running and exits 1.
-pub fn run_vaultwarden(port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
+pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
     let mut cmd = Command::new(VAULTWARDEN);
     cmd.env_clear();
     for (k, v) in env::vars_os() {
@@ -27,8 +29,8 @@ pub fn run_vaultwarden(port: &str, extra_env: &[(String, String)]) -> Option<Pid
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    cmd.env("ROCKET_PORT", port)
-        .env("ROCKET_ADDRESS", "0.0.0.0")
+    cmd.env("ROCKET_PORT", vault_port)
+        .env("ROCKET_ADDRESS", "127.0.0.1")
         .env("DATA_FOLDER", "/data");
     spawn(&mut cmd)
 }
