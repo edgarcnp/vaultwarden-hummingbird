@@ -2,8 +2,8 @@
 //! restore miss-never-corrupt. Anything uncertain is Err (ambiguous),
 //! never "empty" — callers fail closed.
 
-use crate::config::{BACKUP_TIMEOUT, DB_PING_TIMEOUT, DbBackupConfig, DbSpec, MARIADB};
-use crate::runtime::pg;
+use crate::config::{DbBackupConfig, DbSpec, BACKUP_TIMEOUT, DB_PING_TIMEOUT, MARIADB};
+use crate::runtime::db::pg;
 use crate::runtime::run_bounded_capture;
 
 use super::dbenv::{defaults_file, mysql_env};
