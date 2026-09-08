@@ -4,10 +4,10 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use crate::config::{DB_TOOL_LIB, DbSpec};
+use crate::config::{DbSpec, DB_TOOL_LIB};
 
 /// libpq env vars for the dump/restore tools.
-pub(super) fn pg_env(db: &DbSpec) -> Vec<(String, String)> {
+pub fn pg_env(db: &DbSpec) -> Vec<(String, String)> {
     let DbSpec::Postgres {
         host,
         port,
@@ -40,13 +40,13 @@ pub(super) fn pg_env(db: &DbSpec) -> Vec<(String, String)> {
 }
 
 /// Shared-lib dir for the mariadb tools, extracted by the image build.
-pub(super) fn mysql_env() -> Vec<(String, String)> {
+pub fn mysql_env() -> Vec<(String, String)> {
     vec![("LD_LIBRARY_PATH".to_string(), DB_TOOL_LIB.to_string())]
 }
 
 /// 0600 defaults file for mariadb tools; under /tmp (tmpfs,
 /// container-private); removed by the caller after the run.
-pub(super) fn defaults_file(
+pub fn defaults_file(
     user: Option<&str>,
     password: Option<&str>,
     host: Option<&str>,

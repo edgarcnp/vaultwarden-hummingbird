@@ -6,7 +6,7 @@ use crate::config::{BACKUP_TIMEOUT, DB_PING_TIMEOUT, DbBackupConfig, DbSpec, MAR
 use crate::runtime::db::pg;
 use crate::runtime::run_bounded_capture;
 
-use super::dbenv::{defaults_file, mysql_env};
+use super::super::db::tools::{defaults_file, mysql_env};
 
 /// Emptiness per backend: sqlite = file absent; postgres = `users` table
 /// verifiably missing; mysql = information_schema count via the mariadb

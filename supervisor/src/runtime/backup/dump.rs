@@ -7,7 +7,7 @@ use crate::config::{BACKUP_TIMEOUT, DbBackupConfig, DbSpec, MARIADB_DUMP, PG_DUM
 use crate::runtime::run_bounded_env;
 use crate::util::log;
 
-use super::dbenv::{defaults_file, mysql_env, pg_env};
+use super::super::db::tools::{defaults_file, mysql_env, pg_env};
 use super::prune::prune;
 use super::staging::{lock_down, sweep_staging};
 use super::timestamp::timestamp;

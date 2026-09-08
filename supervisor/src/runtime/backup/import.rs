@@ -9,7 +9,7 @@ use crate::runtime::run_bounded_env;
 use crate::util::log;
 
 use super::check::is_empty;
-use super::dbenv::{defaults_file, mysql_env, pg_env};
+use super::super::db::tools::{defaults_file, mysql_env, pg_env};
 use super::staging::sweep_staging;
 use super::tools::{list_objects, rclone, tool};
 

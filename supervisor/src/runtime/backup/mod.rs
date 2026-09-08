@@ -5,7 +5,6 @@
 //! mod.rs is declarations only; the public surface is re-exports.
 
 mod check;
-mod dbenv;
 mod dump;
 mod import;
 mod prune;
