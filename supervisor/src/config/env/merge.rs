@@ -1,63 +1,15 @@
-//! Config resolution: merge process env + optional dotenv file + code
-//! defaults into a validated [`Config`] once at boot. Siblings: `consts`
-//! (static values), `sync`/`keepalive` (feature settings), `dotenv` (file).
+//! Config merging: process env + optional dotenv file + code defaults
+//! resolved into a validated [`Config`] once at boot.
 
 use std::env;
 
-use super::backup::{DbBackupConfig, resolve_backup};
-use super::dotenv::FileConfig;
-use super::keepalive::DbKeepalive;
-use super::sync::{SyncConfig, resolve_sync};
+use crate::config::backup::{DbBackupConfig, resolve_backup};
+use crate::config::dotenv::FileConfig;
+use crate::config::keepalive::DbKeepalive;
+use crate::config::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
-/// Supervisor-owned keys (localized to PID 1): filtered out of the
-/// vaultwarden child's env.
-pub fn is_supervisor_key(key: &str) -> bool {
-    key.starts_with("TS_") || key.starts_with("SUPERVISOR_")
-}
-
-/// `Some(v)` only for non-empty: empty entries are treated as unset.
-fn non_empty(v: Option<String>) -> Option<String> {
-    v.filter(|v| !v.is_empty())
-}
-
-/// `Some(v)` only for a valid 1-65535 port; invalid values warn and fall
-/// back to the default instead of breaking listeners.
-fn valid_port(v: Option<String>) -> Option<String> {
-    let v = non_empty(v)?;
-    match v.parse::<u16>() {
-        Ok(p) if p != 0 => Some(v),
-        _ => {
-            log::err(&format!(
-                "config: invalid port '{}' (want 1-65535); using default",
-                log::sanitize(&v)
-            ));
-            None
-        }
-    }
-}
-
-/// Lenient on/off knob parse; `None` = callers warn and use their default.
-fn parse_bool(v: &str) -> Option<bool> {
-    match v.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Some(true),
-        "false" | "0" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-/// Tailscale Service reference from `TS_SERVICE`: a bare name or an already
-/// prefixed `svc:<name>` becomes `svc:<name>`; anything else (empty, bare
-/// `svc:`) warns and disables the advertisement.
-fn resolve_service(v: Option<String>) -> Option<String> {
-    let v = non_empty(v)?;
-    let name = v.strip_prefix("svc:").unwrap_or(&v);
-    if name.is_empty() {
-        log::err("config: invalid TS_SERVICE 'svc:' (want svc:<name>); not advertising a service");
-        return None;
-    }
-    Some(format!("svc:{name}"))
-}
+use super::knobs::{non_empty, parse_bool, resolve_service, valid_port};
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
@@ -174,6 +126,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::config::env::knobs::is_supervisor_key;
 
     /// Config from an explicit variable map + optional dotenv file layer
     /// (never the process env — see [`Config::build`]).
@@ -187,35 +140,6 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         Config::build(file, move |k| map.get(k).cloned())
-    }
-
-    #[test]
-    fn supervisor_keys_are_namespaced() {
-        for key in [
-            "TS_AUTHKEY",
-            "TS_SERVE",
-            "SUPERVISOR_ENV_FILE",
-            "SUPERVISOR_X",
-        ] {
-            assert!(is_supervisor_key(key), "{key} should be supervisor-owned");
-        }
-        for key in ["TS", "SUPERVISOR", "ts_authkey", "PORT", "DATABASE_URL"] {
-            assert!(!is_supervisor_key(key), "{key} should reach the child");
-        }
-    }
-
-    #[test]
-    fn port_validation() {
-        assert_eq!(valid_port(Some("8080".into())).as_deref(), Some("8080"));
-        assert_eq!(valid_port(Some("1".into())).as_deref(), Some("1"));
-        assert_eq!(valid_port(Some("65535".into())).as_deref(), Some("65535"));
-        assert_eq!(valid_port(Some("0".into())), None);
-        assert_eq!(valid_port(Some("65536".into())), None);
-        assert_eq!(valid_port(Some("-1".into())), None);
-        assert_eq!(valid_port(Some("8080\n".into())), None);
-        assert_eq!(valid_port(Some("".into())), None);
-        assert_eq!(valid_port(None), None);
-        assert_eq!(valid_port(Some("abc".into())), None);
     }
 
     #[test]
@@ -290,23 +214,6 @@ mod tests {
         // misspelling warns and takes the default
         let cfg = mk(&[("TS_SERVE", "definitely")]);
         assert!(cfg.serve);
-    }
-
-    #[test]
-    fn service_reference_resolution() {
-        assert_eq!(
-            resolve_service(Some("vaultwarden".into())),
-            Some("svc:vaultwarden".into())
-        );
-        assert_eq!(
-            resolve_service(Some("svc:vaultwarden".into())),
-            Some("svc:vaultwarden".into())
-        );
-        // unset and empty mean the same: classic serve only
-        assert_eq!(resolve_service(None), None);
-        assert_eq!(resolve_service(Some(String::new())), None);
-        // a bare prefix is a misconfiguration: warn, don't advertise
-        assert_eq!(resolve_service(Some("svc:".into())), None);
     }
 
     #[test]

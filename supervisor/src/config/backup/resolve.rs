@@ -1,30 +1,20 @@
-//! DB backup (opt-in via SUPERVISOR_DB_BACKUP*): the [`DbBackupConfig`]
-//! carried by `Config` and consumed by `crate::runtime::backup`, the runner —
-//! plus the knob resolution that builds it. Credentials and the bucket
-//! path are reused from the S3 state sync (SUPERVISOR_S3_*): dumps live
-//! under `<state remote>/db`.
+//! DB backup knob resolution (SUPERVISOR_DB_BACKUP*): builds a
+//! [`DbBackupConfig`] from the env/file layer. Misconfigurations degrade
+//! to backup disabled (never block the vault). Either sub-feature alone
+//! is enough: periodic dumps (SUPERVISOR_DB_BACKUP) and boot-time restore
+//! (SUPERVISOR_DB_BACKUP_RESTORE) arm independently.
 
 use std::time::Duration;
 
-use super::consts::{BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT};
-use super::dburl::{self, DbSpec};
-use super::sync::SyncConfig;
+use super::super::consts::{BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT, BACKUP_STAGING};
+use super::super::dburl::{self, DbSpec};
+use super::super::env::parse_bool;
+use super::super::sync::SyncConfig;
+use super::spec::DbBackupConfig;
 use crate::util::log;
 
-/// Lenient on/off knob parse; `None` = callers warn and take the default.
-fn parse_bool(v: &str) -> Option<bool> {
-    match v.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Some(true),
-        "false" | "0" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-/// Resolve the DB backup knobs into a [`DbBackupConfig`]. Misconfigurations
-/// degrade to backup disabled (never block the vault). Either sub-feature
-/// alone is enough: periodic dumps (SUPERVISOR_DB_BACKUP) and boot-time
-/// restore (SUPERVISOR_DB_BACKUP_RESTORE) arm independently.
-pub(super) fn resolve_backup(
+/// Resolve the DB backup knobs into a [`DbBackupConfig`].
+pub(crate) fn resolve_backup(
     knob: &dyn Fn(&str, &str) -> String,
     sync: Option<&SyncConfig>,
     db_url: Option<String>,
@@ -146,40 +136,8 @@ pub(super) fn resolve_backup(
         interval: Duration::from_secs(secs),
         keep: keep as usize,
         restore,
-        staging: super::consts::BACKUP_STAGING.to_string(),
+        staging: BACKUP_STAGING.to_string(),
     })
-}
-
-/// S3-backed DB dumps (opt-in): periodic snapshots pushed to
-/// `<state remote>/db`, pruned to keep-N per backend, plus an opt-in
-/// boot-time restore into an empty DB. Single instance per bucket/path.
-/// Cloned onto the backup thread.
-#[derive(Clone)]
-pub struct DbBackupConfig {
-    /// S3 credentials + backend env, shared with the state sync (cloned)
-    pub sync: SyncConfig,
-    /// vaultwarden's DATABASE_URL verbatim (postgres client use; never
-    /// logged — carries credentials)
-    pub url: String,
-    /// parsed vaultwarden DATABASE_URL (dump/restore target)
-    pub db: DbSpec,
-    /// periodic dumps enabled (SUPERVISOR_DB_BACKUP)
-    pub periodic: bool,
-    /// periodic dump cadence
-    pub interval: Duration,
-    /// per-backend dumps kept in the bucket (oldest pruned after each push)
-    pub keep: usize,
-    /// boot-time restore into an empty DB (SUPERVISOR_DB_BACKUP_RESTORE)
-    pub restore: bool,
-    /// local staging dir on the data volume for in-flight dumps/pulls
-    pub staging: String,
-}
-
-impl DbBackupConfig {
-    /// Bucket prefix holding the dumps: `<state remote>/db`.
-    pub fn prefix(&self) -> String {
-        format!("{}/db", self.sync.remote)
-    }
 }
 
 #[cfg(test)]
@@ -187,6 +145,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
+    use super::super::spec::DbBackupConfig;
     use super::*;
 
     const S3_KNOBS: &[(&str, &str)] = &[
@@ -216,6 +175,30 @@ mod tests {
             },
             sync.as_ref(),
             None,
+        )
+    }
+
+    /// resolve_backup with an explicit db_url (the DATABASE_URL path).
+    fn resolved_with_url(vars: &[(&str, &str)], db_url: &str) -> Option<DbBackupConfig> {
+        let map: BTreeMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let sync = crate::config::sync::resolve_sync(&|key, default| {
+            map.get(key)
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .unwrap_or_else(|| default.to_string())
+        });
+        resolve_backup(
+            &|key, default| {
+                map.get(key)
+                    .filter(|v| !v.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| default.to_string())
+            },
+            sync.as_ref(),
+            Some(db_url.to_string()),
         )
     }
 
@@ -270,28 +253,14 @@ mod tests {
 
     #[test]
     fn restore_only_arms_restore() {
-        let mut vars: Vec<(&str, &str)> = S3_KNOBS.to_vec();
-        vars.push(("SUPERVISOR_DB_BACKUP_RESTORE", "true"));
-        vars.push(("DATABASE_URL", "postgres://u:p@h/db"));
-        let map: BTreeMap<String, String> = vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let sync = crate::config::sync::resolve_sync(&|key, default| {
-            map.get(key)
-                .filter(|v| !v.is_empty())
-                .cloned()
-                .unwrap_or_else(|| default.to_string())
-        });
-        let cfg = resolve_backup(
-            &|key, default| {
-                map.get(key)
-                    .filter(|v| !v.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| default.to_string())
-            },
-            sync.as_ref(),
-            Some("postgres://u:p@h/db".to_string()),
+        let cfg = resolved_with_url(
+            &[
+                S3_KNOBS[0],
+                S3_KNOBS[1],
+                S3_KNOBS[2],
+                ("SUPERVISOR_DB_BACKUP_RESTORE", "true"),
+            ],
+            "postgres://u:p@h/db",
         )
         .expect("restore enabled");
         assert!(!cfg.periodic);
@@ -329,31 +298,17 @@ mod tests {
 
     #[test]
     fn unsupported_url_disables() {
-        let mut vars: Vec<(&str, &str)> = S3_KNOBS.to_vec();
-        vars.push(("SUPERVISOR_DB_BACKUP", "true"));
-        vars.push(("DATABASE_URL", "oracle://u:p@h/db"));
         // DATABASE_URL is not a supervisor knob; it reaches the resolver
-        // through the db_url argument, so mirror what env.rs does.
-        let map: BTreeMap<String, String> = vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let sync = crate::config::sync::resolve_sync(&|key, default| {
-            map.get(key)
-                .filter(|v| !v.is_empty())
-                .cloned()
-                .unwrap_or_else(|| default.to_string())
-        });
+        // through the db_url argument, mirroring what env::build does.
         assert!(
-            resolve_backup(
-                &|key, default| {
-                    map.get(key)
-                        .filter(|v| !v.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| default.to_string())
-                },
-                sync.as_ref(),
-                Some("oracle://u:p@h/db".to_string()),
+            resolved_with_url(
+                &[
+                    S3_KNOBS[0],
+                    S3_KNOBS[1],
+                    S3_KNOBS[2],
+                    ("SUPERVISOR_DB_BACKUP", "true"),
+                ],
+                "oracle://u:p@h/db",
             )
             .is_none()
         );
