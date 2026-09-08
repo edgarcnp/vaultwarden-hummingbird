@@ -1,6 +1,6 @@
 //! DB keepalive settings (opt-in via SUPERVISOR_DB_KEEPALIVE): the
 //! [`DbKeepalive`] carried by `Config` and consumed by
-//! `crate::runtime::keepalive`, the runner.
+//! `crate::runtime::db::keepalive`, the runner.
 
 use std::time::Duration;
 

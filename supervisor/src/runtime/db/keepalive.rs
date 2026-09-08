@@ -5,8 +5,8 @@
 //! Connection plumbing (TLS posture, timeouts) lives in [`super::pg`],
 //! shared with the DB backup/restore.
 
+use super::pg;
 use crate::config::{DB_PING_TIMEOUT, DbKeepalive};
-use crate::runtime::pg;
 use crate::util::log;
 
 /// One keepalive cycle: fresh connection + `SELECT 1`, bounded by
