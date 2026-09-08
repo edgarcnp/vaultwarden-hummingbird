@@ -2,7 +2,7 @@
 //! backup/restore): connection with the same relaxed TLS posture
 //! vaultwarden negotiates with a given DATABASE_URL, bounded by a timeout.
 //!
-//! TLS uses rustls with bundled webpki roots (no system CA dependency),
+//! TLS uses rustls with the ring provider (no system CA dependency),
 //! relaxed to libpq's `sslmode=require`: encryption mandatory, cert
 //! chaining not verified (typical for managed providers). Strictness lives
 //! in [`tls`], keyed off the URL's own sslmode.
