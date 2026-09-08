@@ -224,13 +224,15 @@ mod tests {
         assert!(resolved(S3_KNOBS).is_none());
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP", "true")]).is_none());
         // invalid flag values degrade to disabled (warn only)
-        assert!(resolved(&[
-            S3_KNOBS[0],
-            S3_KNOBS[1],
-            S3_KNOBS[2],
-            ("SUPERVISOR_DB_BACKUP", "definitely")
-        ])
-        .is_none());
+        assert!(
+            resolved(&[
+                S3_KNOBS[0],
+                S3_KNOBS[1],
+                S3_KNOBS[2],
+                ("SUPERVISOR_DB_BACKUP", "definitely")
+            ])
+            .is_none()
+        );
     }
 
     #[test]
@@ -238,11 +240,13 @@ mod tests {
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP", "true")]).is_none());
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP_RESTORE", "true")]).is_none());
         // remote without credentials disables sync itself -> no backup
-        assert!(resolved(&[
-            ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
-            ("SUPERVISOR_DB_BACKUP", "true"),
-        ])
-        .is_none());
+        assert!(
+            resolved(&[
+                ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
+                ("SUPERVISOR_DB_BACKUP", "true"),
+            ])
+            .is_none()
+        );
     }
 
     #[test]
@@ -340,16 +344,18 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| default.to_string())
         });
-        assert!(resolve_backup(
-            &|key, default| {
-                map.get(key)
-                    .filter(|v| !v.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| default.to_string())
-            },
-            sync.as_ref(),
-            Some("oracle://u:p@h/db".to_string()),
-        )
-        .is_none());
+        assert!(
+            resolve_backup(
+                &|key, default| {
+                    map.get(key)
+                        .filter(|v| !v.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| default.to_string())
+                },
+                sync.as_ref(),
+                Some("oracle://u:p@h/db".to_string()),
+            )
+            .is_none()
+        );
     }
 }

@@ -8,6 +8,6 @@ mod child;
 mod reap;
 mod run;
 
-pub use child::{alive, signal_group, spawn, Pid, POLL, TERM_GRACE};
-pub use reap::{exit_code, exit_reason, reap_any, reap_until_gone, Gone};
+pub use child::{POLL, Pid, TERM_GRACE, alive, signal_group, spawn};
+pub use reap::{Gone, exit_code, exit_reason, reap_any, reap_until_gone};
 pub use run::{run_bounded, run_bounded_capture, run_bounded_env};

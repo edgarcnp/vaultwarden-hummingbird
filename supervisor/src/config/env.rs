@@ -4,10 +4,10 @@
 
 use std::env;
 
-use super::backup::{resolve_backup, DbBackupConfig};
+use super::backup::{DbBackupConfig, resolve_backup};
 use super::dotenv::FileConfig;
 use super::keepalive::DbKeepalive;
-use super::sync::{resolve_sync, SyncConfig};
+use super::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
 /// Supervisor-owned keys (localized to PID 1): filtered out of the
