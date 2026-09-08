@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::probe::{PROBE_TIMEOUT, get_alive};
 
-use crate::proc::POLL;
+use crate::runtime::POLL;
 use crate::util::log;
 
 /// Hard overall deadline: a boot-time gate that is not yet bound is retried

@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::process::Command;
 
 use crate::config::{VAULTWARDEN, is_supervisor_key};
-use crate::proc::{Pid, spawn};
+use crate::runtime::{Pid, spawn};
 
 /// vaultwarden in the foreground with a *localized* environment: container
 /// env minus supervisor-owned keys, then dotenv-file vars (authoritative —

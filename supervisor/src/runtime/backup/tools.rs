@@ -2,7 +2,7 @@
 //! dump/restore binaries), with staged-file cleanup and object listing.
 
 use crate::config::{BACKUP_TIMEOUT, DbBackupConfig, RCLONE, SYNC_TIMEOUT};
-use crate::proc::{run_bounded_capture, run_bounded_env};
+use crate::runtime::{run_bounded_capture, run_bounded_env};
 use crate::util::log;
 
 /// One bounded rclone invocation with the shared backend env.

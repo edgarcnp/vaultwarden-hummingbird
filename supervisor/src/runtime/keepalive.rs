@@ -6,7 +6,7 @@
 //! shared with the DB backup/restore.
 
 use crate::config::{DB_PING_TIMEOUT, DbKeepalive};
-use crate::proc::pg;
+use crate::runtime::pg;
 use crate::util::log;
 
 /// One keepalive cycle: fresh connection + `SELECT 1`, bounded by

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use crate::config::{BACKUP_TIMEOUT, DbBackupConfig, DbSpec, MARIADB_DUMP, PG_DUMP};
-use crate::proc::run_bounded_env;
+use crate::runtime::run_bounded_env;
 use crate::util::log;
 
 use super::dbenv::{defaults_file, mysql_env, pg_env};

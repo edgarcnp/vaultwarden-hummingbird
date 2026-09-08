@@ -1,5 +1,5 @@
 //! S3 state-sync (opt-in via SUPERVISOR_S3_*): the [`SyncConfig`] carried
-//! by `Config` and consumed by `crate::proc::sync`, the runner — plus the
+//! by `Config` and consumed by `crate::runtime::sync`, the runner — plus the
 //! knob resolution that builds it from the env/file layer.
 
 use std::time::Duration;

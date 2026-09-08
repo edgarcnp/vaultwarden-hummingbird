@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::Signal;
 
 use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SyncConfig};
-use crate::proc::{
+use crate::runtime::{
     Gone, POLL, Pid, TERM_GRACE, alive, backup_tick, db_keepalive_tick, exit_code, exit_reason,
     gate_bind, gate_describe, gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group,
     stopping, sync_state, take_stop,

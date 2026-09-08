@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::config::{BACKUP_TIMEOUT, DbBackupConfig, DbSpec, MARIADB, PG_RESTORE};
-use crate::proc::run_bounded_env;
+use crate::runtime::run_bounded_env;
 use crate::util::log;
 
 use super::check::is_empty;

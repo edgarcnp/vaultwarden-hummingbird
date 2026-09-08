@@ -9,11 +9,11 @@
 //! drives TERM -> KILL escalation and namespace-wide reaping.
 
 mod config;
-mod proc;
+mod runtime;
 mod util;
 
 use config::Config;
-use proc::{
+use runtime::{
     gate_healthcheck, install_signal_handlers, restore_if_empty, restore_state, shutdown,
     spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
 };

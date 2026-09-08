@@ -7,7 +7,7 @@
 //! registration, one client re-login, or one cert re-issuance.
 
 use crate::config::{RCLONE, SYNC_TIMEOUT, SyncConfig};
-use crate::proc::run_bounded_env;
+use crate::runtime::run_bounded_env;
 use crate::util::log;
 
 /// /data files worth persisting (identity only; the DB lives elsewhere).

@@ -1,5 +1,5 @@
 //! DB backup (opt-in via SUPERVISOR_DB_BACKUP*): the [`DbBackupConfig`]
-//! carried by `Config` and consumed by `crate::proc::backup`, the runner —
+//! carried by `Config` and consumed by `crate::runtime::backup`, the runner —
 //! plus the knob resolution that builds it. Credentials and the bucket
 //! path are reused from the S3 state sync (SUPERVISOR_S3_*): dumps live
 //! under `<state remote>/db`.

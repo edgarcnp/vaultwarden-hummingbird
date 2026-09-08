@@ -3,8 +3,8 @@
 //! never "empty" — callers fail closed.
 
 use crate::config::{BACKUP_TIMEOUT, DB_PING_TIMEOUT, DbBackupConfig, DbSpec, MARIADB};
-use crate::proc::pg;
-use crate::proc::run_bounded_capture;
+use crate::runtime::pg;
+use crate::runtime::run_bounded_capture;
 
 use super::dbenv::{defaults_file, mysql_env};
 
