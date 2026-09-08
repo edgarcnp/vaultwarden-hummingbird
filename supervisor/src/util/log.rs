@@ -16,20 +16,12 @@ pub fn err(msg: &str) {
     let _ = writeln!(std::io::stderr().lock(), "[supervisor] {msg}");
 }
 
-/// Escape control characters in untrusted values before logging: a newline
-/// in user input must not forge additional log lines.
+/// Escape untrusted values before logging via std's [`str::escape_debug`]:
+/// newlines, tabs, control characters, quotes, and backslashes are turned
+/// into their escaped form, so user input can never forge additional log
+/// lines.
 pub fn sanitize(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
+    s.escape_debug().collect()
 }
 
 #[cfg(test)]

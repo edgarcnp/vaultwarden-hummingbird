@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dotenvy = { version = "0.15", default-features = false }
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+percent-encoding = { version = "2", default-features = false }
 postgres = { version = "0.19", default-features = false }
 postgres_rustls = "0.1.6"
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "custom-provider"] }
 signal-hook = "0.4"
+url = { version = "2", default-features = false }
 webpki-roots = "1.0.9"
 
 [profile.release]

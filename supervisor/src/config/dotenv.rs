@@ -1,8 +1,13 @@
 //! Supervisor-owned dotenv file (SUPERVISOR_ENV_FILE), split after parse:
 //! `TS_*`/`SUPERVISOR_*` keys -> supervisor knobs (never the child, never
-//! `podman inspect`); everything else -> forwarded verbatim to the
-//! vaultwarden child. Syntax: KEY=value, `#` comments, optional `export `
-//! prefix, optional matching quotes around values.
+//! `podman inspect`); everything else -> forwarded to the vaultwarden
+//! child. Parsed by `dotenvy`, the standard dotenv dialect: KEY=value,
+//! `#` full-line comments, optional `export ` prefix, optional matching
+//! quotes (single quotes raw; double quotes support `\n` escapes and
+//! `$VAR`/`${VAR}` substitution from the process env and earlier keys),
+//! inline ` #` comments after values, and multi-line quoted values.
+//! Invalid lines are logged (never their content — they may carry
+//! credentials) and skipped; later duplicates win.
 
 use std::collections::BTreeMap;
 
@@ -18,43 +23,6 @@ pub struct FileConfig {
     pub knobs: BTreeMap<String, String>,
     /// verbatim vaultwarden env (forwarded to the child)
     pub child: BTreeMap<String, String>,
-}
-
-/// Parse dotenv syntax; invalid lines are logged and skipped, later
-/// duplicates win.
-fn parse(raw: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for (n, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line
-            .strip_prefix("export ")
-            .or_else(|| line.strip_prefix("export\t"))
-            .unwrap_or(line)
-            .trim();
-        let Some((key, val)) = line.split_once('=') else {
-            log::err(&format!("config: line {}: not KEY=value; ignored", n + 1));
-            continue;
-        };
-        let key = key.trim();
-        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            log::err(&format!("config: line {}: invalid key; ignored", n + 1));
-            continue;
-        }
-        let val = val.trim();
-        let val = if val.len() >= 2
-            && ((val.starts_with('"') && val.ends_with('"'))
-                || (val.starts_with('\'') && val.ends_with('\'')))
-        {
-            &val[1..val.len() - 1]
-        } else {
-            val
-        };
-        out.insert(key.to_string(), val.to_string());
-    }
-    out
 }
 
 impl FileConfig {
@@ -81,11 +49,23 @@ impl FileConfig {
             }
         };
         let mut cfg = Self::default();
-        for (k, v) in parse(&raw) {
-            if is_supervisor_key(&k) {
-                cfg.knobs.insert(k, v);
-            } else {
-                cfg.child.insert(k, v);
+        for item in dotenvy::from_read_iter(raw.as_bytes()) {
+            match item {
+                Ok((k, v)) => {
+                    if is_supervisor_key(&k) {
+                        cfg.knobs.insert(k, v);
+                    } else {
+                        cfg.child.insert(k, v);
+                    }
+                }
+                // LineParse embeds the raw line — never log it (it may hold
+                // credentials); the byte offset is safe.
+                Err(dotenvy::Error::LineParse(_, pos)) => {
+                    log::err(&format!(
+                        "config: dotenv: invalid line (byte {pos}); ignored"
+                    ));
+                }
+                Err(e) => log::err(&format!("config: dotenv: {e}; file partially applied")),
             }
         }
         cfg
@@ -109,9 +89,8 @@ mod tests {
         let path = write_tmp(
             r#"
 # full-line comment
-DOMAIN = https://vault.example.com   # no inline comments unquoted: this # stays
+DOMAIN = https://vault.example.com   # trailing comment stripped
 SIGNUPS_ALLOWED=false
-USER_ATTACHMENT_LIMIT=0
 QUOTED = "hello world # not a comment"
 SINGLE = 'raw # value'
 export TS_AUTHKEY=tskey-auth-file
@@ -123,7 +102,7 @@ not a valid line
         let cfg = FileConfig::load_from(Some(&path));
         assert_eq!(
             cfg.child.get("DOMAIN").map(String::as_str),
-            Some("https://vault.example.com   # no inline comments unquoted: this # stays")
+            Some("https://vault.example.com")
         );
         assert_eq!(
             cfg.child.get("SIGNUPS_ALLOWED").map(String::as_str),
@@ -146,6 +125,31 @@ not a valid line
         assert_eq!(
             cfg.knobs.get("SUPERVISOR_ENV_FILE").map(String::as_str),
             Some("/elsewhere")
+        );
+    }
+
+    /// The dotenvy dialect: double quotes unescape `\n` and substitute
+    /// `$VAR`/`${VAR}` (earlier file keys; the process env would win if
+    /// set), single quotes are raw.
+    #[test]
+    fn double_quotes_expand_and_single_quotes_stay_raw() {
+        let path = write_tmp(
+            "BASE=base\nNEWLINE=\"a\\nb\"\nRAW='a\\nb'\nEXPANDED=\"${BASE}/x\"\nLITERAL='no ${BASE} here'\nPASS='p@ss:wo\"rd'\n",
+        );
+        let cfg = FileConfig::load_from(Some(&path));
+        assert_eq!(cfg.child.get("NEWLINE").map(String::as_str), Some("a\nb"));
+        assert_eq!(cfg.child.get("RAW").map(String::as_str), Some("a\\nb"));
+        assert_eq!(
+            cfg.child.get("EXPANDED").map(String::as_str),
+            Some("base/x")
+        );
+        assert_eq!(
+            cfg.child.get("LITERAL").map(String::as_str),
+            Some("no ${BASE} here")
+        );
+        assert_eq!(
+            cfg.child.get("PASS").map(String::as_str),
+            Some("p@ss:wo\"rd")
         );
     }
 

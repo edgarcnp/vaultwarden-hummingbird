@@ -1,7 +1,16 @@
-//! DATABASE_URL parsing into a [`DbSpec`]: a minimal, hand-rolled URL
-//! reader (scheme, userinfo, host, port, path, query) — narrow input,
-//! no URL crate. Percent-decoding is byte-exact for credentials that
-//! contain URL metacharacters (`@`, `:`, `/`).
+//! DATABASE_URL parsing into a [`DbSpec`], built on the `url` crate
+//! (WHATWG URL semantics, the same family of rules browsers and libpq-ish
+//! tooling apply) with `percent-encoding` for component decoding. The
+//! components kept are exactly the ones the dump/restore tools need;
+//! nothing is logged.
+
+use url::{Host, Url};
+
+/// Stand-in host for the libpq default-socket form (`postgres://u:p@/db`,
+/// `postgres://:5432/db`, `postgres:///db`): the `url` crate rejects empty
+/// hosts, so those URLs are parsed against this placeholder whose value is
+/// discarded — the host is blanked to `None` afterwards.
+const EMPTY_HOST: &str = "empty-host.invalid";
 
 /// The parsed vaultwarden DATABASE_URL. Variants carry exactly the
 /// components the dump/restore tools need; nothing is logged.
@@ -52,18 +61,17 @@ impl DbSpec {
     }
 }
 
-/// Parse a DATABASE_URL. `None` = empty, unrecognized scheme, or malformed
-/// authority. sqlite URLs are paths after the scheme (`sqlite:///a/b` →
-/// `/a/b`); no scheme at all is not sqlite — callers decide the default.
+/// Parse a DATABASE_URL. `None` = empty, unparseable URL, unrecognized
+/// scheme, or malformed port. sqlite URLs are paths after the scheme
+/// (`sqlite:///a/b` → `/a/b`); no scheme at all is not sqlite — callers
+/// decide the default.
 pub fn parse(raw: &str) -> Option<DbSpec> {
     let url = raw.trim();
     let (scheme, rest) = url.split_once("://")?;
     match scheme {
-        "postgres" | "postgresql" => Some(net_spec(rest, 5432, false)?),
-        "mysql" | "mariadb" => Some(net_spec(rest, 3306, true)?),
-        "sqlite" => Some(DbSpec::Sqlite {
-            path: percent_decode(rest),
-        }),
+        "postgres" | "postgresql" => net_spec(scheme, url, rest, 5432, false),
+        "mysql" | "mariadb" => net_spec(scheme, url, rest, 3306, true),
+        "sqlite" => Some(sqlite_spec(rest)),
         _ => None,
     }
 }
@@ -78,83 +86,84 @@ pub fn scheme_for_log(raw: &str) -> String {
     }
 }
 
-fn net_spec(rest: &str, default_port: u16, mysql: bool) -> Option<DbSpec> {
-    let (authority_path, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let (authority, path) = authority_path
-        .split_once('/')
-        .unwrap_or((authority_path, ""));
-
-    // userinfo ends at the LAST '@' (host never contains a raw '@'; a
-    // password might) and splits on the FIRST ':' (user never contains a
-    // raw ':').
-    let (user, password, hostport) = match authority.rfind('@') {
-        Some(i) => {
-            let userinfo = &authority[..i];
-            // "u:p@h" carries a password; "u@h" carries none ("u:@h" is an
-            // explicitly empty one)
-            match userinfo.split_once(':') {
-                Some((u, p)) => (
-                    percent_decode(u),
-                    Some(percent_decode(p)),
-                    &authority[i + 1..],
-                ),
-                None => (percent_decode(userinfo), None, &authority[i + 1..]),
-            }
-        }
-        None => (String::new(), None, authority),
+/// Net spec from a parsed URL. An absent/empty port falls back to the
+/// backend default; port 0 is malformed (None = fail closed).
+fn net_spec(scheme: &str, url: &str, rest: &str, default_port: u16, mysql: bool) -> Option<DbSpec> {
+    // The authority is the part of `rest` before the first path/query/
+    // fragment separator; the host is what follows the last '@'.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let hostpart = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let empty_host = hostpart.is_empty() || hostpart.starts_with(':');
+    let parsed = if empty_host {
+        let userinfo = &authority[..authority.len() - hostpart.len()];
+        let tail = &rest[authority.len()..];
+        Url::parse(&format!(
+            "{scheme}://{userinfo}{EMPTY_HOST}{hostpart}{tail}"
+        ))
+        .ok()?
+    } else {
+        Url::parse(url).ok()?
     };
-    let (host, port) = split_host_port(hostport, default_port)?;
-    let db = non_empty(percent_decode(path));
-
-    let spec = if mysql {
+    let port = match parsed.port() {
+        Some(p) if p != 0 => p,
+        Some(_) => return None,
+        None => default_port,
+    };
+    let host = if empty_host { None } else { host_of(&parsed) };
+    let user = non_empty(&percent_decode_str(parsed.username()));
+    let password = parsed.password().map(percent_decode_str);
+    let db = non_empty(parsed.path().trim_start_matches('/'));
+    let sslmode = (!mysql).then(|| query_param(&parsed, "sslmode")).flatten();
+    Some(if mysql {
         DbSpec::Mysql {
             host,
             port,
-            user: non_empty(user),
+            user,
             password,
             db,
         }
     } else {
-        let sslmode = query
-            .split('&')
-            .filter_map(|kv| kv.split_once('='))
-            .find(|(k, _)| *k == "sslmode")
-            .map(|(_, v)| percent_decode(v))
-            .filter(|v| !v.is_empty());
         DbSpec::Postgres {
             host,
             port,
-            user: non_empty(user),
+            user,
             password,
             db,
             sslmode,
         }
-    };
-    Some(spec)
+    })
 }
 
-/// `host[:port]`, IPv6 brackets honored. Empty host = None (tool defaults).
-fn split_host_port(s: &str, default_port: u16) -> Option<(Option<String>, u16)> {
-    let (host, port_str) = if let Some(rest) = s.strip_prefix('[') {
-        let (h, tail) = rest.split_once(']')?;
-        (h, tail.strip_prefix(':').unwrap_or(""))
-    } else {
-        match s.rsplit_once(':') {
-            Some((h, p)) => (h, p),
-            None => (s, ""),
-        }
-    };
-    let port = match port_str.parse::<u16>() {
-        Ok(p) if p != 0 => p,
-        Ok(_) => return None,
-        Err(_) if port_str.is_empty() => default_port,
-        Err(_) => return None,
-    };
-    let host = non_empty(host.to_string());
-    Some((host, port))
+/// sqlite: everything after the scheme is the path, percent-decoded —
+/// `sqlite:///a/b` → `/a/b`, `sqlite://a/b` → relative `a/b`. Raw string
+/// handling (not `Url`) keeps opaque path shapes intact.
+fn sqlite_spec(rest: &str) -> DbSpec {
+    DbSpec::Sqlite {
+        path: percent_decode_str(rest),
+    }
 }
 
-fn non_empty(s: String) -> Option<String> {
+/// Host component, decoded (IPv6 literals arrive bracket-stripped from
+/// `Host::Ipv6`; domain case is preserved). Empty = None (tool defaults).
+fn host_of(url: &Url) -> Option<String> {
+    let host = match url.host() {
+        Some(Host::Domain(d)) => d.to_string(),
+        Some(Host::Ipv4(ip)) => ip.to_string(),
+        Some(Host::Ipv6(ip)) => ip.to_string(),
+        None => String::new(),
+    };
+    non_empty(&host)
+}
+
+/// First `key` query parameter, percent-decoded; empty value = None.
+fn query_param(url: &Url, key: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.is_empty())
+}
+
+fn non_empty(s: &str) -> Option<String> {
     let t = s.trim();
     (!t.is_empty()).then(|| t.to_string())
 }
@@ -162,27 +171,10 @@ fn non_empty(s: String) -> Option<String> {
 /// Percent-decode a URL component; invalid escapes pass through literally
 /// and non-UTF-8 bytes are replaced (a mangled credential must fail the
 /// connection later, not panic here).
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'%'
-            && i + 2 < bytes.len()
-            && bytes[i + 1].is_ascii_hexdigit()
-            && bytes[i + 2].is_ascii_hexdigit()
-        {
-            let hi = (bytes[i + 1] as char).to_digit(16).unwrap_or(0) as u8;
-            let lo = (bytes[i + 2] as char).to_digit(16).unwrap_or(0) as u8;
-            out.push(hi << 4 | lo);
-            i += 3;
-        } else {
-            out.push(b);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+fn percent_decode_str(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -228,7 +220,8 @@ mod tests {
 
     #[test]
     fn postgres_edge_credentials() {
-        // password with raw ':' and '@' — first ':' and last '@' split
+        // password with raw ':' and '@' — WHATWG splits userinfo at the
+        // LAST '@' and keeps raw ':' in the password
         let spec = pg("postgres://us%40er:p%40ss:wo%3Ard@h/db");
         assert_eq!(
             spec,
@@ -254,6 +247,19 @@ mod tests {
                 sslmode: None,
             }
         );
+        // no userinfo: `Url` parses the would-be user as the host
+        let spec = pg("postgres://h/db");
+        assert_eq!(
+            spec,
+            DbSpec::Postgres {
+                host: Some("h".into()),
+                port: 5432,
+                user: None,
+                password: None,
+                db: Some("db".into()),
+                sslmode: None,
+            }
+        );
         // empty host = libpq default socket
         let spec = pg("postgres://u:p@/db");
         assert_eq!(
@@ -267,7 +273,20 @@ mod tests {
                 sslmode: None,
             }
         );
-        // ipv6 host
+        // empty host with an explicit port still defaults the host
+        let spec = pg("postgres://u:p@:5433/db");
+        assert_eq!(
+            spec,
+            DbSpec::Postgres {
+                host: None,
+                port: 5433,
+                user: Some("u".into()),
+                password: Some("p".into()),
+                db: Some("db".into()),
+                sslmode: None,
+            }
+        );
+        // ipv6 host (brackets stripped by `Url`)
         let spec = pg("postgres://u:p@[2001:db8::1]:5432/db");
         assert_eq!(
             spec,
@@ -341,6 +360,13 @@ mod tests {
                 path: "data/db.sqlite3".into()
             }
         );
+        // percent-escaped path components are decoded
+        assert_eq!(
+            pg("sqlite:///data/my%20db.sqlite3"),
+            DbSpec::Sqlite {
+                path: "/data/my db.sqlite3".into()
+            }
+        );
     }
 
     #[test]
@@ -366,6 +392,7 @@ mod tests {
 
     #[test]
     fn invalid_escapes_pass_through() {
+        // WHATWG keeps invalid percent-escapes verbatim in userinfo
         let DbSpec::Postgres { password, .. } = pg("postgres://u:%ZZ@h/db") else {
             panic!("expected postgres spec");
         };
