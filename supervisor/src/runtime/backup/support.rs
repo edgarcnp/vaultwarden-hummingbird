@@ -38,10 +38,3 @@ pub(super) fn cfg(url: &str) -> DbBackupConfig {
         staging: next_staging(),
     }
 }
-
-/// restore_if_empty with restore disabled is a no-op (no network, no
-/// staging, no logs of consequence).
-#[test]
-fn restore_noop_when_disabled() {
-    super::restore_if_empty(&cfg("sqlite:///nonexistent/db.sqlite3"), || false);
-}

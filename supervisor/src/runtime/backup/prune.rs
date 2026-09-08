@@ -1,9 +1,9 @@
 //! Keep-N pruning of the per-backend dumps in the bucket.
 
 use crate::config::DbBackupConfig;
-use crate::util::log;
 
 use super::tools::{list_objects, rclone};
+use crate::util::log;
 
 /// Delete the oldest per-backend dumps beyond keep-N. Listing failure
 /// skips pruning entirely — never delete blind. Name order == time order
