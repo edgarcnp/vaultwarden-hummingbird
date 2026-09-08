@@ -96,6 +96,25 @@ SUPERVISOR_DB_KEEPALIVE=300   # seconds between pings; 0 or unset = off
 
 Failures are non-fatal (logged only on state change). Postgres URLs only — the supervisor speaks the postgres wire protocol; sqlite/mysql DBs skip it.
 
+## DB backup to S3
+
+The supervisor can push consistent, periodic dumps of the vault's database to the same S3-compatible bucket used by the state sync, under `<SUPERVISOR_S3_REMOTE>/db`:
+
+```sh
+SUPERVISOR_S3_REMOTE=r2:vw-state         # backup rides these S3 credentials
+SUPERVISOR_S3_ACCESS_KEY_ID=...
+SUPERVISOR_S3_SECRET_ACCESS_KEY=...
+SUPERVISOR_DB_BACKUP=true
+# SUPERVISOR_DB_BACKUP_INTERVAL=43200    # seconds (default 12h)
+# SUPERVISOR_DB_BACKUP_KEEP=3            # dumps kept per backend
+```
+
+- **Consistency** — no downtime, no locks on the vault: postgres via `pg_dump` (MVCC snapshot, custom format), mysql via `mariadb-dump --single-transaction` (InnoDB snapshot), sqlite via `VACUUM INTO`. The dump/restore client tools ship in the image, extracted from the official Red Hat `hi/postgresql`/`hi/mariadb` images; sqlite is handled in-process.
+- **Safety** — dumps are staged on the data volume, uploaded to a *new* timestamped object (`db/<backend>-<timestamp>.<ext>`), and only then are the oldest objects pruned to keep-N. A kill at any point costs a missed backup, never a corrupt one. Nothing in the backup path writes to the live database.
+- **Restore (opt-in, off by default)** — `SUPERVISOR_DB_BACKUP_RESTORE=true`: at boot, if the database is *verifiably empty* (sqlite file absent; pg/mysql `users`-table check), the newest dump is imported (integrity-checked first). Ambiguity — e.g. the DB is unreachable — fails closed: the vault starts on the empty DB instead of guessing.
+- **Manual restore** — `pg_restore --no-owner --no-privileges --dbname=<db> <dump>`, `mariadb --database=<db> --execute="source <dump>"`, or (sqlite) stop the vault and replace `/data/db.sqlite3`. **Never auto-restore onto a non-empty DB by hand.**
+- Same rules as the state sync: failures are non-fatal, one container per bucket/path, keep the bucket private (dump objects contain vault metadata).
+
 ## Defaults (overridable via any config path)
 
 - `SIGNUPS_ALLOWED=false` — flip to `true` to create your account, then flip back
@@ -106,7 +125,7 @@ Failures are non-fatal (logged only on state change). Postgres URLs only — the
 
 ## Files
 
-- `Containerfile` — 4 stages: fetch & verify → supervisor → vaultwarden → minimal runtime
-- `supervisor/` — Rust PID 1: exposed-port gatekeeper (`/alive` only, doubles as the container healthcheck via `--healthcheck`), tailscaled + `up`/`serve` + loopback-only vaultwarden, with clean SIGTERM teardown
+- `Containerfile` — 4 stages: fetch & verify → supervisor → vaultwarden → minimal runtime (+ DB client tools extracted from the official Red Hat client images for the backup feature)
+- `supervisor/` — Rust PID 1: exposed-port gatekeeper (`/alive` only, doubles as the container healthcheck via `--healthcheck`), tailscaled + `up`/`serve` + loopback-only vaultwarden, S3 state sync + DB backup/restore, with clean SIGTERM teardown
 - `.env.example` — the one config file; `compose.yaml` — local runner (podman/docker compose)
 - `.github/workflows/publish.yml` — multi-arch build + ghcr publish (tag push, manual, weekly cron)

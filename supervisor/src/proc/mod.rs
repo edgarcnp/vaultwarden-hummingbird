@@ -1,10 +1,13 @@
 //! Child process management: tailscaled/tailscale, vaultwarden, signals,
-//! S3 state sync, and the vault watch loop / container teardown.
+//! S3 state sync, DB backup/restore, and the vault watch loop / container
+//! teardown.
 //!
 //! mod.rs is declarations only; the public surface is re-exports.
 
+mod backup;
 mod gate;
 mod keepalive;
+mod pg;
 mod process;
 mod signals;
 mod sync;
@@ -12,6 +15,7 @@ mod tailscale;
 mod vaultwarden;
 mod watch;
 
+pub use backup::{restore_if_empty, tick as backup_tick};
 pub use gate::{
     bind as gate_bind, describe as gate_describe, healthcheck as gate_healthcheck,
     serve as gate_serve,
@@ -20,7 +24,7 @@ pub use gate::{
 pub use keepalive::tick as db_keepalive_tick;
 pub use process::{
     Gone, POLL, Pid, TERM_GRACE, alive, exit_code, exit_reason, reap_any, reap_until_gone,
-    run_bounded, run_bounded_env, signal_group, spawn,
+    run_bounded, run_bounded_capture, run_bounded_env, signal_group, spawn,
 };
 pub use signals::{install_signal_handlers, stopping, take_stop};
 pub use sync::{restore_state, sync_state};

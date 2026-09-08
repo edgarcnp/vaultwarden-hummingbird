@@ -3,17 +3,44 @@
 //! shutdown that brings every child down before exiting.
 
 use std::process::exit;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
 
-use crate::config::{Config, SyncConfig};
+use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SyncConfig};
 use crate::proc::{
-    Gone, POLL, Pid, TERM_GRACE, alive, db_keepalive_tick, exit_code, exit_reason, gate_bind,
-    gate_describe, gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group, stopping,
-    sync_state, take_stop,
+    Gone, POLL, Pid, TERM_GRACE, alive, backup_tick, db_keepalive_tick, exit_code, exit_reason,
+    gate_bind, gate_describe, gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group,
+    stopping, sync_state, take_stop,
 };
 use crate::util::log;
+
+/// Sleep slice for the backup thread's cadence: coarse enough not to
+/// churn, fine enough that a stop request is honored promptly.
+const BACKUP_SLEEP: Duration = Duration::from_secs(1);
+
+/// Periodic DB backups on their own thread: the first dump
+/// [`BACKUP_FIRST_DELAY`] after the vault starts, then one per
+/// `interval`. Detached — bounded phases self-abort on stop, and exit()
+/// reaps everything else.
+fn spawn_backup_thread(backup: DbBackupConfig) {
+    std::thread::spawn(move || {
+        let mut due = Instant::now() + BACKUP_FIRST_DELAY;
+        loop {
+            while Instant::now() < due {
+                if stopping() {
+                    return;
+                }
+                std::thread::sleep(BACKUP_SLEEP.min(due.saturating_duration_since(Instant::now())));
+            }
+            if stopping() {
+                return;
+            }
+            backup_tick(&backup, stopping);
+            due = Instant::now() + backup.interval;
+        }
+    });
+}
 
 /// Hand off to vaultwarden and supervise it: bind the exposed-port
 /// gatekeeper (the only `0.0.0.0` listener), start the loopback-only vault,
@@ -52,6 +79,9 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
     let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
         shutdown(tsd, 1, None)
     };
+    if let Some(backup) = cfg.backup.clone().filter(|b| b.periodic) {
+        spawn_backup_thread(backup);
+    }
 
     let mut last_sync = Instant::now();
     let mut last_sync_keepalive = Instant::now();

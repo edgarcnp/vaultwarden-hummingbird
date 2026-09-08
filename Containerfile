@@ -22,6 +22,12 @@ ARG RCLONE_VERSION=1.75.1
 # comma-separated combination. Default: all three, so a bare build matches
 # upstream's feature set.
 ARG DB=postgresql,sqlite,mysql
+# Official Red Hat client images supplying the supervisor's DB backup tools
+# (pg_dump/pg_restore, mariadb-dump/mariadb) and their shared-lib closure.
+# Floating like the base images: rebuilds track upstream patches, and the
+# dump client stays at-or-above the server majors it must read.
+ARG PG_CLIENT_IMAGE=registry.access.redhat.com/hi/postgresql:latest
+ARG MARIADB_CLIENT_IMAGE=registry.access.redhat.com/hi/mariadb:latest
 
 # Stage 1: fetch + verify release tarballs. Tailscale/rclone/web vault are
 # checksum-verified at build against official files (same origin), not pinned.
@@ -132,6 +138,39 @@ RUN tar -xzf vw.tar.gz --strip-components=1 && rm vw.tar.gz \
     esac \
  && cp target/release/vaultwarden /out-vaultwarden
 
+# DB client tools for the supervisor's backup feature: extracted from the
+# official Red Hat client images (glibc lockstep with the runtime), not
+# built from source — the hummingbird builder repo lacks bison/flex/perl.
+# Each stage collects the client binaries plus their shared-lib closure,
+# minus libs the core runtime already provides (glibc, libstdc++, libz,
+# selinux/pcre2). Libs land in a private directory that the supervisor
+# points LD_LIBRARY_PATH at, so nothing in the runtime is replaced.
+FROM ${PG_CLIENT_IMAGE} AS pg-clients
+USER 0
+RUN mkdir -p /out/bin /out/lib \
+ && cp /usr/bin/pg_dump /usr/bin/pg_restore /out/bin/ \
+ && for lib in $(ldd /usr/bin/pg_dump /usr/bin/pg_restore \
+        | grep "=> /" | cut -d' ' -f3 | sort -u); do \
+        case "$lib" in \
+            /lib64/libc.so.6|/lib64/libgcc_s.so.1|/lib64/libm.so.6|\
+            /lib64/libstdc++.so.6|/lib64/libz.so.1|/lib64/libselinux.so.1|\
+            /lib64/libpcre2-8.so.0|/lib64/libresolv.so.2) ;; \
+            *) cp -L "$lib" /out/lib/ ;; \
+        esac; done
+
+FROM ${MARIADB_CLIENT_IMAGE} AS mdb-clients
+USER 0
+RUN mkdir -p /out/bin /out/lib \
+ && cp /usr/bin/mariadb-dump /usr/bin/mariadb /out/bin/ \
+ && for lib in $(ldd /usr/bin/mariadb-dump /usr/bin/mariadb \
+        | grep "=> /" | cut -d' ' -f3 | sort -u); do \
+        case "$lib" in \
+            /lib64/libc.so.6|/lib64/libgcc_s.so.1|/lib64/libm.so.6|\
+            /lib64/libstdc++.so.6|/lib64/libz.so.1|/lib64/libselinux.so.1|\
+            /lib64/libpcre2-8.so.0|/lib64/libresolv.so.2) ;; \
+            *) cp -L "$lib" /out/lib/ ;; \
+        esac; done
+
 # Stage 4: runtime (shell-less, uid 65532)
 FROM ${RUNTIME_IMAGE} AS runtime
 ARG VW_VERSION
@@ -151,6 +190,12 @@ COPY --from=fetch /out/tailscale /usr/local/bin/tailscale
 COPY --from=fetch /out/tailscaled /usr/local/bin/tailscaled
 COPY --from=fetch /out/rclone /usr/local/bin/rclone
 COPY --from=vw-build /out-vaultwarden /vaultwarden
+# DB client tools (pg_dump/pg_restore, mariadb-dump/mariadb) + their
+# shared-lib closure in a private dir (LD_LIBRARY_PATH set by the
+# supervisor per invocation). Both dirs always exist (may be empty) so
+# COPY succeeds regardless of the DB build arg.
+COPY --from=pg-clients /out/ /usr/local/lib/dbclients/
+COPY --from=mdb-clients /out/ /usr/local/lib/dbclients/
 # web-vault dir always exists (may be empty) so COPY succeeds
 COPY --from=fetch /out/web-vault /web-vault
 # uid 65532 pre-exists in /etc/passwd

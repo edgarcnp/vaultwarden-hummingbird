@@ -4,9 +4,10 @@
 
 use std::env;
 
+use super::backup::{resolve_backup, DbBackupConfig};
 use super::dotenv::FileConfig;
 use super::keepalive::DbKeepalive;
-use super::sync::{SyncConfig, resolve_sync};
+use super::sync::{resolve_sync, SyncConfig};
 use crate::util::log;
 
 /// Supervisor-owned keys (localized to PID 1): filtered out of the
@@ -82,6 +83,8 @@ pub struct Config {
     pub userspace: bool,
     /// S3 state sync (None = disabled)
     pub sync: Option<SyncConfig>,
+    /// DB backup/restore (None = disabled)
+    pub backup: Option<DbBackupConfig>,
     /// DB keepalive ping (None = disabled)
     pub db_keepalive: Option<DbKeepalive>,
     /// verbatim vaultwarden env (from the dotenv file, if any)
@@ -117,6 +120,15 @@ impl Config {
 
         let sync = resolve_sync(&knob);
 
+        // The vault's DB URL: file wins over env — dumps and restores must
+        // reach the same DB the vault uses.
+        let db_url = file
+            .child
+            .get("DATABASE_URL")
+            .cloned()
+            .or_else(|| non_empty(lookup("DATABASE_URL")));
+        let backup = resolve_backup(&knob, sync.as_ref(), db_url.clone());
+
         let flag = |key: &str, default: bool| -> bool {
             match knob(key, "") {
                 v if v.is_empty() => default,
@@ -147,15 +159,10 @@ impl Config {
             ),
             userspace: flag("TS_USERSPACE", true),
             sync,
+            backup,
             // child key: file wins over env — the ping must reach the same
             // DB the vault uses
-            db_keepalive: DbKeepalive::from_parts(
-                &knob("SUPERVISOR_DB_KEEPALIVE", ""),
-                file.child
-                    .get("DATABASE_URL")
-                    .cloned()
-                    .or_else(|| non_empty(lookup("DATABASE_URL"))),
-            ),
+            db_keepalive: DbKeepalive::from_parts(&knob("SUPERVISOR_DB_KEEPALIVE", ""), db_url),
             vw_env: file.child.into_iter().collect(),
         }
     }

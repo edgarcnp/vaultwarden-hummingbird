@@ -14,8 +14,8 @@ mod util;
 
 use config::Config;
 use proc::{
-    gate_healthcheck, install_signal_handlers, restore_state, shutdown, spawn_tailscaled, start_vw,
-    stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
+    gate_healthcheck, install_signal_handlers, restore_if_empty, restore_state, shutdown,
+    spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
 };
 use util::{log, net};
 
@@ -39,6 +39,12 @@ fn main() {
 
     install_signal_handlers();
     let cfg = Config::from_env();
+
+    // DB restore first: only an empty DB is touched, and vaultwarden must
+    // not start on top of a half-done import.
+    if let Some(backup) = &cfg.backup {
+        restore_if_empty(backup, stopping);
+    }
 
     if let Some(sync) = &cfg.sync {
         restore_state(sync, stopping);

@@ -153,6 +153,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -264,6 +276,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.38.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -399,13 +422,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
 name = "postgres"
 version = "0.19.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33ad20e0aa0b24f5a394eab4f78c781d248982b22b25cecc7e3aa46a681605bd"
 dependencies = [
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "futures-util",
  "log",
  "tokio",
@@ -421,7 +450,7 @@ dependencies = [
  "base64",
  "byteorder",
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "hmac",
  "md-5",
  "memchr",
@@ -437,7 +466,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
 dependencies = [
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "postgres-protocol",
 ]
 
@@ -515,6 +544,19 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.40.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+dependencies = [
+ "bitflags",
+ "fallible-iterator 0.3.0",
+ "fallible-streaming-iterator",
+ "libsqlite3-sys",
+ "smallvec",
 ]
 
 [[package]]
@@ -681,6 +723,7 @@ dependencies = [
  "nix",
  "postgres",
  "postgres_rustls",
+ "rusqlite",
  "rustls",
  "signal-hook",
  "webpki-roots",
@@ -735,7 +778,7 @@ dependencies = [
  "async-trait",
  "byteorder",
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "futures-channel",
  "futures-util",
  "log",
@@ -814,6 +857,12 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "wasi"

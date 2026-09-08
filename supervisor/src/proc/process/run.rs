@@ -6,7 +6,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{Signal, killpg};
+use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid as NixPid;
 
 use super::child::POLL;
@@ -64,4 +64,66 @@ pub fn run_bounded_env(
     let _ = child.kill();
     let _ = child.wait();
     false
+}
+
+/// [`run_bounded_env`] capturing the child's stdout; stderr stays
+/// inherited so failures remain visible in container logs. `None` = spawn
+/// failure, stop request, timeout, or non-zero exit. Output is drained on
+/// a helper thread so a chatty child cannot fill the pipe and deadlock
+/// the bounded loop.
+pub fn run_bounded_capture(
+    timeout: Duration,
+    prog: &str,
+    args: &[&str],
+    extra_env: &[(String, String)],
+    abort: impl Fn() -> bool,
+) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut cmd = Command::new(prog);
+    cmd.args(args).process_group(0).stdout(Stdio::piped());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            log::err(&format!("{prog} spawn failed: {e}"));
+            return None;
+        }
+    };
+    let mut pipe = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let start = Instant::now();
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.success(),
+            Ok(None) => {}
+            Err(_) => break false,
+        }
+        if abort() {
+            log::info(&format!("stop requested; aborting {prog}"));
+            break false;
+        }
+        if start.elapsed() > timeout {
+            log::err(&format!("{prog} timed out after {timeout:?}"));
+            break false;
+        }
+        std::thread::sleep(POLL);
+    };
+    if !success {
+        let pid = child.id() as i32;
+        let _ = killpg(NixPid::from_raw(pid), Signal::SIGKILL);
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    let out = reader.join().unwrap_or_default();
+    success.then(|| String::from_utf8_lossy(&out).into_owned())
 }

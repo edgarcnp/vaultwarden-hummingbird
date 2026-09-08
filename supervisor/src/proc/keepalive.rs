@@ -2,17 +2,11 @@
 //! trivial query on a cadence so hosts that suspend an idle database
 //! (scale-to-zero) stay awake for the vault. Failures are non-fatal.
 //!
-//! TLS uses rustls with bundled webpki roots (no system CA dependency),
-//! relaxed to libpq's `sslmode=require`: encryption mandatory, cert
-//! chaining not verified (typical for managed providers, matching what
-//! vaultwarden itself negotiates with the same DATABASE_URL).
+//! Connection plumbing (TLS posture, timeouts) lives in [`super::pg`],
+//! shared with the DB backup/restore.
 
-use std::sync::Arc;
-
-use postgres::Config as PgConfig;
-use rustls::client::danger::ServerCertVerifier;
-
-use crate::config::{DB_PING_TIMEOUT, DbKeepalive};
+use crate::config::{DbKeepalive, DB_PING_TIMEOUT};
+use crate::proc::pg;
 use crate::util::log;
 
 /// One keepalive cycle: fresh connection + `SELECT 1`, bounded by
@@ -32,82 +26,10 @@ pub fn tick(cfg: &DbKeepalive, last_ok: &mut Option<bool>) {
 
 /// Fresh connection + trivial query; nothing is pooled or reused.
 fn ping(url: &str) -> bool {
-    let Ok(mut pg) = url.parse::<PgConfig>() else {
-        return false;
-    };
-    pg.connect_timeout(DB_PING_TIMEOUT);
-    let connect = match pg.get_ssl_mode() {
-        postgres::config::SslMode::Disable => pg.connect(postgres::NoTls),
-        // require/verify-* all ride the TLS connector; strictness lives in tls()
-        _ => pg.connect(tls()),
-    };
-    let Ok(mut client) = connect else {
+    let Some(mut client) = pg::connect(url, DB_PING_TIMEOUT) else {
         return false;
     };
     client.simple_query("SELECT 1").is_ok()
-}
-
-/// TLS connector: encryption, no root-of-trust check (libpq's
-/// `sslmode=require`). The ping only needs the provider to register
-/// client activity.
-fn tls() -> postgres_rustls::MakeTlsConnector {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap_or_else(|_| unreachable!("TLS 1.3 is supported by the ring provider"))
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
-        .with_no_client_auth();
-    postgres_rustls::MakeTlsConnector::new(Arc::new(config).into())
-}
-
-/// Accepts any server certificate; the connection is still fully encrypted.
-#[derive(Debug)]
-struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
-
-impl ServerCertVerifier for NoVerify {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
 }
 
 #[cfg(test)]

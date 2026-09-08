@@ -69,7 +69,9 @@ pub(super) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
 
 /// S3-backed persistence for /data identity files (opt-in): the same
 /// tailnet node and vaultwarden RSA keys survive ephemeral redeploys.
-/// Single instance per bucket.
+/// Single instance per bucket. Cloned into [`super::backup::DbBackupConfig`],
+/// which reuses the credentials and remote.
+#[derive(Clone)]
 pub struct SyncConfig {
     /// rclone destination `remote:path` (e.g. `r2:vw-state`)
     pub remote: String,
