@@ -1,0 +1,66 @@
+# CI for the supervisor crate. Test and build are separate jobs so a
+# compile failure and a test failure are visible independently in the
+# checks list.
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# Superseded runs on the same branch don't need to finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: supervisor
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            supervisor/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('supervisor/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      # ubuntu-latest ships with a stable rustup toolchain preinstalled.
+      - name: cargo test
+        run: cargo test --locked
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            supervisor/target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('supervisor/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-build-
+
+      # ubuntu-latest ships with a stable rustup toolchain preinstalled.
+      - name: cargo build
+        run: cargo build --locked
