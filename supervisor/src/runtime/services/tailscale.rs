@@ -93,7 +93,7 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
 }
 
 /// `tailscale serve`: inbound tailnet path for the loopback vault
-/// (userspace mode has none without it). With `service` set (`TS_SERVICE`),
+/// (userspace mode has none without it). With `service` set (`TAILSCALE_SERVICE`),
 /// the node advertises itself as a host of `svc:<name>` — the Service-host
 /// form. An advertisement registered before the service existed in the
 /// admin console can wedge the host registration console-side ("no Service

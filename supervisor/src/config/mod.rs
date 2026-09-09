@@ -20,6 +20,6 @@ pub use consts::{
     TAILSCALED, VAULTWARDEN,
 };
 pub use dburl::DbSpec;
-pub use env::{Config, is_supervisor_key};
+pub use env::{Config, is_supervisor_key, vaultwarden_key};
 pub use keepalive::DbKeepalive;
 pub use sync::SyncConfig;

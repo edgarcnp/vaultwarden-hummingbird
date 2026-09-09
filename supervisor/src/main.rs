@@ -65,7 +65,7 @@ fn main() {
     }
 
     if cfg.authkey.is_empty() {
-        log::info("TS_AUTHKEY not set - starting without Tailscale");
+        log::info("TAILSCALE_AUTHKEY not set - starting without Tailscale");
     } else {
         log::info("authenticating tailscale node...");
         if tailscale_up(
@@ -112,7 +112,7 @@ fn main() {
                 shutdown(Some(tsd), 0, None);
             }
             log::err(
-                "tailscale up failed or timed out - check TS_AUTHKEY; continuing without Tailscale",
+                "tailscale up failed or timed out - check TAILSCALE_AUTHKEY; continuing without Tailscale",
             );
         }
     }

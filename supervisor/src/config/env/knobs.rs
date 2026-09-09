@@ -4,10 +4,20 @@
 
 use crate::util::log;
 
-/// Supervisor-owned keys (localized to PID 1): filtered out of the
-/// vaultwarden child's env.
+/// Keys that stay with PID 1 and never reach the vaultwarden child: the
+/// supervisor's own namespaces (TAILSCALE_* for the Tailscale subsystem,
+/// SUPERVISOR_* for supervisor-initiated features).
 pub fn is_supervisor_key(key: &str) -> bool {
-    key.starts_with("TS_") || key.starts_with("SUPERVISOR_")
+    key.starts_with("TAILSCALE_") || key.starts_with("SUPERVISOR_")
+}
+
+/// The child-side name for a `VAULTWARDEN_*` key: the prefix is stripped so
+/// the child sees the plain upstream name (`VAULTWARDEN_DATABASE_URL` ->
+/// `DATABASE_URL`). `None` = not a prefixed key (forwarded verbatim). A
+/// bare `VAULTWARDEN_` (empty remainder) is not a meaningful namespace
+/// member and is left untouched.
+pub fn vaultwarden_key(key: &str) -> Option<&str> {
+    key.strip_prefix("VAULTWARDEN_").filter(|k| !k.is_empty())
 }
 
 /// `Some(v)` only for non-empty: empty entries are treated as unset.
@@ -40,14 +50,16 @@ pub(crate) fn parse_bool(v: &str) -> Option<bool> {
     }
 }
 
-/// Tailscale Service reference from `TS_SERVICE`: a bare name or an already
-/// prefixed `svc:<name>` becomes `svc:<name>`; anything else (empty, bare
-/// `svc:`) warns and disables the advertisement.
+/// Tailscale Service reference from `TAILSCALE_SERVICE`: a bare name or an
+/// already prefixed `svc:<name>` becomes `svc:<name>`; anything else
+/// (empty, bare `svc:`) warns and disables the advertisement.
 pub(super) fn resolve_service(v: Option<String>) -> Option<String> {
     let v = non_empty(v)?;
     let name = v.strip_prefix("svc:").unwrap_or(&v);
     if name.is_empty() {
-        log::err("config: invalid TS_SERVICE 'svc:' (want svc:<name>); not advertising a service");
+        log::err(
+            "config: invalid TAILSCALE_SERVICE 'svc:' (want svc:<name>); not advertising a service",
+        );
         return None;
     }
     Some(format!("svc:{name}"))
@@ -60,16 +72,39 @@ mod tests {
     #[test]
     fn supervisor_keys_are_namespaced() {
         for key in [
-            "TS_AUTHKEY",
-            "TS_SERVE",
+            "TAILSCALE_AUTHKEY",
+            "TAILSCALE_SERVE",
             "SUPERVISOR_ENV_FILE",
             "SUPERVISOR_X",
         ] {
             assert!(is_supervisor_key(key), "{key} should be supervisor-owned");
         }
-        for key in ["TS", "SUPERVISOR", "ts_authkey", "PORT", "DATABASE_URL"] {
+        for key in [
+            "TAILSCALE",
+            "SUPERVISOR",
+            "tailscale_authkey",
+            "VAULTWARDEN_DATABASE_URL",
+            "DATABASE_URL",
+            "PORT",
+        ] {
             assert!(!is_supervisor_key(key), "{key} should reach the child");
         }
+    }
+
+    #[test]
+    fn vaultwarden_keys_strip_the_prefix() {
+        assert_eq!(
+            vaultwarden_key("VAULTWARDEN_DATABASE_URL"),
+            Some("DATABASE_URL")
+        );
+        assert_eq!(vaultwarden_key("VAULTWARDEN_DOMAIN"), Some("DOMAIN"));
+        assert_eq!(vaultwarden_key("VAULTWARDEN_SMTP_PORT"), Some("SMTP_PORT"));
+        // prefix-only key is not a namespace member
+        assert_eq!(vaultwarden_key("VAULTWARDEN_"), None);
+        assert_eq!(vaultwarden_key("VAULTWARDEN"), None);
+        // unprefixed keys pass through untouched (None = verbatim)
+        assert_eq!(vaultwarden_key("DATABASE_URL"), None);
+        assert_eq!(vaultwarden_key("SUPERVISOR_S3_REMOTE"), None);
     }
 
     #[test]
