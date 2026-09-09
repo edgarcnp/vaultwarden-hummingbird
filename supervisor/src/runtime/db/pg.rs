@@ -1,6 +1,6 @@
 //! Shared postgres client plumbing (used by the keepalive ping and the DB
 //! backup/restore): connection with the same relaxed TLS posture
-//! vaultwarden negotiates with a given DATABASE_URL, bounded by a timeout.
+//! vaultwarden negotiates with a given database URL, bounded by a timeout.
 //!
 //! TLS uses rustls with the ring provider (no system CA dependency),
 //! relaxed to libpq's `sslmode=require`: encryption mandatory, cert
@@ -20,7 +20,7 @@ use crate::util::log;
 /// sslmode. Returns None on parse/connect failure (logged, secret-free).
 pub fn connect(url: &str, timeout: Duration) -> Option<postgres::Client> {
     let Ok(mut pg) = url.parse::<PgConfig>() else {
-        log::err("postgres: DATABASE_URL is not a valid postgres URL");
+        log::err("postgres: VAULTWARDEN_DATABASE_URL is not a valid postgres URL");
         return None;
     };
     pg.connect_timeout(timeout);

@@ -1,6 +1,6 @@
-//! DATABASE_URL parsing, built on the `url` crate (WHATWG URL semantics,
-//! the same family of rules browsers and libpq-ish tooling apply) with
-//! `percent-encoding` for component decoding.
+//! Database URL parsing (`VAULTWARDEN_DATABASE_URL`), built on the `url`
+//! crate (WHATWG URL semantics, the same family of rules browsers and
+//! libpq-ish tooling apply) with `percent-encoding` for component decoding.
 
 use url::{Host, Url};
 
@@ -12,7 +12,7 @@ use super::spec::DbSpec;
 /// discarded — the host is blanked to `None` afterwards.
 const EMPTY_HOST: &str = "empty-host.invalid";
 
-/// Parse a DATABASE_URL. `None` = empty, unparseable URL, unrecognized
+/// Parse a database URL. `None` = empty, unparseable URL, unrecognized
 /// scheme, or malformed port. sqlite URLs are paths after the scheme
 /// (`sqlite:///a/b` → `/a/b`); no scheme at all is not sqlite — callers
 /// decide the default.
@@ -27,7 +27,7 @@ pub fn parse(raw: &str) -> Option<DbSpec> {
     }
 }
 
-/// The scheme of a DATABASE_URL (for secret-free logs): the text before
+/// The scheme of a database URL (for secret-free logs): the text before
 /// `://`, or the whole (malformed) value trimmed to 32 chars.
 pub fn scheme_for_log(raw: &str) -> String {
     let raw = raw.trim();

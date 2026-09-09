@@ -1,8 +1,10 @@
-//! The parsed vaultwarden DATABASE_URL: a [`DbSpec`] carrying exactly the
-//! components the dump/restore tools need. Nothing is logged.
+//! The parsed vaultwarden database URL (`VAULTWARDEN_DATABASE_URL`): a
+//! [`DbSpec`] carrying exactly the components the dump/restore tools need.
+//! Nothing is logged.
 
-/// The parsed vaultwarden DATABASE_URL. Variants carry exactly the
-/// components the dump/restore tools need; nothing is logged.
+/// The parsed vaultwarden database URL (`VAULTWARDEN_DATABASE_URL`).
+/// Variants carry exactly the components the dump/restore tools need;
+/// nothing is logged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DbSpec {
     Postgres {

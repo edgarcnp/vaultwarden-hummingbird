@@ -58,8 +58,8 @@ pub(crate) fn resolve_backup(
         return None;
     };
 
-    // The vault's DB: explicit DATABASE_URL, else vaultwarden's own default
-    // (sqlite under DATA_FOLDER, which the image pins to /data).
+    // The vault's DB: explicit VAULTWARDEN_DATABASE_URL, else vaultwarden's
+    // own default (sqlite under DATA_FOLDER, which the image pins to /data).
     let url = db_url
         .as_deref()
         .map(str::trim)
@@ -71,7 +71,7 @@ pub(crate) fn resolve_backup(
             Some(spec) => spec,
             None => {
                 log::err(&format!(
-                    "config: unsupported DATABASE_URL scheme '{}' (want postgres://, \
+                    "config: unsupported VAULTWARDEN_DATABASE_URL scheme '{}' (want postgres://, \
                      mysql:// or sqlite://); backup disabled",
                     log::sanitize(&dburl::scheme_for_log(url))
                 ));
@@ -80,7 +80,7 @@ pub(crate) fn resolve_backup(
         },
         None => {
             log::info(
-                "config: no DATABASE_URL; backup assumes the default sqlite DB at /data/db.sqlite3",
+                "config: no VAULTWARDEN_DATABASE_URL; backup assumes the default sqlite DB at /data/db.sqlite3",
             );
             DbSpec::Sqlite {
                 path: "/data/db.sqlite3".to_string(),
@@ -178,7 +178,8 @@ mod tests {
         )
     }
 
-    /// resolve_backup with an explicit db_url (the DATABASE_URL path).
+    /// resolve_backup with an explicit db_url (the VAULTWARDEN_DATABASE_URL
+    /// path).
     fn resolved_with_url(vars: &[(&str, &str)], db_url: &str) -> Option<DbBackupConfig> {
         let map: BTreeMap<String, String> = vars
             .iter()
@@ -241,7 +242,7 @@ mod tests {
         assert!(!cfg.restore);
         assert_eq!(cfg.interval, Duration::from_secs(BACKUP_INTERVAL_DEFAULT));
         assert_eq!(cfg.keep, BACKUP_KEEP_DEFAULT as usize);
-        // no DATABASE_URL -> default sqlite
+        // no VAULTWARDEN_DATABASE_URL -> default sqlite
         assert_eq!(
             cfg.db,
             DbSpec::Sqlite {
@@ -298,8 +299,8 @@ mod tests {
 
     #[test]
     fn unsupported_url_disables() {
-        // DATABASE_URL is not a supervisor knob; it reaches the resolver
-        // through the db_url argument, mirroring what env::build does.
+        // VAULTWARDEN_DATABASE_URL is not a supervisor knob; it reaches the
+        // resolver through the db_url argument, mirroring what env::build does.
         assert!(
             resolved_with_url(
                 &[

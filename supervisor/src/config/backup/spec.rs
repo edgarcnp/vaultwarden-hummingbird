@@ -16,10 +16,10 @@ use super::super::sync::SyncConfig;
 pub struct DbBackupConfig {
     /// S3 credentials + backend env, shared with the state sync (cloned)
     pub sync: SyncConfig,
-    /// vaultwarden's DATABASE_URL verbatim (postgres client use; never
-    /// logged — carries credentials)
+    /// vaultwarden's database URL verbatim (`VAULTWARDEN_DATABASE_URL`;
+    /// postgres client use; never logged — carries credentials)
     pub url: String,
-    /// parsed vaultwarden DATABASE_URL (dump/restore target)
+    /// parsed vaultwarden database URL (dump/restore target)
     pub db: DbSpec,
     /// periodic dumps enabled (SUPERVISOR_DB_BACKUP)
     pub periodic: bool,

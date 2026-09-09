@@ -63,7 +63,7 @@ pub(crate) fn import(cfg: &DbBackupConfig, staged: &str, abort: &impl Fn() -> bo
         return false;
     }
     let Some(db) = db else {
-        log::err("db restore: DATABASE_URL has no database name");
+        log::err("db restore: VAULTWARDEN_DATABASE_URL has no database name");
         return false;
     };
     let Some(cnf) = defaults_file(user.as_deref(), password.as_deref(), host.as_deref(), *port)

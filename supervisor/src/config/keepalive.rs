@@ -11,8 +11,9 @@ use crate::util::log;
 /// Opt-in via SUPERVISOR_DB_KEEPALIVE (seconds; unset = off, 0 = off).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DbKeepalive {
-    /// vaultwarden's DATABASE_URL — the ping must reach the same DB the
-    /// vault uses; never logged (carries credentials)
+    /// vaultwarden's database URL (`VAULTWARDEN_DATABASE_URL`) — the ping
+    /// must reach the same DB the vault uses; never logged (carries
+    /// credentials)
     pub url: String,
     /// ping cadence
     pub interval: Duration,
@@ -48,8 +49,8 @@ impl DbKeepalive {
             _ => {
                 if explicit {
                     log::err(
-                        "config: SUPERVISOR_DB_KEEPALIVE set but DATABASE_URL is not a \
-                         postgres URL; keepalive disabled",
+                        "config: SUPERVISOR_DB_KEEPALIVE set but VAULTWARDEN_DATABASE_URL is \
+                         not a postgres URL; keepalive disabled",
                     );
                 }
                 None

@@ -1,4 +1,4 @@
-//! DATABASE_URL parsing into a [`DbSpec`].
+//! Database URL parsing (`VAULTWARDEN_DATABASE_URL`) into a [`DbSpec`].
 //!
 //! mod.rs is declarations only; the public surface is re-exports.
 
