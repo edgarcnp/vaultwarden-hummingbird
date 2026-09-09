@@ -1,10 +1,34 @@
 //! Gatekeeper server tests: request handling, exposure verdicts, bounds.
 
-use std::net::{Shutdown, SocketAddr};
+use std::net::{Shutdown, SocketAddr, TcpListener};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use super::liveness::Liveness;
 use super::probe::fake_vault;
-use super::server::{bind, handle};
+use super::server::{bind, handle, serve_with};
+
+/// A vaultwarden stand-in that answers 200 forever and counts requests
+/// (single-flight and admission tests need to observe probe fan-out).
+fn counting_vault() -> (SocketAddr, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = l.local_addr().unwrap();
+    let hits_counter = Arc::clone(&hits);
+    std::thread::spawn(move || {
+        for mut conn in l.incoming().flatten() {
+            hits_counter.fetch_add(1, Ordering::Relaxed);
+            let mut req = [0u8; 512];
+            let _ = std::io::Read::read(&mut conn, &mut req);
+            let _ = std::io::Write::write_all(
+                &mut conn,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    (addr, hits)
+}
 
 /// Ephemeral listener + one request -> full response (read to EOF).
 /// `vault = None` doubles as a probe canary: if `/alive` ever reached
@@ -13,9 +37,10 @@ use super::server::{bind, handle};
 fn roundtrip(request: &[u8], vault: Option<SocketAddr>) -> String {
     let listener = bind("0").expect("ephemeral bind");
     let addr = listener.local_addr().unwrap();
+    let live = Arc::new(Liveness::new(vault));
     let t = std::thread::spawn(move || {
         let s = listener.incoming().next().unwrap().unwrap();
-        handle(s, vault);
+        handle(s, &live);
     });
     let mut c = std::net::TcpStream::connect(addr).unwrap();
     std::io::Write::write_all(&mut c, request).unwrap();
@@ -132,7 +157,7 @@ fn silent_connections_are_bounded_by_read_timeout() {
     let t = std::thread::spawn(move || {
         let s = listener.incoming().next().unwrap().unwrap();
         let start = Instant::now();
-        handle(s, None);
+        handle(s, &Liveness::new(None));
         start.elapsed() < Duration::from_secs(30)
     });
     let _c = std::net::TcpStream::connect(addr).unwrap();
@@ -145,4 +170,80 @@ fn bind_conflict_is_an_error() {
     let listener = bind("0").expect("ephemeral bind");
     let port = listener.local_addr().unwrap().port();
     assert!(bind(&port.to_string()).is_err());
+}
+
+/// Concurrent /alive requests share one in-flight backend probe: a public
+/// probe flood must not fan out into a backend flood.
+#[test]
+fn concurrent_alive_requests_single_flight() {
+    let (vault, hits) = counting_vault();
+    let live = Arc::new(Liveness::with_ttl(Some(vault), Duration::from_secs(10)));
+    let verdicts: Vec<_> = (0..8)
+        .map(|_| {
+            let live = Arc::clone(&live);
+            std::thread::spawn(move || live.alive())
+        })
+        .collect();
+    for v in verdicts {
+        assert!(v.join().unwrap(), "counting vault always answers 200");
+    }
+    assert_eq!(hits.load(Ordering::Relaxed), 1, "one probe per window");
+}
+
+/// A verdict is shared only within its TTL window; after expiry the next
+/// request probes again.
+#[test]
+fn liveness_verdict_expires_with_the_window() {
+    let (vault, hits) = counting_vault();
+    let live = Liveness::with_ttl(Some(vault), Duration::from_millis(50));
+    assert!(live.alive());
+    assert!(live.alive(), "fresh within the window");
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(live.alive(), "expired window reprobes");
+    assert_eq!(hits.load(Ordering::Relaxed), 2);
+}
+
+/// Admission cap: connections beyond the cap get an immediate 503 (no
+/// thread, no backend probe), and a released slot is served again.
+#[test]
+fn admission_bounds_concurrent_handlers() {
+    let (vault, hits) = counting_vault();
+    let listener = bind("0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(std::thread::spawn(move || {
+        serve_with(listener, Some(vault), 1)
+    }));
+
+    let get = |request: &[u8]| {
+        let mut c = std::net::TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        std::io::Write::write_all(&mut c, request).unwrap();
+        let mut resp = String::new();
+        let _ = std::io::Read::read_to_string(&mut c, &mut resp);
+        resp
+    };
+
+    // Holder: connected but silent — occupies the one handler slot.
+    let holder = std::net::TcpStream::connect(addr).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Over limit: immediate 503. (Had it been admitted, the counting
+    // vault would have answered 200.)
+    let resp = get(b"GET /alive HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(
+        resp.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "over-limit conn must be rejected: {resp}"
+    );
+    assert_eq!(hits.load(Ordering::Relaxed), 0, "reject never probes");
+
+    // Release the slot; the next request is admitted and served.
+    drop(holder);
+    std::thread::sleep(Duration::from_millis(200));
+    let resp = get(b"GET /alive HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(
+        resp.starts_with("HTTP/1.1 200 OK\r\n"),
+        "released slot serves again: {resp}"
+    );
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
 }

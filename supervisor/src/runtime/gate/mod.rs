@@ -3,9 +3,12 @@
 //! `tailscale serve` can reach; this listener reports vault liveness and
 //! refuses everything else (see `server`). Siblings: `probe` (loopback
 //! vault probe, shared with `healthcheck`), `healthcheck` (one-shot image
-//! HEALTHCHECK mode).
+//! HEALTHCHECK mode), `limiter` (handler admission cap), `liveness`
+//! (single-flight `/alive` verdicts).
 
 mod healthcheck;
+mod limiter;
+mod liveness;
 mod probe;
 mod server;
 #[cfg(test)]

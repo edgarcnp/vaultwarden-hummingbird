@@ -54,8 +54,10 @@ fn healthcheck_until(addr: SocketAddr, budget: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use super::super::liveness::Liveness;
     use super::super::probe::fake_vault;
     use super::super::server::{bind, handle};
     use super::{healthcheck, healthcheck_until};
@@ -68,8 +70,10 @@ mod tests {
         let listener = bind("0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(std::thread::spawn(move || {
+            let live = Arc::new(Liveness::new(vault));
             for stream in listener.incoming().flatten() {
-                drop(std::thread::spawn(move || handle(stream, vault)));
+                let live = Arc::clone(&live);
+                drop(std::thread::spawn(move || handle(stream, &live)));
             }
         }));
         port
