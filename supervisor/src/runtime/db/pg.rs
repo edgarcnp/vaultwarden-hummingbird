@@ -5,6 +5,14 @@
 //! TLS mode: encryption mandatory, cert chaining not verified — typical
 //! for managed providers, the same posture vaultwarden itself accepts
 //! (`verify-ca`/`verify-full` in the URL are NOT honored).
+//!
+//! Deliberate tradeoff, not an oversight: this connection carries the same
+//! trust vaultwarden itself places in the URL. Strict modes fail closed —
+//! the client library rejects `verify-ca`/`verify-full` at parse, so no
+//! connection is attempted and no silent downgrade exists. Residual risk,
+//! accepted: with auto-restore enabled, the emptiness check and backup
+//! download run over this connection, so a MITM on the DB path can pose as
+//! an empty database and receive the backup dump.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,13 +119,11 @@ mod tests {
     /// cleanly, not hang the caller.
     #[test]
     fn connect_fails_fast_on_refused_connection() {
-        assert!(
-            connect(
-                "postgres://u:p@127.0.0.1:1/db?sslmode=disable",
-                Duration::from_secs(2)
-            )
-            .is_none()
-        );
+        assert!(connect(
+            "postgres://u:p@127.0.0.1:1/db?sslmode=disable",
+            Duration::from_secs(2)
+        )
+        .is_none());
     }
 
     /// A malformed URL must fail cleanly without panicking.
