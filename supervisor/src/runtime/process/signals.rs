@@ -31,16 +31,25 @@ fn flag() -> &'static Arc<AtomicBool> {
     STOP.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
 
-/// Arm the stop handlers. Call once, first thing in `main`.
-pub fn install_signal_handlers() {
+/// Arm the stop handlers. Call once, first thing in `main`. Returns false
+/// if any required signal could not be registered: as PID 1 the container
+/// orchestrator's stop signals ARE the shutdown mechanism — a supervisor
+/// that cannot catch them degrades to SIGKILL-only teardown (no graceful
+/// child termination, no final state sync), so the boot must fail instead.
+pub fn install_signal_handlers() -> bool {
+    let mut ok = true;
     for sig in [SIGTERM, SIGINT, SIGHUP, SIGQUIT] {
         match flag::register(sig, Arc::clone(flag())) {
             // SigId is Copy (no Drop): the registration lives for the whole
             // process, which is what a PID 1 wants.
             Ok(_) => {}
-            Err(e) => log::err(&format!("signal {sig} registration failed: {e}")),
+            Err(e) => {
+                log::err(&format!("signal {sig} registration failed: {e}"));
+                ok = false;
+            }
         }
     }
+    ok
 }
 
 /// Consume the stop request: true at most once. The main loop's only

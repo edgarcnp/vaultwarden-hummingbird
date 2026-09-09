@@ -43,7 +43,10 @@ fn main() {
         healthcheck();
     }
 
-    install_signal_handlers();
+    if !install_signal_handlers() {
+        log::err("cannot register stop signals; refusing to run without graceful shutdown");
+        std::process::exit(1);
+    }
     let cfg = match Config::from_env() {
         Some(cfg) => cfg,
         None => std::process::exit(1),
