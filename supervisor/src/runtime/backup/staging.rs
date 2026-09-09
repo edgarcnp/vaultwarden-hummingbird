@@ -7,11 +7,17 @@ use crate::util::log;
 
 /// Remove stale staging artifacts from `dir` (a previous run may have
 /// been killed mid-dump) and ensure the directory exists. An uncleanable
-/// directory aborts the run rather than risking a full volume.
+/// directory aborts the run rather than risking a full volume. The
+/// directory is owner-only (0700): everything staged is sensitive, and a
+/// wider mode must not depend on the creating process's umask.
 pub(super) fn sweep_staging(dir: &str) -> bool {
     let dir = Path::new(dir);
     if let Err(e) = std::fs::create_dir_all(dir) {
         log::err(&format!("db backup: cannot create staging dir: {e}"));
+        return false;
+    }
+    if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+        log::err(&format!("db backup: cannot restrict staging dir: {e}"));
         return false;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -46,6 +52,8 @@ pub(super) fn lock_down(path: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::super::support::next_staging;
     use super::*;
 
@@ -57,6 +65,20 @@ mod tests {
         assert!(sweep_staging(&dir));
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert!(entries.is_empty());
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// The staging dir is owner-only regardless of umask: everything that
+    /// lands in it is sensitive.
+    #[test]
+    fn staging_dir_is_0700() {
+        let dir = next_staging();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a permissive umask having created it wide.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(sweep_staging(&dir));
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
         let _ = std::fs::remove_dir(&dir);
     }
 }

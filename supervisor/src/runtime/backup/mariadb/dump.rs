@@ -40,7 +40,42 @@ pub(crate) fn dump(cfg: &DbBackupConfig, staged: &str, abort: &impl Fn() -> bool
     if ok {
         true
     } else {
+        // mariadb-dump writes --result-file directly: a failed run leaves
+        // a partial (sensitive) dump; remove it now, not at the next sweep.
+        let _ = std::fs::remove_file(staged);
         log::err("db backup: mariadb-dump failed or timed out");
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::backup::support;
+
+    /// A failed run (no mariadb binary in the test env -> spawn error)
+    /// must not leave a partial staged dump behind.
+    #[test]
+    fn mariadb_dump_failure_removes_the_partial_staged_file() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-mdbfail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("dump.sql");
+        std::fs::write(&staged, b"pre-existing sentinel").unwrap();
+        let cfg = support::cfg_with(
+            "mariadb://u:p@127.0.0.1:1/vault",
+            DbSpec::Mysql {
+                host: Some("127.0.0.1".into()),
+                port: 1,
+                user: Some("u".into()),
+                password: Some("p".into()),
+                db: Some("vault".into()),
+            },
+        );
+        assert!(!dump(&cfg, staged.to_str().unwrap(), &|| false));
+        assert!(
+            !staged.exists(),
+            "failed dump must not leave partial output"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

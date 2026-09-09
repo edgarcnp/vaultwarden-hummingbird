@@ -32,6 +32,10 @@ pub(crate) fn dump(db: &DbSpec, staged: &str) -> bool {
     match conn.execute_batch(&format!("VACUUM INTO '{}'", staged.replace('\'', "''"))) {
         Ok(()) => true,
         Err(e) => {
+            // VACUUM INTO can leave a partial output before failing: a
+            // sensitive half-dump must never linger in staging (the next
+            // sweep would clear it, but why keep it hours).
+            let _ = std::fs::remove_file(staged);
             log::err(&format!("db backup: sqlite VACUUM INTO failed: {e}"));
             false
         }
@@ -41,6 +45,26 @@ pub(crate) fn dump(db: &DbSpec, staged: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_dump_failure_removes_the_partial_staged_file() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-bkfail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A garbage "source" makes VACUUM INTO fail after creating output.
+        let src = dir.join("garbage.sqlite3");
+        std::fs::write(&src, b"not a database").unwrap();
+        let staged = dir.join("dump.sqlite3");
+        std::fs::write(&staged, b"pre-existing sentinel").unwrap();
+        let db = DbSpec::Sqlite {
+            path: src.to_string_lossy().into_owned(),
+        };
+        assert!(!dump(&db, staged.to_str().unwrap()));
+        assert!(
+            !staged.exists(),
+            "failed dump must not leave partial output"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sqlite_dump_from_readonly_handle_is_valid() {
