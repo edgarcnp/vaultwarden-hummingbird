@@ -4,7 +4,7 @@
 //! Connection config rides env (libpq PG* vars) — never argv. TLS 1.3
 //! only (env pinned in `db::tools::pg_env`).
 
-use crate::config::{DbBackupConfig, DbSpec, DB_PING_TIMEOUT, PG_RESTORE};
+use crate::config::{DB_PING_TIMEOUT, DbBackupConfig, DbSpec, PG_RESTORE};
 use crate::runtime::db::pg;
 use crate::util::log;
 

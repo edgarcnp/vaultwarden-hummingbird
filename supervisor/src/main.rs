@@ -93,25 +93,24 @@ fn main() {
                 log::err("no room for the internal vault port; refusing to start");
                 shutdown(Some(tsd), 1, None)
             };
-            let ok = tailscale_serve(
+            if !tailscale_serve(
                 vault_port,
                 cfg.service.as_deref(),
                 &cfg.socket,
                 config::SERVE_TIMEOUT,
                 &stopping,
-            );
-            let msg = if ok {
-                match &cfg.service {
-                    Some(svc) => format!(
-                        "tailscale serve: advertised {svc} (needs console definition + approval)"
-                    ),
-                    None => {
-                        "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net".into()
-                    }
-                }
-            } else {
-                "tailscale serve failed (needs MagicDNS + HTTPS certs enabled); the vault runs without inbound tailnet HTTPS"
-                    .into()
+            ) {
+                // Tailscale is the sole inbound path: serve failure means a
+                // vault nobody can reach (typically MagicDNS/HTTPS certs
+                // disabled). Same fail-closed contract as `up` above: exit
+                // and let the orchestrator retry.
+                shutdown(Some(tsd), 1, None)
+            }
+            let msg = match &cfg.service {
+                Some(svc) => format!(
+                    "tailscale serve: advertised {svc} (needs console definition + approval)"
+                ),
+                None => "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net".into(),
             };
             log::info(&msg);
         }

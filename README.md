@@ -100,9 +100,8 @@ A few things worth knowing:
 
 ## Something not working?
 
-- **The container exits immediately at startup** — almost always Tailscale. Check the auth key and look for `refusing to run the vault without Tailscale` in the logs.
+- **The container exits immediately at startup** — almost always Tailscale. Check the auth key and look for `refusing to run the vault without Tailscale` in the logs. With `TAILSCALE_SERVE=true` (the default), a failed `tailscale serve` exits the same way: enable MagicDNS and HTTPS certificates in the Tailscale admin console, or set `TAILSCALE_SERVE=false` to run without the tailnet HTTPS address.
 - **`/alive` returns 503** — the vault itself isn't answering, usually because the database is unreachable. Its error will be in the container logs.
-- **`tailscale serve failed` in the logs** — enable MagicDNS and HTTPS certificates in the Tailscale admin console. The vault still runs; you just don't get the HTTPS address.
 - **`db backup: ... failed; continuing`** — nothing to do. The backup was skipped and everything else keeps running.
 
 ## Building it yourself
