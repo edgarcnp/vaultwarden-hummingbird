@@ -23,7 +23,7 @@ podman run --rm -p 127.0.0.1:8080:8080 \
 curl -i http://127.0.0.1:8080/alive
 ```
 
-Images are published for amd64 and arm64 on every release, and rebuilt weekly so that security fixes in the base images keep flowing. The `:latest` tag only changes on your machine when you pull again. Note: the first release creates the GitHub package as private — switch it to public once in the repo's package settings if you want anyone to be able to pull it.
+Images are published for amd64 and arm64 on every release. The `:latest` tag only changes on your machine when you pull again. Note: the first release creates the GitHub package as private — switch it to public once in the repo's package settings if you want anyone to be able to pull it.
 
 ## Configuration
 
