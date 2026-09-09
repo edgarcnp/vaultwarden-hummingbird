@@ -71,19 +71,6 @@
         },
         {
             "customType": "regex",
-            "description": "Kitware cmake pin (ARG strips the upstream v prefix)",
-            "fileMatch": [
-                "^Containerfile$"
-            ],
-            "matchStrings": [
-                "ARG CMAKE_VERSION=(?<currentValue>\\S+)"
-            ],
-            "datasourceTemplate": "github-tags",
-            "depNameTemplate": "Kitware/CMake",
-            "extractVersionTemplate": "^v(?<version>.*)$"
-        },
-        {
-            "customType": "regex",
             "description": "rclone pin (ARG strips the upstream v prefix)",
             "fileMatch": [
                 "^Containerfile$"
