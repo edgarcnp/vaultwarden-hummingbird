@@ -1,43 +1,78 @@
-# One config file (.env, from .env.example), mounted read-only; the
-# supervisor distributes it: TS_*/SUPERVISOR_* stay with PID 1, the rest
-# reaches vaultwarden. Build args interpolate from .env too (WEB_VAULT).
-# Alternative: env_file: .env (all keys in container env).
+# ============================================================================
+# VAULTWARDEN-HUMMINGBIRD — local runner (podman compose / docker compose)
+#   One config file (.env, from .env.example), mounted read-only; the
+#   supervisor distributes it: SUPERVISOR_*/TAILSCALE_* stay with PID 1,
+#   VAULTWARDEN_* reach vaultwarden under the stripped upstream name (the
+#   rest is forwarded verbatim).
+#   Alternative: env_file: .env (all keys in container env).
+# ============================================================================
+
 services:
   vaultwarden:
+    # ============================================================================
+    # BUILD — image build (rebuild required after changing build knobs)
+    #   VAULTWARDEN_WEB_VAULT passes through from the environment/.env when
+    #   set; every build arg is documented in the Containerfile (BUILD KNOBS).
+    # ============================================================================
     build:
       context: .
       dockerfile: Containerfile
       args:
-        WEB_VAULT: "${WEB_VAULT:-true}"
+        VAULTWARDEN_WEB_VAULT: "${VAULTWARDEN_WEB_VAULT:-true}"
     image: vaultwarden-hummingbird:local
     restart: unless-stopped
-    stop_grace_period: 90s   # TERM_GRACE + final S3 state push
-    # Explicit here (not just inherited from the image): podman's default
-    # OCI image format drops HEALTHCHECK; compose-level definition works
-    # with any backend/format. Same probe as the Containerfile directive.
+    # ============================================================================
+    # LIFECYCLE — stop timing
+    #   Covers the supervisor's TERM grace period plus the final S3 state push.
+    # ============================================================================
+    stop_grace_period: 90s
+    # ============================================================================
+    # HEALTHCHECK — compose-level probe
+    #   Explicit here (not just inherited from the image): podman's default
+    #   OCI image format drops HEALTHCHECK; a compose-level definition works
+    #   with any backend/format. Same probe as the Containerfile directive.
+    # ============================================================================
     healthcheck:
       test: ["CMD", "/entrypoint", "--healthcheck"]
       interval: 60s
       timeout: 10s
       start_period: 30s
       retries: 3
+    # ============================================================================
+    # HARDENING — least privilege
+    #   No capabilities, no privilege escalation, read-only rootfs.
+    #   Writable paths: /data (volume) + /tmp (tmpfs).
+    # ============================================================================
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    read_only: true          # writable: /data (volume) + /tmp (tmpfs)
+    read_only: true
     tmpfs:
       - /tmp
+    # ============================================================================
+    # NETWORK — exposed port
+    #   Serves /alive only (supervisor gatekeeper), loopback-only; the API is
+    #   tailnet-only via tailscale serve.
+    # ============================================================================
     ports:
-      # Exposed port serves /alive only (supervisor gatekeeper); the API is
-      # tailnet-only via tailscale serve.
       - "127.0.0.1:8080:8080"
+    # ============================================================================
+    # STORAGE — config mount + data volume
+    #   .env is the supervisor-owned dotenv file; vw-data persists /data
+    #   (vault DB + tailscaled state) across redeploys.
+    # ============================================================================
     volumes:
       - ./.env:/config/.env:ro,z
       - vw-data:/data
+    # ============================================================================
+    # SUPERVISOR WIRING — how the supervisor finds its config
+    # ============================================================================
     environment:
       SUPERVISOR_ENV_FILE: /config/.env
-      # env_file: .env
 
+# ============================================================================
+# VOLUMES — named volumes
+# ============================================================================
 volumes:
   vw-data:
