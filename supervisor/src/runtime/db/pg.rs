@@ -119,11 +119,13 @@ mod tests {
     /// cleanly, not hang the caller.
     #[test]
     fn connect_fails_fast_on_refused_connection() {
-        assert!(connect(
-            "postgres://u:p@127.0.0.1:1/db?sslmode=disable",
-            Duration::from_secs(2)
-        )
-        .is_none());
+        assert!(
+            connect(
+                "postgres://u:p@127.0.0.1:1/db?sslmode=disable",
+                Duration::from_secs(2)
+            )
+            .is_none()
+        );
     }
 
     /// A malformed URL must fail cleanly without panicking.
