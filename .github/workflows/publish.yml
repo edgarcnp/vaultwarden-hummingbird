@@ -1,7 +1,6 @@
 # Build and publish the multi-arch image to ghcr.io. The workflow changes
 # no versions: it builds whatever ARG pins the Containerfile holds (Renovate
-# owns the bumps). Weekly cron rebuilds the same pins so the floating base
-# images keep picking up upstream CVE patches.
+# owns the bumps).
 name: publish
 
 on:
@@ -9,9 +8,6 @@ on:
   push:
     tags:
       - "v*"
-  schedule:
-    # Saturdays 03:00 UTC — off-peak.
-    - cron: "0 3 * * 6"
 
 # Per-arch images from a stale run must not overwrite a good manifest list.
 concurrency:
