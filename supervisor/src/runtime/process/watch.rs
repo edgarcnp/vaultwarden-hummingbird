@@ -46,12 +46,15 @@ fn spawn_backup_thread(backup: DbBackupConfig) {
 /// gatekeeper (the only `0.0.0.0` listener), start the loopback-only vault,
 /// then watch — observing vaultwarden's exit or a stop request, driving
 /// periodic sync, then tearing down tailscaled and exiting with
-/// vaultwarden's code.
-pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
+/// vaultwarden's code. Tailscale is the sole inbound path: if tailscaled
+/// dies mid-run the vault is torn down too (exit 1) so the orchestrator
+/// restarts the whole container — a vault nobody can reach is worse than a
+/// short outage.
+pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
     // fail closed on a missing internal port: co-binding would expose the vault
     let Some(vault_port) = &cfg.vault_port else {
         log::err("no room for the internal vault port above the exposed port; refusing to start");
-        shutdown(tsd, 1, None)
+        shutdown(Some(tsd), 1, None)
     };
     let gate = match gate_bind(&cfg.port) {
         Ok(g) => g,
@@ -60,7 +63,7 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
                 "gatekeeper bind failed on 0.0.0.0:{}: {e}",
                 log::sanitize(&cfg.port)
             ));
-            shutdown(tsd, 1, None)
+            shutdown(Some(tsd), 1, None)
         }
     };
     gate_describe(&cfg.port, vault_port);
@@ -69,7 +72,7 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
         .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
     else {
         log::err("internal vault port is not a valid port; refusing to start");
-        shutdown(tsd, 1, None)
+        shutdown(Some(tsd), 1, None)
     };
     drop(std::thread::spawn(move || {
         gate_serve(gate, Some(vault_addr))
@@ -77,7 +80,7 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
 
     log::info("starting vaultwarden");
     let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
-        shutdown(tsd, 1, None)
+        shutdown(Some(tsd), 1, None)
     };
     if let Some(backup) = cfg.backup.clone().filter(|b| b.periodic) {
         spawn_backup_thread(backup);
@@ -91,8 +94,14 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
             if pid == vw {
                 break 'watch exit_code(raw);
             }
-            if Some(pid) == tsd {
-                log::err("tailscaled exited unexpectedly; the vault keeps running");
+            if Some(pid) == Some(tsd) {
+                // Tailscale is the only way in: no daemon, no reachable
+                // vault. Tear everything down; the orchestrator restarts.
+                log::err(
+                    "tailscaled exited unexpectedly; shutting down (restart to restore Tailscale)",
+                );
+                signal_group(vw, Signal::SIGTERM);
+                break 'watch 1;
             } else {
                 log::info(&format!("reaped stray pid {pid} ({})", exit_reason(raw)));
             }
@@ -100,9 +109,7 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
         }
         if take_stop() {
             log::info("stop requested; terminating children");
-            if let Some(t) = tsd {
-                signal_group(t, Signal::SIGTERM);
-            }
+            signal_group(tsd, Signal::SIGTERM);
             signal_group(vw, Signal::SIGTERM);
             break 'watch match reap_until_gone(vw, TERM_GRACE) {
                 Gone::Reaped(raw) => exit_code(raw),
@@ -128,7 +135,7 @@ pub fn start_vw(cfg: &Config, tsd: Option<Pid>) -> ! {
         std::thread::sleep(POLL);
     };
 
-    shutdown(tsd, code, cfg.sync.as_ref())
+    shutdown(Some(tsd), code, cfg.sync.as_ref())
 }
 
 /// Bring every child down and exit the container: TERM each child group,

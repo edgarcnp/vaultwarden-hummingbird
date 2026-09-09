@@ -25,7 +25,7 @@ pub struct Config {
     /// node name announced to the tailnet (`TAILSCALE_HOSTNAME`)
     pub hostname: String,
     /// Tailscale auth key or OAuth client secret (`TAILSCALE_AUTHKEY`;
-    /// empty = skip `up`)
+    /// required — boot fails closed without it)
     pub authkey: String,
     /// configure `tailscale serve` after a successful up
     pub serve: bool,
@@ -49,14 +49,16 @@ impl Config {
     /// Merge order: knobs = env > file > default; port = VAULTWARDEN_PORT >
     /// VAULTWARDEN_ROCKET_PORT (env) > file ROCKET_PORT > 8080; vaultwarden
     /// keys = file > env.
-    /// Empty = unset; bad booleans warn and take the default.
-    pub fn from_env() -> Self {
+    /// Empty = unset; bad booleans warn and take the default. Returns None
+    /// when a required knob is missing (TAILSCALE_AUTHKEY): the vault is
+    /// unreachable without Tailscale, so boot must fail closed.
+    pub fn from_env() -> Option<Self> {
         Self::build(FileConfig::load(), |k| env::var(k).ok())
     }
 
     /// [`Self::from_env`] with the env source injected: tests pass a map,
     /// never mutating the process env (unsafe and racy).
-    fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Self {
+    fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
         let port = valid_port(lookup("VAULTWARDEN_PORT"))
             .or_else(|| valid_port(lookup("VAULTWARDEN_ROCKET_PORT")))
             .or_else(|| valid_port(file.child.get("ROCKET_PORT").cloned()))
@@ -100,14 +102,20 @@ impl Config {
             }
         };
 
-        Self {
+        let authkey = knob("TAILSCALE_AUTHKEY", "");
+        if authkey.is_empty() {
+            log::err("config: TAILSCALE_AUTHKEY is required; refusing to start");
+            return None;
+        }
+
+        Some(Self {
             // hard-pinned to the volume; the sync scope is /data too
             state: knob("TAILSCALE_STATE_FILE", "/data/tailscaled.state"),
             socket: knob("TAILSCALE_SOCKET", "/tmp/tailscaled.sock"),
             port,
             vault_port,
             hostname: knob("TAILSCALE_HOSTNAME", "vaultwarden-hummingbird"),
-            authkey: knob("TAILSCALE_AUTHKEY", ""),
+            authkey,
             serve: flag("TAILSCALE_SERVE", true),
             service: resolve_service(
                 lookup("TAILSCALE_SERVICE")
@@ -120,7 +128,7 @@ impl Config {
             // DB the vault uses
             db_keepalive: DbKeepalive::from_parts(&knob("SUPERVISOR_DB_KEEPALIVE", ""), db_url),
             vw_env: file.child.into_iter().collect(),
-        }
+        })
     }
 }
 
@@ -147,11 +155,30 @@ mod tests {
         let file_has_key = file.knobs.contains_key("TAILSCALE_AUTHKEY");
         Config::build(file, move |k| match map.get(k) {
             Some(v) => Some(v.clone()),
-            // tests without an explicit authkey (env or file) get a
-            // placeholder so unrelated knobs stay exercisable
+            // TAILSCALE_AUTHKEY is required; tests without one (in env or
+            // file) get a placeholder so unrelated knobs stay exercisable
             None if k == "TAILSCALE_AUTHKEY" && !file_has_key => Some("test-key".to_string()),
             None => None,
         })
+        .expect("test config always has an authkey")
+    }
+
+    #[test]
+    fn authkey_is_required() {
+        // no authkey from env or file: fail closed
+        let map: BTreeMap<String, String> = BTreeMap::new();
+        assert!(
+            Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
+            "missing TAILSCALE_AUTHKEY must refuse to start"
+        );
+        // file layer satisfies the requirement too
+        let file = FileConfig::load_from(Some(&env_dotenv("TAILSCALE_AUTHKEY=file-key\n")));
+        assert!(Config::build(file, |_| None).is_some());
+        // empty is as good as missing
+        let map: BTreeMap<String, String> = [("TAILSCALE_AUTHKEY".to_string(), String::new())]
+            .into_iter()
+            .collect();
+        assert!(Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none());
     }
 
     #[test]

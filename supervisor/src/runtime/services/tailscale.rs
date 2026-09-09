@@ -27,7 +27,8 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pi
     spawn(&mut cmd)
 }
 
-/// `tailscale up` with hard timeout; failures are non-fatal for the vault.
+/// `tailscale up` with hard timeout; a failure makes the caller refuse to
+/// boot the vault (Tailscale is the sole inbound path).
 /// The authkey is staged to a 0600 file and passed as `--auth-key=file:`
 /// (never argv — /proc cmdline is world-readable) and removed afterwards.
 /// `socket` is the CLI's `--socket`: tailscaled runs on a non-default
@@ -93,8 +94,8 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
 }
 
 /// `tailscale serve`: inbound tailnet path for the loopback vault
-/// (userspace mode has none without it). With `service` set (`TAILSCALE_SERVICE`),
-/// the node advertises itself as a host of `svc:<name>` — the Service-host
+/// (userspace mode has none without it). With `service` set
+/// (`TAILSCALE_SERVICE`), the node advertises itself as a host of `svc:<name>` — the Service-host
 /// form. An advertisement registered before the service existed in the
 /// admin console can wedge the host registration console-side ("no Service
 /// hosts" forever), so any stale `svc:<name>` config is cleared first; a

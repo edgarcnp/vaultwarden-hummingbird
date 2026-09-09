@@ -1,8 +1,11 @@
 //! PID 1 supervisor: tailscaled (userspace) + tailscale up/serve +
-//! loopback-only vaultwarden. Optional dotenv layer (SUPERVISOR_ENV_FILE)
-//! and S3 state sync (SUPERVISOR_S3_*) so /data identity survives ephemeral
-//! redeploys. The authkey is staged to a 0600 file (never argv) and removed
-//! after `up`.
+//! loopback-only vaultwarden. Tailscale is the sole inbound path, so it is
+//! required: a missing TAILSCALE_AUTHKEY or any boot-time Tailscale failure
+//! refuses to start (exit 1), and a mid-run tailscaled death tears the
+//! vault down. Optional dotenv layer (SUPERVISOR_ENV_FILE) and S3 state
+//! sync (SUPERVISOR_S3_*) so /data identity survives ephemeral redeploys.
+//! The authkey is staged to a 0600 file (never argv) and removed after
+//! `up`.
 //!
 //! Shutdown model: children run in their own process groups; a stop request
 //! (SIGTERM/SIGINT/SIGHUP/SIGQUIT) is observed by the main thread, which
@@ -23,12 +26,15 @@ use util::{log, net};
 /// Runs before any boot side effect; config resolution is a pure read, so
 /// the probe targets exactly the port the running supervisor binds.
 fn healthcheck() -> ! {
-    let cfg = Config::from_env();
-    std::process::exit(if gate_healthcheck(&cfg.port) { 0 } else { 1 })
+    match Config::from_env() {
+        Some(cfg) => std::process::exit(if gate_healthcheck(&cfg.port) { 0 } else { 1 }),
+        None => std::process::exit(1),
+    }
 }
 
-/// Boot: arm signals, load config, restore S3 state, bring up Tailscale
-/// (best effort), then block in [`start_vw`] for the container's lifetime.
+/// Boot: arm signals, load config (Tailscale required — fail closed), then
+/// restore S3 state, bring up Tailscale, and block in [`start_vw`] for the
+/// container's lifetime.
 fn main() {
     if std::env::args_os()
         .nth(1)
@@ -38,7 +44,10 @@ fn main() {
     }
 
     install_signal_handlers();
-    let cfg = Config::from_env();
+    let cfg = match Config::from_env() {
+        Some(cfg) => cfg,
+        None => std::process::exit(1),
+    };
 
     // DB restore first: only an empty DB is touched, and vaultwarden must
     // not start on top of a half-done import.
@@ -51,8 +60,8 @@ fn main() {
     }
 
     let Some(tsd) = spawn_tailscaled(&cfg.state, &cfg.socket, cfg.userspace) else {
-        log::err("continuing without Tailscale");
-        start_vw(&cfg, None)
+        log::err("tailscaled failed to start; refusing to run the vault without Tailscale");
+        std::process::exit(1)
     };
     log::info("tailscaled started (userspace networking)");
 
@@ -60,62 +69,58 @@ fn main() {
         if take_stop() {
             shutdown(Some(tsd), 0, None);
         }
-        log::err("tailscaled socket never appeared; continuing without Tailscale");
-        start_vw(&cfg, Some(tsd))
+        log::err("tailscaled socket never appeared; refusing to run the vault without Tailscale");
+        shutdown(Some(tsd), 1, None)
     }
 
-    if cfg.authkey.is_empty() {
-        log::info("TAILSCALE_AUTHKEY not set - starting without Tailscale");
-    } else {
-        log::info("authenticating tailscale node...");
-        if tailscale_up(
-            &cfg.authkey,
-            &cfg.hostname,
-            &cfg.socket,
-            config::AUTH_TIMEOUT,
-            stopping,
-        ) {
-            log::info("tailscale up: connected");
-            if let Some(sync) = &cfg.sync {
-                sync_state(sync, stopping);
-            }
-            if cfg.serve {
-                let Some(vault_port) = &cfg.vault_port else {
-                    log::err("no room for the internal vault port; refusing to start");
-                    shutdown(Some(tsd), 1, None)
-                };
-                let ok = tailscale_serve(
-                    vault_port,
-                    cfg.service.as_deref(),
-                    &cfg.socket,
-                    config::SERVE_TIMEOUT,
-                    &stopping,
-                );
-                let msg = if ok {
-                    match &cfg.service {
-                        Some(svc) => format!(
-                            "tailscale serve: advertised {svc} (needs console definition + approval)"
-                        ),
-                        None => {
-                            "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net"
-                                .into()
-                        }
-                    }
-                } else {
-                    "tailscale serve failed (needs MagicDNS + HTTPS certs enabled); continuing"
-                        .into()
-                };
-                log::info(&msg);
-            }
-        } else {
-            if take_stop() {
-                shutdown(Some(tsd), 0, None);
-            }
-            log::err(
-                "tailscale up failed or timed out - check TAILSCALE_AUTHKEY; continuing without Tailscale",
-            );
+    log::info("authenticating tailscale node...");
+    if tailscale_up(
+        &cfg.authkey,
+        &cfg.hostname,
+        &cfg.socket,
+        config::AUTH_TIMEOUT,
+        stopping,
+    ) {
+        log::info("tailscale up: connected");
+        if let Some(sync) = &cfg.sync {
+            sync_state(sync, stopping);
         }
+        if cfg.serve {
+            let Some(vault_port) = &cfg.vault_port else {
+                log::err("no room for the internal vault port; refusing to start");
+                shutdown(Some(tsd), 1, None)
+            };
+            let ok = tailscale_serve(
+                vault_port,
+                cfg.service.as_deref(),
+                &cfg.socket,
+                config::SERVE_TIMEOUT,
+                &stopping,
+            );
+            let msg = if ok {
+                match &cfg.service {
+                    Some(svc) => format!(
+                        "tailscale serve: advertised {svc} (needs console definition + approval)"
+                    ),
+                    None => {
+                        "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net".into()
+                    }
+                }
+            } else {
+                "tailscale serve failed (needs MagicDNS + HTTPS certs enabled); the vault runs without inbound tailnet HTTPS"
+                    .into()
+            };
+            log::info(&msg);
+        }
+    } else {
+        if take_stop() {
+            shutdown(Some(tsd), 0, None);
+        }
+        log::err(
+            "tailscale up failed or timed out - check TAILSCALE_AUTHKEY; refusing to run the vault without Tailscale",
+        );
+        shutdown(Some(tsd), 1, None)
     }
 
-    start_vw(&cfg, Some(tsd))
+    start_vw(&cfg, tsd)
 }
