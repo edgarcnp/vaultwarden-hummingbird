@@ -1,24 +1,32 @@
-//! Postgres restore: emptiness gate (the `users` table verifiably
-//! missing, via the native client) and import (`pg_restore` after a
-//! `--list` parse check). Connection config rides env (libpq PG* vars)
-//! — never argv. TLS 1.3 only (env pinned in `db::tools::pg_env`).
+//! Postgres restore: emptiness gate (no application relations anywhere
+//! outside system/extension schemas, via the native client) and import
+//! (`pg_restore` in one transaction after a `--list` parse check).
+//! Connection config rides env (libpq PG* vars) — never argv. TLS 1.3
+//! only (env pinned in `db::tools::pg_env`).
 
-use crate::config::{DB_PING_TIMEOUT, DbBackupConfig, DbSpec, PG_RESTORE};
+use crate::config::{DbBackupConfig, DbSpec, DB_PING_TIMEOUT, PG_RESTORE};
 use crate::runtime::db::pg;
 use crate::util::log;
 
 use super::super::tools::tool;
 use crate::runtime::db::tools::pg_env;
 
-/// True iff the `users` table is verifiably absent. Connection/query
-/// failures are Err (ambiguous), never "empty".
+/// True iff the database holds no application relations: no user tables in
+/// any schema outside `pg_catalog`/`information_schema` and the schemas
+/// owned by extensions. A lone sentinel table is not enough — a database
+/// with other deployments' tables, migration artifacts, or user objects
+/// must never qualify for automatic restore. Connection/query failures are
+/// Err (ambiguous), never "empty".
 pub(crate) fn is_empty(url: &str) -> Result<bool, String> {
     let mut client =
         pg::connect(url, DB_PING_TIMEOUT).ok_or_else(|| "postgres unreachable".to_string())?;
     let rows = client
         .query(
-            "SELECT 1 FROM information_schema.tables \
-             WHERE table_schema = 'public' AND table_name = 'users'",
+            "SELECT 1 FROM pg_catalog.pg_tables \
+             WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+             AND schemaname NOT IN (SELECT nspname FROM pg_catalog.pg_namespace \
+             WHERE oid IN (SELECT extnamespace FROM pg_catalog.pg_extension)) \
+             LIMIT 1",
             &[],
         )
         .map_err(|e| format!("query failed: {e}"))?;
