@@ -22,6 +22,10 @@ ARG RCLONE_VERSION=1.75.1
 
 # ============================================================================
 # BASE IMAGES — floating tags; rebuilds pick up upstream CVE patches
+#   The runtime uses the -openssl variant: it ships libssl/libcrypto, so the
+#   runtime stage needs no hand-copied OpenSSL from the builder (the two
+#   images update independently and would drift). mariadb's client lib still
+#   comes from the vw-build stage, gated by the DB build knob.
 #   The DB client images supply the supervisor's backup tools (pg_dump/
 #   pg_restore, mariadb-dump/mariadb) and their shared-lib closure; they
 #   float too, so the dump client stays at-or-above the server majors it
@@ -29,7 +33,7 @@ ARG RCLONE_VERSION=1.75.1
 # ============================================================================
 
 ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder
-ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest
+ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl
 ARG PG_CLIENT_IMAGE=registry.access.redhat.com/hi/postgresql:latest
 ARG MARIADB_CLIENT_IMAGE=registry.access.redhat.com/hi/mariadb:latest
 
@@ -134,7 +138,8 @@ WORKDIR /build
 COPY --from=fetch /fetch/vw.tar.gz .
 # pq-sys@= pinned for reproducible builds; the bundled libpq *source* inside
 # pq-src floats in [0.2,0.4) and resolves at build time. mimalloc = hardened
-# allocator; x86-64-v2 = RHEL 9 baseline. Runtime libs staged to /out-libs.
+# allocator; x86-64-v2 = RHEL 9 baseline. Only the mariadb client lib is
+# staged (the -openssl runtime image provides libssl/libcrypto itself).
 RUN tar -xzf vw.tar.gz --strip-components=1 && rm vw.tar.gz \
  && case ",${DB}," in \
         *,postgresql,*) cargo add pq-sys@=0.7.5 --features bundled ;; \
@@ -145,7 +150,6 @@ RUN tar -xzf vw.tar.gz --strip-components=1 && rm vw.tar.gz \
  && VW_VERSION=${VW_VERSION} cargo build \
         --features "${DB},enable_mimalloc" --profile release \
  && mkdir /out-libs \
- && cp -a /usr/lib64/libssl.so.3* /usr/lib64/libcrypto.so.3* /out-libs/ \
  && case ",${DB}," in \
         *,mysql,*) cp -a /usr/lib64/libmariadb.so.3* /out-libs/ ;; \
     esac \
@@ -201,7 +205,8 @@ LABEL org.opencontainers.image.title="vaultwarden-hummingbird" \
       org.opencontainers.image.description="Vaultwarden ${VW_VERSION} + Tailscale ${TAILSCALE_VERSION} on Hummingbird core-runtime" \
       org.opencontainers.image.source="https://github.com/dani-garcia/vaultwarden"
 
-# openssl always; mariadb only when DB included mysql. postgres/sqlite static.
+# mariadb lib only when DB included mysql (the -openssl runtime provides
+# libssl/libcrypto itself). postgres/sqlite are static in vaultwarden.
 COPY --from=vw-build /out-libs/ /usr/lib64/
 COPY --from=vw-build /usr/share/zoneinfo /usr/share/zoneinfo
 
