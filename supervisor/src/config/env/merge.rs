@@ -274,9 +274,13 @@ mod tests {
         assert_eq!(cfg.service.as_deref(), Some("svc:env-svc"));
     }
 
-    /// One-key dotenv file for the merge tests above.
+    /// One-key dotenv file for the merge tests above. Unique per call:
+    /// tests run in parallel threads of one process, and a shared path
+    /// would let one test's write race another test's read.
     fn env_dotenv(contents: &str) -> String {
-        let path = std::env::temp_dir().join(format!("vw-sup-svc-{}.env", std::process::id()));
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("vw-sup-svc-{}-{n}.env", std::process::id()));
         fs::write(&path, contents).unwrap();
         path.to_str().unwrap().to_string()
     }
