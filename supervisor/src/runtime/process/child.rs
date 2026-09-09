@@ -7,8 +7,10 @@
 //!   from the namespace-wide reaper ([`super::reap::reap_any`]), never std's
 //!   targeted `try_wait`/`wait`, which would race it over the same zombie.
 //! - Bounded CLI children ([`super::run::run_bounded_env`]) are reaped via
-//!   std inside the helper; the main thread is single-threaded, so the two
-//!   never overlap. They are also group leaders, so a timeout kill reaches
+//!   std, but the main thread's namespace-wide reaper may steal the zombie
+//!   first when the run happens off the main thread (the backup thread);
+//!   the stolen-exit registry ([`super::stolen`]) preserves the verdict.
+//!   They are also group leaders, so a timeout kill reaches
 //!   anything they spawned.
 //! - As PID 1, any orphan re-parents to us; only the namespace-wide
 //!   `waitpid` there (not std) reaps those, and skipping them would leak

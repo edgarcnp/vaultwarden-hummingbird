@@ -20,10 +20,17 @@ const KILL_GRACE: Duration = Duration::from_secs(5);
 
 /// Reap one pending zombie from anywhere in the namespace; `None` = nothing
 /// reapable right now. Never call from tests: this would also reap the test
-/// harness's children.
+/// harness's children. A reaped pid registered by a concurrent bounded run
+/// ([`super::run`]) has its status preserved in the stolen-exit registry —
+/// the run would otherwise see only `ECHILD` and lose the verdict.
 pub fn reap_any() -> Option<(Pid, WaitStatus)> {
     match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-        Ok(status) => status.pid().map(|p| (p.as_raw(), status)),
+        Ok(status) => {
+            if let Some(pid) = status.pid() {
+                super::stolen::record(pid.as_raw(), status);
+            }
+            status.pid().map(|p| (p.as_raw(), status))
+        }
         Err(_) => None,
     }
 }

@@ -10,6 +10,7 @@ mod child;
 mod reap;
 mod run;
 mod signals;
+mod stolen;
 mod watch;
 
 pub use child::{POLL, Pid, TERM_GRACE, alive, signal_group, spawn};
