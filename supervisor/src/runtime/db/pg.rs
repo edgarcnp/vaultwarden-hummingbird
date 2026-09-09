@@ -3,9 +3,10 @@
 //! vaultwarden negotiates with a given database URL, bounded by a timeout.
 //!
 //! TLS uses rustls with the ring provider (no system CA dependency),
-//! relaxed to libpq's `sslmode=require`: encryption mandatory, cert
-//! chaining not verified (typical for managed providers). Strictness lives
-//! in [`tls`], keyed off the URL's own sslmode.
+//! relaxed to libpq's `sslmode=require` for every TLS mode: encryption
+//! mandatory, cert chaining not verified (typical for managed providers,
+//! the same posture vaultwarden itself accepts — `verify-ca`/`verify-full`
+//! in the URL are NOT honored, see [`tls`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +27,8 @@ pub fn connect(url: &str, timeout: Duration) -> Option<postgres::Client> {
     pg.connect_timeout(timeout);
     let connect = match pg.get_ssl_mode() {
         postgres::config::SslMode::Disable => pg.connect(NoTls),
-        // require/verify-* all ride the TLS connector; strictness lives in tls()
+        // require/verify-* all ride the TLS connector; verification stays
+        // relaxed regardless of the mode (see tls())
         _ => pg.connect(tls()),
     };
     match connect {

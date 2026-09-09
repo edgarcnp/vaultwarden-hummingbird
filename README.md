@@ -94,7 +94,11 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 # SUPERVISOR_S3_SYNC_INTERVAL=3600
 ```
 
-Pull at boot, push on a cadence and at shutdown. Failures are non-fatal. Restored state reconnects without `TAILSCALE_AUTHKEY`. One container per bucket/path. With a real volume on `/data`, skip this and set `I_REALLY_WANT_VOLATILE_STORAGE=false`.
+Pull at boot, push on a cadence and at shutdown. Failures are non-fatal.
+One container per bucket/path. Restored state preserves the node identity
+(keeps clients logged in and certificates valid) — but `TAILSCALE_AUTHKEY`
+is still required at every boot: the supervisor fails closed without it.
+With a real volume on `/data`, skip this and set `I_REALLY_WANT_VOLATILE_STORAGE=false`.
 
 Ephemeral alternative: `TAILSCALE_STATE_FILE=mem:` + an `ephemeral=true` authkey — fresh registration each boot.
 
