@@ -136,8 +136,10 @@ RUN tar -xzf vw.tar.gz --strip-components=1 && rm vw.tar.gz \
 # lacks bison/flex/perl) from the official Red Hat client images for the
 # supervisor's backup feature. Each stage collects the client binaries plus
 # their shared-lib closure, minus libs the core runtime already provides.
-# Libs land in a private directory the supervisor points LD_LIBRARY_PATH
-# at, so nothing in the runtime is replaced.
+# Libs land in a per-flavor private directory the supervisor points
+# LD_LIBRARY_PATH at (pg tools only ever see pg libs, mariadb tools only
+# mariadb libs), so a same-named lib from one distribution can never
+# shadow the other's, and nothing in the runtime is replaced.
 
 FROM ${PG_CLIENT_IMAGE} AS pg-clients
 USER 0
@@ -186,10 +188,11 @@ COPY --from=fetch /out/tailscale /usr/local/bin/tailscale
 COPY --from=fetch /out/tailscaled /usr/local/bin/tailscaled
 COPY --from=fetch /out/rclone /usr/local/bin/rclone
 COPY --from=vw-build /out-vaultwarden /vaultwarden
-# DB client tools + their shared-lib closure in a private dir. Both dirs
-# always exist (may be empty) so COPY succeeds regardless of the DB arg.
-COPY --from=pg-clients /out/ /usr/local/lib/dbclients/
-COPY --from=mdb-clients /out/ /usr/local/lib/dbclients/
+# DB client tools + their shared-lib closures, per flavor, in a private
+# tree. Both dirs always exist (may be empty) so COPY succeeds regardless
+# of the DB arg.
+COPY --from=pg-clients /out/ /usr/local/lib/dbclients/pg/
+COPY --from=mdb-clients /out/ /usr/local/lib/dbclients/mariadb/
 # web-vault dir always exists (may be empty) so COPY succeeds
 COPY --from=fetch /out/web-vault /web-vault
 COPY --from=fetch --chown=65532:0 /data /data

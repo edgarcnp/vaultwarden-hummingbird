@@ -3,20 +3,22 @@
 
 use std::time::Duration;
 
-// Child binaries baked into the image; no PATH lookup.
+// DB client tools extracted from the official Red Hat client images, one
+// tree per flavor (pg tools only ever see pg libs, mariadb tools only
+// mariadb libs — a same-named lib from one distribution can never shadow
+// the other's). The shared-lib closure lives on LD_LIBRARY_PATH for these
+// tools' invocations only, so the runtime's own libs are never replaced.
 pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
 pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
 pub const VAULTWARDEN: &str = "/vaultwarden";
 pub const RCLONE: &str = "/usr/local/bin/rclone";
 
-// DB client tools extracted from the official Red Hat client images. Their
-// shared-lib closure lives in DB_TOOL_LIB, on LD_LIBRARY_PATH for these
-// tools' invocations only, so the runtime's own libs are never replaced.
-pub const PG_DUMP: &str = "/usr/local/lib/dbclients/bin/pg_dump";
-pub const PG_RESTORE: &str = "/usr/local/lib/dbclients/bin/pg_restore";
-pub const MARIADB_DUMP: &str = "/usr/local/lib/dbclients/bin/mariadb-dump";
-pub const MARIADB: &str = "/usr/local/lib/dbclients/bin/mariadb";
-pub const DB_TOOL_LIB: &str = "/usr/local/lib/dbclients/lib";
+pub const PG_DUMP: &str = "/usr/local/lib/dbclients/pg/bin/pg_dump";
+pub const PG_RESTORE: &str = "/usr/local/lib/dbclients/pg/bin/pg_restore";
+pub const PG_TOOL_LIB: &str = "/usr/local/lib/dbclients/pg/lib";
+pub const MARIADB_DUMP: &str = "/usr/local/lib/dbclients/mariadb/bin/mariadb-dump";
+pub const MARIADB: &str = "/usr/local/lib/dbclients/mariadb/bin/mariadb";
+pub const MARIADB_TOOL_LIB: &str = "/usr/local/lib/dbclients/mariadb/lib";
 
 // Hard timeouts: a hung child must never block the vault.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);

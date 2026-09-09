@@ -3,7 +3,7 @@
 //! lives in [`super::super::pg`]. Secrets ride env — never argv (/proc
 //! cmdline is world-readable). TLS 1.3 only.
 
-use crate::config::{DB_TOOL_LIB, DbSpec};
+use crate::config::{DbSpec, PG_TOOL_LIB};
 
 /// libpq env vars for the dump/restore tools.
 ///
@@ -31,7 +31,7 @@ fn pg_env_with(db: &DbSpec, ssl_root_cert: Option<String>) -> Vec<(String, Strin
         return Vec::new();
     };
     let mut env = vec![
-        ("LD_LIBRARY_PATH".to_string(), DB_TOOL_LIB.to_string()),
+        ("LD_LIBRARY_PATH".to_string(), PG_TOOL_LIB.to_string()),
         ("PGSSLMINPROTOCOLVERSION".to_string(), "TLSv1.3".to_string()),
     ];
     if let Some(h) = host {

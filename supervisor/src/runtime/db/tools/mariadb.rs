@@ -6,11 +6,12 @@
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 
-use crate::config::DB_TOOL_LIB;
+use crate::config::MARIADB_TOOL_LIB;
 
 /// Shared-lib dir for the mariadb tools, extracted by the image build.
+/// Per-flavor: the mariadb tools never see pg libs (and vice versa).
 pub fn mysql_env() -> Vec<(String, String)> {
-    vec![("LD_LIBRARY_PATH".to_string(), DB_TOOL_LIB.to_string())]
+    vec![("LD_LIBRARY_PATH".to_string(), MARIADB_TOOL_LIB.to_string())]
 }
 
 /// 0600 defaults file for mariadb tools; under /tmp (tmpfs,
@@ -79,7 +80,7 @@ mod tests {
             mysql_env(),
             vec![(
                 "LD_LIBRARY_PATH".to_string(),
-                "/usr/local/lib/dbclients/lib".to_string()
+                "/usr/local/lib/dbclients/mariadb/lib".to_string()
             )]
         );
     }
