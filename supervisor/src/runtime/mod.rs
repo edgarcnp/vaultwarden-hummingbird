@@ -5,8 +5,6 @@
 //! reap, bounded runs, signals, watch loop), `services` (the supervised
 //! children: tailscaled/tailscale, vaultwarden), `sync` (S3 /data state
 //! persistence).
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
 
 mod backup;
 mod db;

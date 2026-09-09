@@ -1,9 +1,6 @@
 //! DB keepalive ping (opt-in via SUPERVISOR_DB_KEEPALIVE, seconds): a
 //! trivial query on a cadence so hosts that suspend an idle database
 //! (scale-to-zero) stay awake for the vault. Failures are non-fatal.
-//!
-//! Connection plumbing (TLS posture, timeouts) lives in [`super::pg`],
-//! shared with the DB backup/restore.
 
 use crate::config::{DB_PING_TIMEOUT, DbKeepalive};
 use crate::util::log;
@@ -51,8 +48,6 @@ mod tests {
         assert!(!ping("not-a-url"));
     }
 
-    /// State-change logging exercised indirectly: tick must not panic on
-    /// consecutive failures and must update the state.
     #[test]
     fn tick_tracks_state_across_failures() {
         let cfg = DbKeepalive {
@@ -66,8 +61,6 @@ mod tests {
         assert_eq!(last, Some(false));
     }
 
-    /// Steady-state success must flip the tracked state to Some(true) so
-    /// the logging stays quiet while the DB stays up.
     #[test]
     #[ignore = "requires a reachable TLS postgres; covered by deploy"]
     fn tick_logs_recovery() {}

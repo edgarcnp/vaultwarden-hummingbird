@@ -1,12 +1,10 @@
 //! Shared postgres client plumbing (used by the keepalive ping and the DB
-//! backup/restore): connection with the same relaxed TLS posture
-//! vaultwarden negotiates with a given database URL, bounded by a timeout.
-//!
-//! TLS uses rustls with the ring provider (no system CA dependency),
-//! relaxed to libpq's `sslmode=require` for every TLS mode: encryption
-//! mandatory, cert chaining not verified (typical for managed providers,
-//! the same posture vaultwarden itself accepts — `verify-ca`/`verify-full`
-//! in the URL are NOT honored, see [`tls`]).
+//! backup/restore): bounded connection with the same relaxed TLS posture
+//! vaultwarden negotiates with a given database URL. rustls + ring (no
+//! system CA dependency), relaxed to libpq's `sslmode=require` for every
+//! TLS mode: encryption mandatory, cert chaining not verified — typical
+//! for managed providers, the same posture vaultwarden itself accepts
+//! (`verify-ca`/`verify-full` in the URL are NOT honored).
 
 use std::sync::Arc;
 use std::time::Duration;

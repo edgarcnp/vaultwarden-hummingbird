@@ -3,8 +3,6 @@
 //! ([`mariadb`], defaults-file + shared-lib env for mariadb-dump/mariadb).
 //! The supervisor has no native mysql client — both backends' dump/restore
 //! ride these external binaries.
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
 
 mod mariadb;
 mod postgres;

@@ -42,9 +42,6 @@ pub(crate) fn dump(db: &DbSpec, staged: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// A sqlite dump round-trips through VACUUM INTO from a read-only
-    /// connection: this is the load-bearing consistency claim for the
-    /// sqlite backend.
     #[test]
     fn sqlite_dump_from_readonly_handle_is_valid() {
         let dir = std::env::temp_dir().join(format!("vw-sup-bk-{}", std::process::id()));

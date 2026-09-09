@@ -2,8 +2,8 @@
 //! loopback-only vaultwarden. Tailscale is the sole inbound path, so it is
 //! required: a missing TAILSCALE_AUTHKEY or any boot-time Tailscale failure
 //! refuses to start (exit 1), and a mid-run tailscaled death tears the
-//! vault down. Optional dotenv layer (SUPERVISOR_ENV_FILE) and S3 state
-//! sync (SUPERVISOR_S3_*) so /data identity survives ephemeral redeploys.
+//! vault down. Optional dotenv layer (SUPERVISOR_ENV_FILE), S3 state sync
+//! (SUPERVISOR_S3_*), and DB backup/restore (SUPERVISOR_DB_BACKUP*).
 //! The authkey is staged to a 0600 file (never argv) and removed after
 //! `up`.
 //!

@@ -6,8 +6,7 @@ use super::tools::{list_objects, rclone};
 use crate::util::log;
 
 /// Delete the oldest per-backend dumps beyond keep-N. Listing failure
-/// skips pruning entirely — never delete blind. Name order == time order
-/// (fixed-width sortable names).
+/// skips pruning entirely — never delete blind.
 pub(super) fn prune(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) {
     let prefix = cfg.prefix();
     let pattern = format!("{prefix}/{}-*", cfg.db.label());

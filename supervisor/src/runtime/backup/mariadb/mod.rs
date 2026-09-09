@@ -1,7 +1,4 @@
-//! MariaDB/MySQL backend for the DB backup: dump ([`dump`],
-//! `mariadb-dump`) and restore ([`restore`], emptiness gate + import).
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
+//! MariaDB/MySQL backend for the DB backup.
 
 mod dump;
 mod restore;

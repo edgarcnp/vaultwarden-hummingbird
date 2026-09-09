@@ -30,8 +30,8 @@ pub(crate) fn tool(
 }
 
 /// Names of the objects under `pattern` (`rclone lsf`), sorted so name
-/// order == creation order (fixed-width sortable timestamps). None =
-/// listing failed — callers must never delete blind.
+/// order == creation order. None = listing failed — callers must never
+/// delete blind.
 pub(crate) fn list_objects(
     cfg: &DbBackupConfig,
     pattern: &str,

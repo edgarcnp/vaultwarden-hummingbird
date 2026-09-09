@@ -3,8 +3,6 @@
 //! decoding ([`reap`]), bounded child runs ([`run`]), stop-signal wiring
 //! ([`signals`]), and the vault watch loop / container teardown
 //! ([`watch`]).
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
 
 mod child;
 mod reap;

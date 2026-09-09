@@ -70,7 +70,6 @@ mod tests {
         assert_eq!(&b[1..3], &["r2:vw-state", "/data"]);
     }
 
-    /// run() with a bogus binary must fail cleanly (bounded, non-fatal).
     #[test]
     fn sync_failure_is_bounded_and_reported() {
         let cfg = SyncConfig::new(

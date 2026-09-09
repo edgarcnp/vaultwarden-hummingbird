@@ -56,7 +56,6 @@ mod tests {
     fn tick_fails_cleanly_on_missing_source() {
         let cfg = support::cfg("sqlite:///nonexistent/db.sqlite3");
         tick(&cfg, || false);
-        // staging dir exists (created by sweep) but is empty again
         let entries: Vec<_> = std::fs::read_dir(&cfg.staging)
             .expect("staging dir created")
             .collect();

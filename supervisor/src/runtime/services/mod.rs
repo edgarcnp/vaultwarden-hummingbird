@@ -1,7 +1,5 @@
 //! The supervised payload children: tailscaled + the tailscale CLI
 //! ([`tailscale`]) and the vaultwarden server ([`vaultwarden`]).
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
 
 mod tailscale;
 mod vaultwarden;

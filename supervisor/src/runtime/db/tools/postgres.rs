@@ -83,8 +83,6 @@ mod tests {
         );
     }
 
-    /// Only the postgres spec carries libpq vars; the dispatch is
-    /// reachable only with matching backend specs.
     #[test]
     fn non_postgres_spec_yields_no_env() {
         let db = DbSpec::Sqlite {

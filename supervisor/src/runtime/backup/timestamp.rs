@@ -11,8 +11,6 @@ pub(super) fn timestamp() -> String {
 mod tests {
     use super::*;
 
-    /// The format is load-bearing: object names must sort by creation
-    /// time, and the value must round-trip through the same format.
     #[test]
     fn timestamp_is_sortable_utc() {
         let ts = timestamp();

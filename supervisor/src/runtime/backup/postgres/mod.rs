@@ -1,7 +1,4 @@
-//! Postgres backend for the DB backup: dump ([`dump`], `pg_dump`) and
-//! restore ([`restore`], emptiness gate + `pg_restore` import).
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
+//! Postgres backend for the DB backup.
 
 mod dump;
 mod restore;

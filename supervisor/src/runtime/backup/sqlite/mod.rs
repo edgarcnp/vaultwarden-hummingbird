@@ -1,8 +1,5 @@
-//! SQLite backend for the DB backup: dump ([`dump`], `VACUUM INTO`) and
-//! restore ([`restore`], emptiness gate + integrity-checked rename). All
-//! in-process via bundled rusqlite — no external tool.
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
+//! SQLite backend for the DB backup: `VACUUM INTO` dump and
+//! integrity-checked rename import, in-process via bundled rusqlite.
 
 mod dump;
 mod restore;

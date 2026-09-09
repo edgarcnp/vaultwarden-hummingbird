@@ -1,7 +1,5 @@
-//! The boot-time restore path (backend-agnostic orchestration): verify
-//! emptiness (fail closed), pull the newest backup, dispatch to the
-//! per-backend import. The emptiness gate lives in `check.rs`; per-backend
-//! imports in the `pg_restore`/`mariadb_restore`/`sqlite_restore` modules.
+//! The boot-time restore path: verify emptiness (fail closed), pull the
+//! newest backup, dispatch to the per-backend import.
 
 use crate::config::{DbBackupConfig, DbSpec};
 use crate::util::log;
@@ -75,8 +73,6 @@ mod tests {
     use super::super::support;
     use super::*;
 
-    /// restore_if_empty with restore disabled is a no-op (no network, no
-    /// staging, no logs of consequence).
     #[test]
     fn restore_noop_when_disabled() {
         restore_if_empty(&support::cfg("sqlite:///nonexistent/db.sqlite3"), || false);
