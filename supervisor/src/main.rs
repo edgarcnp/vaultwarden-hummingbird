@@ -70,10 +70,10 @@ fn main() {
 
     if !net::wait_daemon(&cfg.socket, config::DAEMON_WAIT, stopping) {
         if take_stop() {
-            shutdown(Some(tsd), 0, None);
+            shutdown(Some(tsd), None, 0, None);
         }
         log::err("tailscaled socket never appeared; refusing to run the vault without Tailscale");
-        shutdown(Some(tsd), 1, None)
+        shutdown(Some(tsd), None, 1, None)
     }
 
     log::info("authenticating tailscale node...");
@@ -91,7 +91,7 @@ fn main() {
         if cfg.serve {
             let Some(vault_port) = &cfg.vault_port else {
                 log::err("no room for the internal vault port; refusing to start");
-                shutdown(Some(tsd), 1, None)
+                shutdown(Some(tsd), None, 1, None)
             };
             if !tailscale_serve(
                 vault_port,
@@ -104,7 +104,7 @@ fn main() {
                 // vault nobody can reach (typically MagicDNS/HTTPS certs
                 // disabled). Same fail-closed contract as `up` above: exit
                 // and let the orchestrator retry.
-                shutdown(Some(tsd), 1, None)
+                shutdown(Some(tsd), None, 1, None)
             }
             let msg = match &cfg.service {
                 Some(svc) => format!(
@@ -116,12 +116,12 @@ fn main() {
         }
     } else {
         if take_stop() {
-            shutdown(Some(tsd), 0, None);
+            shutdown(Some(tsd), None, 0, None);
         }
         log::err(
             "tailscale up failed or timed out - check TAILSCALE_AUTHKEY; refusing to run the vault without Tailscale",
         );
-        shutdown(Some(tsd), 1, None)
+        shutdown(Some(tsd), None, 1, None)
     }
 
     start_vw(&cfg, tsd)

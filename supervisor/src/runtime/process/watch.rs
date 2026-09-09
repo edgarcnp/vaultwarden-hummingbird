@@ -54,7 +54,7 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
     // fail closed on a missing internal port: co-binding would expose the vault
     let Some(vault_port) = &cfg.vault_port else {
         log::err("no room for the internal vault port above the exposed port; refusing to start");
-        shutdown(Some(tsd), 1, None)
+        shutdown(Some(tsd), None, 1, None)
     };
     let gate = match gate_bind(&cfg.port) {
         Ok(g) => g,
@@ -63,7 +63,7 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
                 "gatekeeper bind failed on 0.0.0.0:{}: {e}",
                 log::sanitize(&cfg.port)
             ));
-            shutdown(Some(tsd), 1, None)
+            shutdown(Some(tsd), None, 1, None)
         }
     };
     gate_describe(&cfg.port, vault_port);
@@ -72,7 +72,7 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
         .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
     else {
         log::err("internal vault port is not a valid port; refusing to start");
-        shutdown(Some(tsd), 1, None)
+        shutdown(Some(tsd), None, 1, None)
     };
     drop(std::thread::spawn(move || {
         gate_serve(gate, Some(vault_addr))
@@ -80,7 +80,7 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
 
     log::info("starting vaultwarden");
     let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
-        shutdown(Some(tsd), 1, None)
+        shutdown(Some(tsd), None, 1, None)
     };
     if let Some(backup) = cfg.backup.clone().filter(|b| b.periodic) {
         spawn_backup_thread(backup);
@@ -135,20 +135,29 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
         std::thread::sleep(POLL);
     };
 
-    shutdown(Some(tsd), code, cfg.sync.as_ref())
+    shutdown(Some(tsd), Some(vw), code, cfg.sync.as_ref())
 }
 
 /// Bring every child down and exit the container: TERM each child group,
 /// escalate to KILL after `TERM_GRACE`, drain strays, make a final
-/// best-effort state push, then exit with `code`. Safe for children that
-/// are already dead (group kill + reap are no-ops).
-pub fn shutdown(tsd: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
+/// best-effort state push, then exit with `code`. Both long-running
+/// children are explicitly reaped before the final push: the "children
+/// are gone" invariant covers tailscaled AND vaultwarden on every path,
+/// including a mid-run tailscaled death where only vaultwarden was
+/// signaled by the watch loop. Safe for children that are already dead
+/// (group kill + reap are no-ops).
+pub fn shutdown(tsd: Option<Pid>, vw: Option<Pid>, code: i32, sync: Option<&SyncConfig>) -> ! {
     log::info("shutting down");
     if let Some(t) = tsd {
         signal_group(t, Signal::SIGTERM);
         if matches!(reap_until_gone(t, TERM_GRACE), Gone::Stuck) {
             log::err(&format!("tailscaled (pid {t}) did not exit cleanly"));
         }
+    }
+    if let Some(v) = vw
+        && matches!(reap_until_gone(v, TERM_GRACE), Gone::Stuck)
+    {
+        log::err(&format!("vaultwarden (pid {v}) did not exit cleanly"));
     }
     while reap_any().is_some() {}
     // final push AFTER children are gone; must not abort on the stop flag
