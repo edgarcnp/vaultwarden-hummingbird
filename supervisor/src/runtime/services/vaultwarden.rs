@@ -34,16 +34,22 @@ pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Opti
 }
 
 /// Map a container-env key for the child: supervisor-owned keys are
-/// dropped, `VAULTWARDEN_*` keys are forwarded under the stripped plain
-/// upstream name, everything else verbatim. Non-UTF-8 keys are dropped: a
-/// key the supervisor can't read must never reach the child (a mangled
-/// `TAILSCALE_*` secret would otherwise leak into its env).
+/// dropped (including after `VAULTWARDEN_` stripping — a mangled
+/// `VAULTWARDEN_TAILSCALE_*` key must not land in the child as
+/// `TAILSCALE_*`), `VAULTWARDEN_*` keys are forwarded under the stripped
+/// plain upstream name, everything else verbatim. Non-UTF-8 keys are
+/// dropped: a key the supervisor can't read must never reach the child (a
+/// mangled `TAILSCALE_*` secret would otherwise leak into its env).
 fn child_key(key: &OsStr) -> Option<String> {
     let k = key.to_str()?;
     if is_supervisor_key(k) {
         return None;
     }
-    Some(vaultwarden_key(k).map_or_else(|| k.to_string(), str::to_string))
+    let mapped = vaultwarden_key(k).map_or_else(|| k.to_string(), str::to_string);
+    if is_supervisor_key(&mapped) {
+        return None;
+    }
+    Some(mapped)
 }
 
 #[cfg(test)]
@@ -74,6 +80,23 @@ mod tests {
         assert_eq!(
             child_key(OsStr::new("VAULTWARDEN_")).as_deref(),
             Some("VAULTWARDEN_")
+        );
+    }
+
+    /// A `VAULTWARDEN_`-prefixed key whose stripped name lands in the
+    /// supervisor namespace must be dropped, not forwarded: the child
+    /// receives no `TAILSCALE_*`/`SUPERVISOR_*` keys from any input.
+    #[test]
+    fn vaultwarden_prefixed_supervisor_names_are_dropped() {
+        assert_eq!(child_key(OsStr::new("VAULTWARDEN_TAILSCALE_AUTHKEY")), None);
+        assert_eq!(
+            child_key(OsStr::new("VAULTWARDEN_SUPERVISOR_S3_REMOTE")),
+            None
+        );
+        // stripped-to-empty and non-namespace remainders still pass through
+        assert_eq!(
+            child_key(OsStr::new("VAULTWARDEN_TAILSCALES")).as_deref(),
+            Some("TAILSCALES")
         );
     }
 }
