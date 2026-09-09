@@ -23,6 +23,9 @@ const KILL_GRACE: Duration = Duration::from_secs(5);
 /// harness's children. A reaped pid registered by a concurrent bounded run
 /// ([`super::run`]) has its status preserved in the stolen-exit registry —
 /// the run would otherwise see only `ECHILD` and lose the verdict.
+/// Expected `waitpid` outcomes (no reaper match, interrupted) map to
+/// `None`; an unexpected error is logged once per occurrence instead of
+/// being silently swallowed.
 pub fn reap_any() -> Option<(Pid, WaitStatus)> {
     match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
         Ok(status) => {
@@ -31,7 +34,12 @@ pub fn reap_any() -> Option<(Pid, WaitStatus)> {
             }
             status.pid().map(|p| (p.as_raw(), status))
         }
-        Err(_) => None,
+        Err(Errno::ECHILD) => None,
+        Err(Errno::EINTR) => None,
+        Err(e) => {
+            log::err(&format!("reaper: unexpected waitpid failure: {e}"));
+            None
+        }
     }
 }
 
