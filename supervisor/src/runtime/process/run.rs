@@ -262,10 +262,10 @@ pub fn run_bounded_capture(
     if !success {
         return None;
     }
-    let mut out = String::new();
+    let mut out = Vec::new();
     cap.file.seek(SeekFrom::Start(0)).ok()?;
-    cap.file.read_to_string(&mut out).ok()?;
-    Some(out)
+    cap.file.read_to_end(&mut out).ok()?;
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 #[cfg(test)]

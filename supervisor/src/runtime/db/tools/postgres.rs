@@ -101,4 +101,27 @@ mod tests {
         };
         assert!(pg_env(&db).is_empty());
     }
+
+    /// A staged trust root is forwarded so strict sslmodes can verify;
+    /// empty/absent values are not (libpq would fail on an empty path).
+    #[test]
+    fn pg_env_forwards_the_trust_root_when_set() {
+        let db = DbSpec::Postgres {
+            host: Some("h".into()),
+            port: 5432,
+            user: None,
+            password: None,
+            db: None,
+            sslmode: Some("verify-full".into()),
+        };
+        let env = pg_env_with(&db, Some("/etc/ca.pem".into()));
+        assert!(env.contains(&("PGSSLROOTCERT".to_string(), "/etc/ca.pem".to_string())));
+        // empty string: not forwarded (libpq treats it as unset anyway,
+        // and a blank value must never shadow a URL-embedded path)
+        let env = pg_env_with(&db, Some("  ".into()));
+        assert!(!env.iter().any(|(k, _)| k == "PGSSLROOTCERT"));
+        // absent: not forwarded
+        let env = pg_env_with(&db, None);
+        assert!(!env.iter().any(|(k, _)| k == "PGSSLROOTCERT"));
+    }
 }
