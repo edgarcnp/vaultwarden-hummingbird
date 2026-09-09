@@ -11,14 +11,16 @@ use crate::util::log;
 use crate::runtime::db::tools::{defaults_file, mysql_env};
 
 /// Table count in the vault's mysql database, via the mariadb client with
-/// captured stdout. Any failure is Err (ambiguous).
+/// captured stdout. Any failure is Err (ambiguous). The count runs with
+/// `--database` selected: without it `DATABASE()` is NULL and the query
+/// returns 0 for ANY database — a fail-open emptiness gate.
 pub(crate) fn table_count(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Result<u64, String> {
     let DbSpec::Mysql {
         host,
         port,
         user,
         password,
-        ..
+        db,
     } = &cfg.db
     else {
         return Err("not a mysql URL".to_string());
@@ -27,12 +29,17 @@ pub(crate) fn table_count(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Re
     else {
         return Err("cannot stage defaults file".to_string());
     };
-    let args = [
-        &format!("--defaults-extra-file={cnf}"),
-        "--skip-column-names",
-        "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()",
+    let mut args: Vec<String> = vec![
+        format!("--defaults-extra-file={cnf}"),
+        "--skip-column-names".into(),
+        "--execute=SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()"
+            .into(),
     ];
-    let out = run_bounded_capture(BACKUP_TIMEOUT, MARIADB, &args, &mysql_env(), abort);
+    if let Some(db) = db {
+        args.push(format!("--database={db}"));
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_bounded_capture(BACKUP_TIMEOUT, MARIADB, &argv, &mysql_env(), abort);
     let _ = std::fs::remove_file(&cnf);
     let Some(out) = out else {
         return Err("mariadb empty-check failed or timed out".to_string());
