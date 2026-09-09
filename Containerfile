@@ -4,15 +4,23 @@
 # (verified on podman 5.8.4).
 
 # UPSTREAM PINS — Renovate-managed: its regexes match these exact ARG lines,
-# never reformat them. Renovate has no manager for VW_SHA256, so update it
-# by hand alongside VW_VERSION.
+# never reformat them. Renovate has no manager for the SHA256 ARGs, so update
+# each by hand alongside its version.
 
 ARG VW_VERSION=1.37.2
 # sha256 of the source tarball; bump with VW_VERSION.
 ARG VW_SHA256=d607cc00066f7ea62b27a3c198e0259955fd5591adabccb8d3414d1f3d91ecd7
 ARG WEB_VAULT_VERSION=v2026.7.0
+# sha256 of the web-vault tarball; bump with WEB_VAULT_VERSION.
+ARG WEB_VAULT_SHA256=002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c300570
 ARG TAILSCALE_VERSION=1.102.3
+# sha256 of the per-arch tarballs; bump with TAILSCALE_VERSION.
+ARG TAILSCALE_SHA256_AMD64=36ddd9b51be57ffc2990cf76323cfa13643bfbb1b8a969f6183fa164741cdef5
+ARG TAILSCALE_SHA256_ARM64=a0fa1b154af8c61f862a2259f559f7396d96c0225f4a863eae2333e1546bbe25
 ARG RCLONE_VERSION=1.75.1
+# sha256 of the per-arch zips; bump with RCLONE_VERSION.
+ARG RCLONE_SHA256_AMD64=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
+ARG RCLONE_SHA256_ARM64=03f2504174034b6d004152ed7369251c9a9ec1f7e0836eda420f5c7a5ec0dff9
 
 # Base images float on purpose: rebuilds pick up upstream CVE patches. The
 # runtime uses the -openssl variant (ships libssl/libcrypto, so the runtime
@@ -35,9 +43,9 @@ ARG MARIADB_CLIENT_IMAGE=registry.access.redhat.com/hi/mariadb:latest
 ARG VAULTWARDEN_WEB_VAULT=true
 ARG DB=postgresql,sqlite,mysql
 
-# STAGE 1 — FETCH: download + verify the release tarballs. Tailscale/
-# rclone/web vault are checksum-verified at build against official files
-# (same origin), not pinned.
+# STAGE 1 — FETCH: download + verify the release tarballs against pinned
+# sha256 digests (same-origin checksum files are NOT trusted; a compromised
+# release origin can no longer swap artifact + checksum together).
 
 FROM ${BUILDER_IMAGE} AS fetch
 # TARGETARCH is BuildKit-predefined; uname fallback for non-BuildKit builders
@@ -45,43 +53,42 @@ ARG TARGETARCH
 ARG VW_VERSION
 ARG VW_SHA256
 ARG WEB_VAULT_VERSION
+ARG WEB_VAULT_SHA256
 ARG VAULTWARDEN_WEB_VAULT
 ARG TAILSCALE_VERSION
+ARG TAILSCALE_SHA256_AMD64
+ARG TAILSCALE_SHA256_ARM64
 ARG RCLONE_VERSION
+ARG RCLONE_SHA256_AMD64
+ARG RCLONE_SHA256_ARM64
 RUN dnf -y install tar gzip unzip && dnf clean all
 WORKDIR /fetch
 RUN mkdir -p /out /out/web-vault /data
 RUN ARCH="${TARGETARCH:-$(uname -m)}" \
  && case "${ARCH}" in \
-        amd64|x86_64) TAILSCALE_ARCH=amd64; RC_ARCH=linux-amd64 ;; \
-        arm64|aarch64) TAILSCALE_ARCH=arm64; RC_ARCH=linux-arm64 ;; \
+        amd64|x86_64) TAILSCALE_ARCH=amd64; RC_ARCH=linux-amd64; TS_SHA="${TAILSCALE_SHA256_AMD64}"; RC_SHA="${RCLONE_SHA256_AMD64}" ;; \
+        arm64|aarch64) TAILSCALE_ARCH=arm64; RC_ARCH=linux-arm64; TS_SHA="${TAILSCALE_SHA256_ARM64}"; RC_SHA="${RCLONE_SHA256_ARM64}" ;; \
         *) echo "unsupported arch: ${ARCH}" && exit 1 ;; \
     esac \
  && curl -fsSL -o vw.tar.gz \
         "https://github.com/dani-garcia/vaultwarden/archive/refs/tags/${VW_VERSION}.tar.gz" \
  && echo "${VW_SHA256}  vw.tar.gz" | sha256sum -c - \
- && curl -fsSL -o SHA256SUMS \
-        "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/SHA256SUMS" \
  && curl -fsSL -o "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
         "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
- && grep "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip$" SHA256SUMS | sha256sum -c - \
+ && echo "${RC_SHA}  rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" | sha256sum -c - \
  && if [ "${VAULTWARDEN_WEB_VAULT}" = "true" ]; then \
         curl -fsSL -o "bw_web_${WEB_VAULT_VERSION}.tar.gz" \
             "https://github.com/dani-garcia/bw_web_builds/releases/download/${WEB_VAULT_VERSION}/bw_web_${WEB_VAULT_VERSION}.tar.gz" \
-     && curl -fsSL -o wv.sums \
-            "https://github.com/dani-garcia/bw_web_builds/releases/download/${WEB_VAULT_VERSION}/sha256sums.txt" \
-     && grep "bw_web_${WEB_VAULT_VERSION}.tar.gz$" wv.sums | sha256sum -c - \
+     && echo "${WEB_VAULT_SHA256}  bw_web_${WEB_VAULT_VERSION}.tar.gz" | sha256sum -c - \
      && tar -xzf "bw_web_${WEB_VAULT_VERSION}.tar.gz" -C /out/web-vault --strip-components=1 \
      && test -f /out/web-vault/index.html ; \
     fi \
  && curl -fsSL -o ts.tgz \
         "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TAILSCALE_ARCH}.tgz" \
- && curl -fsSL -o ts.tgz.sha256 \
-        "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TAILSCALE_ARCH}.tgz.sha256" \
- && echo "$(cat ts.tgz.sha256)  ts.tgz" | sha256sum -c - \
+ && echo "${TS_SHA}  ts.tgz" | sha256sum -c - \
  && tar -xzf ts.tgz -C /out --strip-components=1 \
  && unzip -j "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" "*/rclone" -d /out \
- && rm "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" SHA256SUMS \
+ && rm "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
  && test -x /out/tailscale && test -x /out/tailscaled && test -x /out/rclone
 
 # STAGE 2 — SUPERVISOR: Rust PID 1 (glibc lockstep with the runtime)
