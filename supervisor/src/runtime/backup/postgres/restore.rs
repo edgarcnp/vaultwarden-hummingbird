@@ -30,6 +30,10 @@ pub(crate) fn is_empty(url: &str) -> Result<bool, String> {
 /// until the staged dump has been validated. `--dbname` is required:
 /// without it pg_restore writes the SQL script to stdout and exits 0 —
 /// a silent no-op restore. A URL without a database name fails closed.
+/// `--single-transaction` makes the import atomic: a failing statement
+/// rolls the whole restore back, so the (verified-empty) database stays
+/// empty and the next boot can retry cleanly instead of finding a
+/// half-restored state.
 pub(crate) fn import(cfg: &DbBackupConfig, staged: &str, abort: &impl Fn() -> bool) -> bool {
     let DbSpec::Postgres { db: Some(db), .. } = &cfg.db else {
         log::err("db restore: VAULTWARDEN_DATABASE_URL has no database name");
@@ -40,6 +44,40 @@ pub(crate) fn import(cfg: &DbBackupConfig, staged: &str, abort: &impl Fn() -> bo
     if !tool("pg_restore --list", PG_RESTORE, &check, &env, staged, abort) {
         return false;
     }
-    let args = ["--dbname", db, "--no-owner", "--no-privileges", staged];
-    tool("pg_restore", PG_RESTORE, &args, &env, staged, abort)
+    let args = restore_args(db, staged);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    tool("pg_restore", PG_RESTORE, &argv, &env, staged, abort)
+}
+
+/// pg_restore import arguments (pure, unit-tested).
+fn restore_args(db: &str, staged: &str) -> Vec<String> {
+    vec![
+        "--single-transaction".to_string(),
+        "--dbname".to_string(),
+        db.to_string(),
+        "--no-owner".to_string(),
+        "--no-privileges".to_string(),
+        staged.to_string(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_args_are_single_transaction() {
+        let args = restore_args("vault", "/data/db-backups/restore-postgres");
+        assert_eq!(
+            args,
+            vec![
+                "--single-transaction".to_string(),
+                "--dbname".to_string(),
+                "vault".to_string(),
+                "--no-owner".to_string(),
+                "--no-privileges".to_string(),
+                "/data/db-backups/restore-postgres".to_string(),
+            ]
+        );
+    }
 }

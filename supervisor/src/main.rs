@@ -50,9 +50,12 @@ fn main() {
     };
 
     // DB restore first: only an empty DB is touched, and vaultwarden must
-    // not start on top of a half-done import.
-    if let Some(backup) = &cfg.backup {
-        restore_if_empty(backup, stopping);
+    // not start on top of a half-done import — a failed restore refuses
+    // to boot (exit 1) so the orchestrator retries with the DB still empty.
+    if let Some(backup) = &cfg.backup
+        && !restore_if_empty(backup, stopping)
+    {
+        std::process::exit(1);
     }
 
     if let Some(sync) = &cfg.sync {
