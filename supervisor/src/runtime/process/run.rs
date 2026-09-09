@@ -19,6 +19,68 @@ use super::child::POLL;
 use super::stolen;
 use crate::util::log;
 
+/// Env keys external children may inherit: secret-free plumbing only.
+/// Everything else (auth keys, S3 credentials, database URLs, SMTP/admin
+/// secrets) stays inside the supervisor — a helper binary that is
+/// compromised or merely chatty must not become a secrets broadcast.
+/// The set is deliberately tiny:
+/// - `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`: egress-controlled deployments
+///   route rclone and Tailscale traffic through a proxy;
+/// - `SSL_CERT_FILE`/`SSL_CERT_DIR`: Go (rclone, tailscaled) and libpq
+///   trust custom roots this way;
+/// - `TZ`: cosmetic timestamps in child logs.
+const BASELINE_ENV: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "TZ",
+];
+
+/// The allow-listed subset of `vars` that children may inherit (pure, so
+/// the policy is unit-testable). Non-UTF-8 keys are dropped, like the
+/// vaultwarden child env: a mangled key must not reach a child.
+pub(crate) fn allowlisted(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    vars.filter(|(k, _)| BASELINE_ENV.contains(&k.as_str()))
+        .collect()
+}
+
+/// Clear the child's environment and set only the allow-listed subset of
+/// `source` plus the explicit `extra_env` (connection config rides there —
+/// e.g. pg_env, RCLONE_CONFIG_*). Never place secrets here.
+fn apply_env_from(
+    cmd: &mut Command,
+    extra_env: &[(String, String)],
+    source: impl Iterator<Item = (String, String)>,
+) {
+    cmd.env_clear();
+    for (k, v) in allowlisted(source) {
+        cmd.env(k, v);
+    }
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+}
+
+/// [`apply_env_from`] over the supervisor's own environment. Shared by the
+/// bounded runs and the long-running tailscaled spawn.
+pub fn apply_env(cmd: &mut Command, extra_env: &[(String, String)]) {
+    apply_env_from(
+        cmd,
+        extra_env,
+        std::env::vars_os().filter_map(|(k, v)| {
+            let k = k.to_str()?;
+            Some((k.to_string(), v.to_string_lossy().into_owned()))
+        }),
+    );
+}
+
 /// Cap on stdout captured by [`run_bounded_capture`]: a listing far beyond
 /// any real bucket is treated as a failed run. Only listings flow through
 /// this path (object names), so megabytes are already extraordinary.
@@ -74,7 +136,8 @@ pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn(
 
 /// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
 /// The child runs as its own process-group leader, so the expiry/abort kill
-/// reaches anything it spawned, not just the direct child.
+/// reaches anything it spawned, not just the direct child. Its environment
+/// is allow-listed ([`apply_env`]) — the supervisor's env never leaks.
 pub fn run_bounded_env(
     timeout: Duration,
     prog: &str,
@@ -84,9 +147,7 @@ pub fn run_bounded_env(
 ) -> bool {
     let mut cmd = Command::new(prog);
     cmd.args(args).process_group(0);
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
+    apply_env(&mut cmd, extra_env);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -151,9 +212,7 @@ pub fn run_bounded_capture(
     cmd.args(args)
         .process_group(0)
         .stdout(Stdio::from(cap.file.try_clone().ok()?));
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
+    apply_env(&mut cmd, extra_env);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -326,5 +385,81 @@ mod tests {
             || false,
         );
         assert!(out.is_none(), "oversized output must fail the run");
+    }
+
+    /// The allow-list policy: baseline plumbing keys pass, secrets and
+    /// everything else do not, and the child env is exactly
+    /// baseline + extra_env (apply_env_from clears the rest).
+    #[test]
+    fn env_allowlist_passes_plumbing_and_blocks_secrets() {
+        let vars = [
+            ("TAILSCALE_AUTHKEY".to_string(), "leak-me".to_string()),
+            (
+                "SUPERVISOR_S3_SECRET_ACCESS_KEY".to_string(),
+                "x".to_string(),
+            ),
+            (
+                "VAULTWARDEN_DATABASE_URL".to_string(),
+                "postgres://x".to_string(),
+            ),
+            ("SMTP_PASSWORD".to_string(), "x".to_string()),
+            ("HTTPS_PROXY".to_string(), "http://proxy:3128".to_string()),
+            ("NO_PROXY".to_string(), "localhost".to_string()),
+            ("TZ".to_string(), "UTC".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("HOME".to_string(), "/root".to_string()),
+        ];
+        let mut cmd = Command::new("unused");
+        apply_env_from(
+            &mut cmd,
+            &[("MARKER".to_string(), "yes".to_string())],
+            vars.into_iter(),
+        );
+        let envs: std::collections::BTreeMap<String, String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.expect("set, not removed").to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs,
+            std::collections::BTreeMap::from([
+                ("HTTPS_PROXY".to_string(), "http://proxy:3128".to_string()),
+                ("NO_PROXY".to_string(), "localhost".to_string()),
+                ("TZ".to_string(), "UTC".to_string()),
+                ("MARKER".to_string(), "yes".to_string()),
+            ])
+        );
+    }
+
+    /// Behavioral: a child run's environment is exactly baseline plumbing
+    /// plus extras — no supervisor vars (test env included) leak through,
+    /// and extras land. Needs no env mutation: the clear-then-allowlist
+    /// policy makes CARGO_/PATH absence hold in any environment.
+    #[test]
+    fn bounded_run_env_is_baseline_plus_extras() {
+        let env = run_bounded_capture(
+            Duration::from_secs(10),
+            "/bin/sh",
+            &["-c", "env"],
+            &[("MARKER_VAR".to_string(), "yes".to_string())],
+            || false,
+        )
+        .unwrap_or_default();
+        assert!(
+            env.contains("MARKER_VAR=yes"),
+            "extras must reach the child"
+        );
+        assert!(
+            !env.contains("CARGO_"),
+            "supervisor env leaked into a bounded child"
+        );
+        assert!(
+            !env.lines().any(|l| l.starts_with("PATH=")),
+            "only the allow-list may pass, and PATH is not on it"
+        );
     }
 }

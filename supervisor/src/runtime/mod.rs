@@ -20,9 +20,9 @@ pub use gate::{
     serve as gate_serve,
 };
 pub use process::{
-    Gone, POLL, Pid, TERM_GRACE, alive, exit_code, exit_reason, install_signal_handlers, reap_any,
-    reap_until_gone, run_bounded, run_bounded_capture, run_bounded_env, shutdown, signal_group,
-    spawn, start_vw, stopping, take_stop,
+    Gone, POLL, Pid, TERM_GRACE, alive, apply_env, exit_code, exit_reason, install_signal_handlers,
+    reap_any, reap_until_gone, run_bounded, run_bounded_capture, run_bounded_env, shutdown,
+    signal_group, spawn, start_vw, stopping, take_stop,
 };
 pub use services::{run_vaultwarden, spawn_tailscaled, tailscale_serve, tailscale_up};
 pub use sync::{restore_state, sync_state};

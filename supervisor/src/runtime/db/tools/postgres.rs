@@ -10,7 +10,15 @@ use crate::config::{DB_TOOL_LIB, DbSpec};
 /// `PGSSLMINPROTOCOLVERSION=TLSv1.3` (libpq `ssl_min_protocol_version`,
 /// whose default is TLSv1.2) pins every libpq connection to TLS 1.3; it is
 /// ignored when no TLS is attempted (sslmode=disable, unix socket).
+/// `PGSSLROOTCERT` is forwarded from the supervisor env when set: bounded
+/// children do not inherit the environment, but strict sslmodes (verify-ca/
+/// verify-full) fail closed in libpq without a trust root.
 pub fn pg_env(db: &DbSpec) -> Vec<(String, String)> {
+    pg_env_with(db, std::env::var("PGSSLROOTCERT").ok())
+}
+
+/// [`pg_env`] with an explicit root-cert path (tests).
+fn pg_env_with(db: &DbSpec, ssl_root_cert: Option<String>) -> Vec<(String, String)> {
     let DbSpec::Postgres {
         host,
         port,
@@ -41,6 +49,9 @@ pub fn pg_env(db: &DbSpec) -> Vec<(String, String)> {
     }
     if let Some(s) = sslmode {
         env.push(("PGSSLMODE".to_string(), s.clone()));
+    }
+    if let Some(root) = ssl_root_cert.filter(|r| !r.trim().is_empty()) {
+        env.push(("PGSSLROOTCERT".to_string(), root));
     }
     env
 }

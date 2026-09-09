@@ -6,12 +6,13 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config::{TAILSCALE, TAILSCALED};
-use crate::runtime::{Pid, run_bounded, spawn};
+use crate::runtime::{Pid, apply_env, run_bounded, spawn};
 use crate::util::log;
 
 /// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
 /// /dev/net/tun). `--statedir` (derived from the state file's dir, on the
 /// persistent volume) is required for `tailscale serve` HTTPS cert caching.
+/// Environment is allow-listed ([`apply_env`]) — no supervisor secrets.
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pid> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
@@ -24,6 +25,7 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pi
     if userspace {
         cmd.arg("--tun=userspace-networking");
     }
+    apply_env(&mut cmd, &[]);
     spawn(&mut cmd)
 }
 
