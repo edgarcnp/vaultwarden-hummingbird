@@ -3,7 +3,8 @@
 //! Secrets ride a 0600 file — never argv, and the mariadb tools have no
 //! password env var. TLS 1.3 only.
 
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::config::DB_TOOL_LIB;
 
@@ -24,7 +25,14 @@ pub fn defaults_file(
     host: Option<&str>,
     port: u16,
 ) -> Option<String> {
-    let path = format!("/tmp/.my-{}", std::process::id());
+    /// Sequence number keeps the staged path collision-proof across the
+    /// sequential invocations of one process (count, dump, import).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = format!(
+        "/tmp/.my-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let mut content = String::from("[client]\ntls-version=TLSv1.3\n");
     if let Some(u) = user {
         content.push_str(&format!("user={u}\n"));
@@ -40,8 +48,24 @@ pub fn defaults_file(
         content.push_str(&format!("host={h}\n"));
     }
     content.push_str(&format!("port={port}\n"));
-    std::fs::write(&path, content).ok()?;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    // create_new + 0600 in one step: the password never sits at wider
+    // perms, a pre-existing file/symlink is never followed (same contract
+    // as the tailscale authkey staging), and a partial write removes the
+    // file we created.
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    if file.write_all(content.as_bytes()).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
     Some(path)
 }
 
