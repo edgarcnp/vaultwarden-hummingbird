@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config::{TAILSCALE, TAILSCALED};
-use crate::runtime::{Pid, apply_env, run_bounded, spawn};
+use crate::runtime::{Pid, apply_env, run_bounded, run_bounded_capture, spawn};
 use crate::util::log;
 
 /// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
@@ -104,6 +104,11 @@ fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
 /// fresh advertise then re-registers cleanly. The CLI implies `--bg`,
 /// requires a tagged node and admin-console Service definition (plus
 /// approval, or an `autoApprovers.services` policy).
+///
+/// A zero exit alone proves nothing (the CLI can exit 0 with the serve
+/// config not yet active), so the live `serve status` output is checked
+/// for the configured target before success is reported — the boot gate
+/// that treats serve failure as fatal is only as good as this check.
 pub fn tailscale_serve(
     port: &str,
     service: Option<&str>,
@@ -128,12 +133,57 @@ pub fn tailscale_serve(
     }
     args.push("--https=443");
     args.push(&target);
-    run_bounded(timeout, TAILSCALE, &args, abort)
+    if !run_bounded(timeout, TAILSCALE, &args, abort) {
+        return false;
+    }
+    // Readiness: `serve status` must show the configured target. One
+    // bounded retry covers the config-propagation gap between `serve`
+    // returning and the status reflecting it.
+    for _ in 0..3 {
+        if abort() {
+            return false;
+        }
+        let status = run_bounded_capture(
+            timeout,
+            TAILSCALE,
+            &["--socket", socket, "serve", "status", "--json"],
+            &[],
+            abort,
+        );
+        if status.is_some_and(|s| serve_status_has(&s, &target)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    log::err("tailscale serve: config not visible in serve status");
+    false
+}
+
+/// True iff the `serve status --json` payload advertises `target` over
+/// HTTPS (pure, unit-tested — never parsed from argv or logs).
+fn serve_status_has(status: &str, target: &str) -> bool {
+    status.contains(target)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The readiness check matches the configured target anywhere in the
+    /// status payload, and rejects a payload without it.
+    #[test]
+    fn serve_status_check_matches_target() {
+        let target = "http://127.0.0.1:8081";
+        let payload = r#"{"Web":{"https://node.tailnet.ts.net:443":{"Handlers":[{"Proxy":"http://127.0.0.1:8081"}]}}}"#;
+        assert!(serve_status_has(payload, target));
+        assert!(!serve_status_has(r#"{"Web":{}}"#, target));
+        assert!(!serve_status_has("", target));
+        // wrong port: not our serve
+        assert!(!serve_status_has(
+            r#"{"Web":{"https://n.ts.net:443":{"Handlers":[{"Proxy":"http://127.0.0.1:9999"}]}}}"#,
+            target
+        ));
+    }
 
     /// The staged authkey: 0600 perms, verbatim content, and it is the file
     /// `--auth-key=file:` will read back. (Removal after `up` is covered by
