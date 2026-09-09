@@ -116,12 +116,13 @@ pub(super) fn handle(mut stream: TcpStream, live: &Liveness) {
             Err(_) => return,
         }
     };
-    let alive = line
-        .split_whitespace()
-        .nth(1)
-        .map(target_path)
-        .and_then(|target| target.split('?').next())
-        .is_some_and(|path| path == "/alive");
+    let mut parts = line.split_whitespace();
+    let alive = parts.next() == Some("GET")
+        && parts
+            .next()
+            .map(target_path)
+            .and_then(|target| target.split('?').next())
+            .is_some_and(|path| path == "/alive");
     let (code, text) = if !alive {
         ("403", "Forbidden")
     } else if live.alive() {

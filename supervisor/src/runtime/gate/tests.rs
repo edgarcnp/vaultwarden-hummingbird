@@ -91,8 +91,6 @@ fn vault_response_never_leaks_through_the_gate() {
 fn alive_variants_answer_200() {
     for req in [
         &b"GET /alive?probe=1 HTTP/1.1\r\n\r\n"[..],
-        b"HEAD /alive HTTP/1.1\r\n\r\n",
-        b"POST /alive HTTP/1.1\r\n\r\n", // method-agnostic by design
         // absolute-form (RFC 7230 §5.3.2): proxied clients send this
         b"GET http://0.0.0.0:8080/alive HTTP/1.1\r\nHost: x\r\n\r\n",
         b"GET https://host.tailnet.ts.net/alive?probe=1 HTTP/1.1\r\n\r\n",
@@ -100,6 +98,26 @@ fn alive_variants_answer_200() {
         // fresh one-shot vault per request (the helper serves exactly one)
         let resp = roundtrip(req, Some(fake_vault("200 OK")));
         assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"), "{req:?} -> {resp}");
+    }
+}
+
+/// Only GET /alive is the liveness probe: other methods are refused
+/// without touching the vault (protocol strictness; a POST that mutated
+/// state must never read as "healthy").
+#[test]
+fn non_get_methods_answer_403() {
+    for req in [
+        &b"HEAD /alive HTTP/1.1\r\n\r\n"[..],
+        b"POST /alive HTTP/1.1\r\n\r\n",
+        b"DELETE /alive HTTP/1.1\r\n\r\n",
+        b"OPTIONS /alive HTTP/1.1\r\n\r\n",
+        b"get /alive HTTP/1.1\r\n\r\n",
+    ] {
+        let resp = roundtrip(req, None);
+        assert!(
+            resp.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "{req:?} -> {resp}"
+        );
     }
 }
 
