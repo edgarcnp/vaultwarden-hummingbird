@@ -1,6 +1,4 @@
-# CI for the supervisor crate. Test and build are separate jobs so a
-# compile failure and a test failure are visible independently in the
-# checks list.
+# CI for the supervisor crate: lint -> test -> build, gated in that order.
 name: CI
 
 on:
@@ -38,6 +36,7 @@ jobs:
 
   test:
     name: Test
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,6 +58,7 @@ jobs:
 
   build:
     name: Build
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
