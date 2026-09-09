@@ -90,6 +90,15 @@ A few things worth knowing:
 - Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and, at boot, the container will load the newest backup into the database — but only if it can prove the database is empty. If it can't tell, it does nothing rather than guess. It never overwrites existing data.
 - To restore by hand: use `pg_restore` for postgres, `mariadb` for MySQL (see the commands in `.env.example`), or replace `/data/db.sqlite3` for SQLite while the vault is stopped.
 
+### Hardening the bucket
+
+The container verifies that a downloaded backup is a parseable database dump, but it cannot prove who wrote it: anyone with write access to the bucket can place an object that looks like a valid backup. Treat the bucket as part of your trust boundary:
+
+- Use a **dedicated access key** for this container, scoped to only its bucket/prefix (list/read/write/delete — nothing else, no other buckets).
+- Keep **identity state and backups separate** if your provider allows it: `/data` sync and database backups share one remote here; distinct buckets or prefixes with separate keys limit the blast radius of a leaked key.
+- Turn on **object versioning** and, where available, object lock/retention, so deleted or overwritten backups stay recoverable.
+- **Encrypt at rest** (provider-side, usually the default) and consider client-side encryption if your threat model includes the storage provider.
+
 ## What's on by default
 
 - Sign-ups are off. Temporarily set `VAULTWARDEN_SIGNUPS_ALLOWED=true` to create your account, then set it back.
