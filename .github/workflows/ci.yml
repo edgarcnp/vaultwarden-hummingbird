@@ -77,3 +77,37 @@ jobs:
       # ubuntu-latest ships with a stable rustup toolchain preinstalled.
       - name: cargo build
         run: cargo build --locked
+
+  image:
+    name: Image
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The supervisor suite cannot see production-specific code paths:
+      # vaultwarden's source build, DB client extraction, library closures,
+      # the binary downloads, and the runtime image assembly. Build the
+      # real image (single arch is enough for routine PRs; the full
+      # multi-arch build stays in publish).
+      - name: Build the container image
+        run: |
+          podman build \
+            --format docker \
+            --platform linux/amd64 \
+            --tag pr-check:ci \
+            .
+
+      - name: Verify the healthcheck survived the build
+        run: |
+          test "$(podman inspect pr-check:ci \
+            --format '{{json .HealthCheck.Test}}')" != "null"
+
+      # Smoke: the supervisor must run inside the runtime image (dynamic
+      # linking and baked paths intact) and fail fast with no gate to
+      # probe — exit 1, not a crash.
+      - name: Smoke test the entrypoint
+        run: |
+          podman run --rm --network none --entrypoint /entrypoint pr-check:ci --healthcheck \
+            && exit 1 || test $? -eq 1
