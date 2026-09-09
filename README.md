@@ -1,90 +1,52 @@
 # vaultwarden-hummingbird
 
-Hardened container image: [Vaultwarden](https://github.com/dani-garcia/vaultwarden) + [Tailscale](https://tailscale.com) on Red Hat Hummingbird images ([images.redhat.com](https://images.redhat.com/)). Built from official, checksum-pinned sources. Runs as non-root uid 65532, no shell, no package manager.
+Your own password vault, private and reachable only from your devices.
 
-## Pre-built image
+This container image bundles [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (a lightweight, Bitwarden-compatible server) with [Tailscale](https://tailscale.com), on top of Red Hat's minimal [Hummingbird](https://images.redhat.com/) images. Every component is downloaded from its official source and verified against checksums, the container runs as a non-root user, and there is no shell or package manager inside — there is very little for an attacker to work with.
 
-CI publishes a multi-arch image (amd64 + arm64) on every `v*` tag, plus a
-weekly rebuild of the same pins so base-image CVE patches keep flowing:
+## How it works
 
-```sh
-podman run --rm -p 127.0.0.1:8080:8080 \
-  ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
-```
+- The vault listens only inside the container. It is never exposed to the network you publish the port on.
+- Your published port (8080 by default) answers exactly one request: a health check at `/alive`. It returns 200 when the vault is up and 503 when it isn't. Everything else gets a 403.
+- Tailscale makes the vault reachable at `https://<hostname>.<tailnet>.ts.net`, only inside your tailnet. No TUN device or special privileges needed.
+- Because Tailscale is the only way in, the container refuses to start without `TAILSCALE_AUTHKEY`, and it shuts down if Tailscale dies. A vault nobody can reach is worse than a brief outage — your orchestrator will restart it.
 
-Notes:
-
-- The weekly cron refreshes `:latest`, but consumers must still re-pull to
-  pick it up.
-- First publish creates the ghcr package as **private**; flip it to public
-  once (repo → Packages → package settings) so anonymous pulls work.
-
-## Build
+## Quick start
 
 ```sh
-# --format docker: HEALTHCHECK is an OCI-invalid field; podman's default
-# OCI image format silently drops it (verified on podman 5.8).
-podman build --format docker -t vaultwarden-hummingbird:local .
-
-# Build args (VAULTWARDEN_WEB_VAULT, DB, and the version pins) are
-# documented in the Containerfile itself; pass them via --build-arg, e.g.
-# an API-only image:
-podman build --format docker --build-arg VAULTWARDEN_WEB_VAULT=false \
-  -t vaultwarden-hummingbird:api .
-```
-
-## Run
-
-```sh
-# quick check (fails without TAILSCALE_AUTHKEY — see Tailscale below)
-podman run --rm -p 127.0.0.1:8080:8080 vaultwarden-hummingbird:local
-curl -i http://127.0.0.1:8080/alive
-
-# with Tailscale
 podman run --rm -p 127.0.0.1:8080:8080 \
   -e TAILSCALE_AUTHKEY=tskey-... \
   -e VAULTWARDEN_DATABASE_URL=postgresql://... \
   -e VAULTWARDEN_DOMAIN=https://vaultwarden.example.com \
-  vaultwarden-hummingbird:local
+  ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
 
-# or compose
-cp .env.example .env   # fill in, keep out of git
-podman compose up -d   # or docker compose
+curl -i http://127.0.0.1:8080/alive
 ```
 
-Port: 8080 (`VAULTWARDEN_PORT` from the platform wins, else
-`VAULTWARDEN_ROCKET_PORT`). Only `/alive` is answered on the exposed port
-— a status-only verdict: 200 while vaultwarden serves, 503 when it does
-not; every other path → 403, and no vault response data is forwarded. The
-Bitwarden API itself is loopback-only, reachable solely via `tailscale
-serve` over the tailnet.
+Images are published for amd64 and arm64 on every release, and rebuilt weekly so that security fixes in the base images keep flowing. The `:latest` tag only changes on your machine when you pull again. Note: the first release creates the GitHub package as private — switch it to public once in the repo's package settings if you want anyone to be able to pull it.
 
 ## Configuration
 
-One file: `.env` (from `.env.example`). Three namespaces:
+Everything is configured in one file. Copy [`.env.example`](.env.example) to `.env`, fill in the required values, and either mount it (compose does this for you), pass it with `--env-file`, or paste the values into your platform's environment settings.
 
-- `SUPERVISOR_*` — supervisor-initiated features: S3 state sync, DB backup, DB keepalive
-- `TAILSCALE_*` — the Tailscale subsystem (PID 1 only)
-- `VAULTWARDEN_*` — vaultwarden config; in supervisor mode the prefix is stripped and the child receives the plain upstream env names (full list in vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template))
+The variables fall into three groups:
 
-Build args (`VAULTWARDEN_WEB_VAULT`, `DB`, and the version pins) are
-documented in the Containerfile itself (`BUILD KNOBS` / `UPSTREAM PINS`) —
-override with `--build-arg`; compose passes `VAULTWARDEN_WEB_VAULT` through
-from the environment when set. Changing one requires a rebuild.
+- `TAILSCALE_*` — how the container joins your tailnet (hostname, auth key, and so on).
+- `SUPERVISOR_*` — the optional extras described below (state sync, backups, keepalive).
+- `VAULTWARDEN_*` — vaultwarden's own settings, with a `VAULTWARDEN_` prefix added. `VAULTWARDEN_DATABASE_URL` becomes `DATABASE_URL` inside. See vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template) for the full list.
 
-Supply it via the compose default (mount + `SUPERVISOR_ENV_FILE`), container env (`--env-file`), or a PaaS dashboard. In supervisor mode, `TAILSCALE_*`/`SUPERVISOR_*` keys stay with PID 1 — never in `docker inspect`.
+If a variable is set both in the file and directly on the container, the direct value wins. An empty value means "not set".
 
-## Tailscale
+### Tailscale
 
-- `tailscaled` runs in userspace networking (no TUN, no caps). `TAILSCALE_USERSPACE=false` for TUN mode.
-- Inbound access via `tailscale serve` (automatic after `up`; `TAILSCALE_SERVE=false` to disable) → `https://<hostname>.<tailnet>.ts.net`. Needs MagicDNS + HTTPS certs on the tailnet.
-- Optional Tailscale **Service** advertisement (`TAILSCALE_SERVICE=vaultwarden`): the node advertises itself as a host of `svc:vaultwarden` (`tailscale serve --service`). Requires a tag-based authkey, the Service defined on the admin console [Services page](https://console.tailscale.com/admin/services) (endpoint `tcp:443`), and admin approval or an `autoApprovers.services` policy.
-- `TAILSCALE_AUTHKEY` is **required**: a missing key or any boot-time Tailscale failure (daemon won't start, `up` fails/times out) exits 1 — the orchestrator's restart policy retries. A mid-run tailscaled death tears the vault down too (exit 1).
-- Knobs: `TAILSCALE_HOSTNAME`, `TAILSCALE_SERVE`, `TAILSCALE_SERVICE`, `TAILSCALE_USERSPACE`, `TAILSCALE_SOCKET`, `TAILSCALE_STATE_FILE`.
+- After connecting, the container points `tailscale serve` at the vault so you get a working HTTPS address on your tailnet. Set `TAILSCALE_SERVE=false` to skip this. It needs MagicDNS and HTTPS certificates enabled for your tailnet.
+- You can also advertise the vault as a Tailscale Service with `TAILSCALE_SERVICE=vaultwarden`. This needs a tag-based auth key, the Service defined on the [Services page](https://console.tailscale.com/admin/services), and approval (or an `autoApprovers.services` rule in your policy).
+- By default Tailscale runs without kernel privileges, which works on most hosting platforms. On your own machine you can set `TAILSCALE_USERSPACE=false` for TUN mode instead — slightly faster, but it needs the `NET_ADMIN` capability and `/dev/net/tun`.
+- Rename the node with `TAILSCALE_HOSTNAME`.
 
-## S3 state sync (volume-less hosts)
+## Don't lose your logins on redeploys
 
-Without a persistent volume, `/data` is wiped on redeploy → new tailnet node, clients logged out. The supervisor can sync the identity files to an S3-compatible bucket (e.g. Cloudflare R2) via rclone:
+On platforms without persistent volumes, the container's `/data` — where Tailscale keeps the machine's identity — disappears on every redeploy. That means a brand-new tailnet node and every device logged out. If that's you, let the container save those identity files to an S3-compatible bucket (Cloudflare R2 works well):
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -94,58 +56,55 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 # SUPERVISOR_S3_SYNC_INTERVAL=3600
 ```
 
-Pull at boot, push on a cadence and at shutdown. Failures are non-fatal.
-One container per bucket/path. Restored state preserves the node identity
-(keeps clients logged in and certificates valid) — but `TAILSCALE_AUTHKEY`
-is still required at every boot: the supervisor fails closed without it.
-With a real volume on `/data`, skip this and set `I_REALLY_WANT_VOLATILE_STORAGE=false`.
+It loads them at startup and saves periodically and on shutdown. If you already mount a real volume at `/data`, skip this entirely. Either way, keep the bucket private (it holds secrets) and run only one container against it.
 
-Ephemeral alternative: `TAILSCALE_STATE_FILE=mem:` + an `ephemeral=true` authkey — fresh registration each boot.
+If you'd rather stay fully ephemeral, set `TAILSCALE_STATE_FILE=mem:` and use an `ephemeral=true` auth key — the container registers as a fresh node every boot and devices re-login.
 
-## DB keepalive (idle-suspending database hosts)
+## Keep your database awake
 
-Some managed Postgres free tiers suspend or power off an idle database; the next vault request then stalls until it wakes. The supervisor can run a periodic `SELECT 1` against `VAULTWARDEN_DATABASE_URL`:
+Some managed Postgres free tiers put idle databases to sleep, and the next login then hangs until it wakes up. Ask the container to ping the database every so often:
 
 ```sh
-# seconds between pings; 0 or unset = off
-SUPERVISOR_DB_KEEPALIVE=300
+SUPERVISOR_DB_KEEPALIVE=300   # seconds; 0 or unset = off
 ```
 
-Failures are non-fatal (logged only on state change). Postgres URLs only — the supervisor speaks the postgres wire protocol; sqlite/mysql DBs skip it.
+Postgres only — it needs the database's own protocol. If the ping fails, nothing bad happens; the container just logs it.
 
-## DB backup to S3
+## Back up your vault
 
-The supervisor can push consistent, periodic dumps of the vault's database to the same S3-compatible bucket used by the state sync, under `<SUPERVISOR_S3_REMOTE>/db`:
+With the same S3 credentials as above, the container can also save regular backups of your vault's database to the bucket:
 
 ```sh
-# backup rides the state-sync S3 credentials
 SUPERVISOR_S3_REMOTE=r2:vw-state
 SUPERVISOR_S3_ACCESS_KEY_ID=...
 SUPERVISOR_S3_SECRET_ACCESS_KEY=...
 SUPERVISOR_DB_BACKUP=true
-# seconds (default 12h)
-# SUPERVISOR_DB_BACKUP_INTERVAL=43200
-# dumps kept per backend
-# SUPERVISOR_DB_BACKUP_KEEP=3
+# SUPERVISOR_DB_BACKUP_INTERVAL=43200   # seconds; default is 12h
+# SUPERVISOR_DB_BACKUP_KEEP=3           # how many backups to keep
 ```
 
-- **Consistency** — no downtime, no locks on the vault: postgres via `pg_dump` (MVCC snapshot, custom format), mysql via `mariadb-dump --single-transaction` (InnoDB snapshot), sqlite via `VACUUM INTO`. The dump/restore client tools ship in the image, extracted from the official Red Hat `hi/postgresql`/`hi/mariadb` images; sqlite is handled in-process.
-- **Safety** — dumps are staged on the data volume, uploaded to a *new* timestamped object (`db/<backend>-<timestamp>.<ext>`), and only then are the oldest objects pruned to keep-N. A kill at any point costs a missed backup, never a corrupt one. Nothing in the backup path writes to the live database.
-- **Restore (opt-in, off by default)** — `SUPERVISOR_DB_BACKUP_RESTORE=true`: at boot, if the database is *verifiably empty* (sqlite file absent; pg/mysql `users`-table check), the newest dump is imported (integrity-checked first). Ambiguity — e.g. the DB is unreachable — fails closed: the vault starts on the empty DB instead of guessing.
-- **Manual restore** — `pg_restore --no-owner --no-privileges --dbname=<db> <dump>`, `mariadb --database=<db> --execute="source <dump>"`, or (sqlite) stop the vault and replace `/data/db.sqlite3`. **Never auto-restore onto a non-empty DB by hand.**
-- Same rules as the state sync: failures are non-fatal, one container per bucket/path, keep the bucket private (dump objects contain vault metadata).
+A few things worth knowing:
 
-## Defaults (overridable via any config path)
+- Backups are taken without pausing the vault or locking anything: postgres uses `pg_dump`, MySQL/MariaDB uses a consistent snapshot, and SQLite copies itself cleanly.
+- Backups are uploaded under `db/` with a timestamp in the name, then the oldest ones are deleted to respect `KEEP`. If the container dies mid-backup you lose one backup, never gain a broken one.
+- Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and, at boot, the container will load the newest backup into the database — but only if it can prove the database is empty. If it can't tell, it does nothing rather than guess. It never overwrites existing data.
+- To restore by hand: use `pg_restore` for postgres, `mariadb` for MySQL (see the commands in `.env.example`), or replace `/data/db.sqlite3` for SQLite while the vault is stopped.
 
-- `VAULTWARDEN_SIGNUPS_ALLOWED=false` — flip to `true` to create your account, then flip back
-- No orgs, no attachments; Sends allowed (`VAULTWARDEN_SENDS_ALLOWED=false` to disable)
-- Web vault on by default (`VAULTWARDEN_WEB_VAULT=false` for API-only; UI files are baked at build)
-- Admin panel disabled (no `VAULTWARDEN_ADMIN_TOKEN`)
-- Optional mobile push: `VAULTWARDEN_PUSH_ENABLED=true` + `VAULTWARDEN_PUSH_INSTALLATION_ID`/`VAULTWARDEN_PUSH_INSTALLATION_KEY` (free from https://bitwarden.com/host)
+## What's on by default
 
-## Files
+- Sign-ups are off. Temporarily set `VAULTWARDEN_SIGNUPS_ALLOWED=true` to create your account, then set it back.
+- Organizations and attachments are disabled. Sends are enabled (`VAULTWARDEN_SENDS_ALLOWED=false` to turn them off).
+- The web vault is included and enabled. Build with `VAULTWARDEN_WEB_VAULT=false` if you only want the API, or set `VAULTWARDEN_WEB_VAULT_ENABLED=false` at runtime to hide it without rebuilding.
+- The admin panel is off. If you never set an admin token, it stays off.
+- Mobile push notifications are optional: get free credentials at https://bitwarden.com/host and set `VAULTWARDEN_PUSH_ENABLED=true` plus the ID and key.
 
-- `Containerfile` — 4 stages: fetch & verify → supervisor → vaultwarden → minimal runtime (+ DB client tools extracted from the official Red Hat client images for the backup feature)
-- `supervisor/` — Rust PID 1: exposed-port gatekeeper (`/alive` only, doubles as the container healthcheck via `--healthcheck`), tailscaled + `up`/`serve` + loopback-only vaultwarden, S3 state sync + DB backup/restore, with clean SIGTERM teardown
-- `.env.example` — the one config file; `compose.yaml` — local runner (podman/docker compose)
-- `.github/workflows/publish.yml` — multi-arch build + ghcr publish (tag push, manual, weekly cron)
+## Something not working?
+
+- **The container exits immediately at startup** — almost always Tailscale. Check the auth key and look for `refusing to run the vault without Tailscale` in the logs.
+- **`/alive` returns 503** — the vault itself isn't answering, usually because the database is unreachable. Its error will be in the container logs.
+- **`tailscale serve failed` in the logs** — enable MagicDNS and HTTPS certificates in the Tailscale admin console. The vault still runs; you just don't get the HTTPS address.
+- **`db backup: ... failed; continuing`** — nothing to do. The backup was skipped and everything else keeps running.
+
+## Building it yourself
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
