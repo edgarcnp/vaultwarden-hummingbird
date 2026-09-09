@@ -23,6 +23,19 @@ defaults:
     working-directory: supervisor
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ubuntu-latest ships with a stable rustup toolchain preinstalled.
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest
