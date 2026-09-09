@@ -1,9 +1,5 @@
-//! Config resolution: process env + optional supervisor-owned dotenv
-//! file, plus the per-feature settings modules (sync, backup, keepalive)
-//! and static constants. Each feature module is a folder: `spec` (the
-//! settings type), `resolve` (knob resolution), re-exported here.
-//!
-//! mod.rs is declarations only; the public surface is re-exports.
+//! Config resolution: process env + optional supervisor-owned dotenv file.
+//! Feature modules follow a `spec`/`resolve` folder split, re-exported here.
 
 mod backup;
 mod consts;

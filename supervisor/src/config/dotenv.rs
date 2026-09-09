@@ -2,13 +2,9 @@
 //! `TAILSCALE_*`/`SUPERVISOR_*` keys -> supervisor knobs (never the child,
 //! never `podman inspect`); `VAULTWARDEN_*` keys -> the vaultwarden child
 //! under the stripped plain upstream name; everything else -> forwarded to
-//! the child verbatim. Parsed by `dotenvy`, the standard dotenv dialect:
-//! KEY=value, `#` full-line comments, optional `export ` prefix, optional
-//! matching quotes (single quotes raw; double quotes support `\n` escapes
-//! and `$VAR`/`${VAR}` substitution from the process env and earlier keys),
-//! inline ` #` comments after values, and multi-line quoted values.
-//! Invalid lines are logged (never their content — they may carry
-//! credentials) and skipped; later duplicates win.
+//! the child verbatim. Parsed by `dotenvy`; invalid lines are logged (never
+//! their content — they may carry credentials) and skipped; later
+//! duplicates win.
 
 use std::collections::BTreeMap;
 
@@ -22,13 +18,12 @@ const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
 pub struct FileConfig {
     /// supervisor knobs (TAILSCALE_*/SUPERVISOR_* keys)
     pub knobs: BTreeMap<String, String>,
-    /// vaultwarden env under plain upstream names (VAULTWARDEN_* keys with
-    /// the prefix stripped), forwarded to the child
+    /// child env, VAULTWARDEN_* keys under the stripped upstream name
     pub child: BTreeMap<String, String>,
 }
 
 impl FileConfig {
-    /// Load from the SUPERVISOR_ENV_FILE env var (absent/empty -> env-only mode).
+    /// Load from the SUPERVISOR_ENV_FILE env var (absent/empty -> env-only).
     pub fn load() -> Self {
         match std::env::var(ENV_NAME) {
             Ok(p) if !p.is_empty() => Self::load_from(Some(&p)),
@@ -36,7 +31,7 @@ impl FileConfig {
         }
     }
 
-    /// path=None simulates "no config file" (used by tests).
+    /// path=None = no config file (tests).
     pub fn load_from(path: Option<&str>) -> Self {
         let Some(path) = path else {
             return Self::default();
@@ -123,7 +118,6 @@ not a valid line
         );
         assert!(!cfg.child.keys().any(|k| k.starts_with("TAILSCALE_")));
         assert!(!cfg.child.keys().any(|k| k.starts_with("SUPERVISOR_")));
-        // VAULTWARDEN_ keys land under the stripped upstream name
         assert!(!cfg.child.keys().any(|k| k.starts_with("VAULTWARDEN_")));
         assert_eq!(
             cfg.knobs.get("TAILSCALE_AUTHKEY").map(String::as_str),
@@ -140,8 +134,7 @@ not a valid line
     }
 
     /// The dotenvy dialect: double quotes unescape `\n` and substitute
-    /// `$VAR`/`${VAR}` (earlier file keys; the process env would win if
-    /// set), single quotes are raw.
+    /// `$VAR`/`${VAR}` from earlier file keys, single quotes are raw.
     #[test]
     fn double_quotes_expand_and_single_quotes_stay_raw() {
         let path = write_tmp(

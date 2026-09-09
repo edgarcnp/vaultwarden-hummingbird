@@ -1,21 +1,18 @@
 //! Database URL parsing (`VAULTWARDEN_DATABASE_URL`), built on the `url`
-//! crate (WHATWG URL semantics, the same family of rules browsers and
-//! libpq-ish tooling apply) with `percent-encoding` for component decoding.
+//! crate with `percent-encoding` for component decoding.
 
 use url::{Host, Url};
 
 use super::spec::DbSpec;
 
 /// Stand-in host for the libpq default-socket form (`postgres://u:p@/db`,
-/// `postgres://:5432/db`, `postgres:///db`): the `url` crate rejects empty
-/// hosts, so those URLs are parsed against this placeholder whose value is
-/// discarded — the host is blanked to `None` afterwards.
+/// `postgres://:5432/db`): the `url` crate rejects empty hosts, so those
+/// URLs are parsed against this placeholder, blanked to `None` afterwards.
 const EMPTY_HOST: &str = "empty-host.invalid";
 
 /// Parse a database URL. `None` = empty, unparseable URL, unrecognized
-/// scheme, or malformed port. sqlite URLs are paths after the scheme
-/// (`sqlite:///a/b` → `/a/b`); no scheme at all is not sqlite — callers
-/// decide the default.
+/// scheme, or malformed port. sqlite URLs are paths after the scheme; no
+/// scheme at all is not sqlite — callers decide the default.
 pub fn parse(raw: &str) -> Option<DbSpec> {
     let url = raw.trim();
     let (scheme, rest) = url.split_once("://")?;
@@ -27,8 +24,7 @@ pub fn parse(raw: &str) -> Option<DbSpec> {
     }
 }
 
-/// The scheme of a database URL (for secret-free logs): the text before
-/// `://`, or the whole (malformed) value trimmed to 32 chars.
+/// The scheme of a database URL (for secret-free logs).
 pub fn scheme_for_log(raw: &str) -> String {
     let raw = raw.trim();
     match raw.split_once("://") {
@@ -85,9 +81,8 @@ fn net_spec(scheme: &str, url: &str, rest: &str, default_port: u16, mysql: bool)
     })
 }
 
-/// sqlite: everything after the scheme is the path, percent-decoded —
-/// `sqlite:///a/b` → `/a/b`, `sqlite://a/b` → relative `a/b`. Raw string
-/// handling (not `Url`) keeps opaque path shapes intact.
+/// sqlite: everything after the scheme is the path, percent-decoded.
+/// Raw string handling (not `Url`) keeps opaque path shapes intact.
 fn sqlite_spec(rest: &str) -> DbSpec {
     DbSpec::Sqlite {
         path: percent_decode_str(rest),

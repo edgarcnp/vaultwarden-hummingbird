@@ -1,8 +1,7 @@
 //! DB backup knob resolution (SUPERVISOR_DB_BACKUP*): builds a
-//! [`DbBackupConfig`] from the env/file layer. Misconfigurations degrade
-//! to backup disabled (never block the vault). Either sub-feature alone
-//! is enough: periodic dumps (SUPERVISOR_DB_BACKUP) and boot-time restore
-//! (SUPERVISOR_DB_BACKUP_RESTORE) arm independently.
+//! [`DbBackupConfig`] from the env/file layer. Periodic dumps and boot-time
+//! restore arm independently; misconfigurations degrade to backup disabled
+//! (never block the vault).
 
 use std::time::Duration;
 

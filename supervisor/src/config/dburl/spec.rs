@@ -1,10 +1,7 @@
-//! The parsed vaultwarden database URL (`VAULTWARDEN_DATABASE_URL`): a
-//! [`DbSpec`] carrying exactly the components the dump/restore tools need.
-//! Nothing is logged.
+//! The parsed vaultwarden database URL (`VAULTWARDEN_DATABASE_URL`).
 
-/// The parsed vaultwarden database URL (`VAULTWARDEN_DATABASE_URL`).
-/// Variants carry exactly the components the dump/restore tools need;
-/// nothing is logged.
+/// The parsed vaultwarden database URL. Variants carry exactly the
+/// components the dump/restore tools need; nothing is logged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DbSpec {
     Postgres {
@@ -32,8 +29,7 @@ pub enum DbSpec {
 }
 
 impl DbSpec {
-    /// Backend label: object-name prefix and prune filter for the backup
-    /// bucket prefix.
+    /// Backend label: object-name prefix and prune filter.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Postgres { .. } => "postgres",

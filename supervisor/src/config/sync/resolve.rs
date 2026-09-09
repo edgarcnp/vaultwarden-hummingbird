@@ -128,8 +128,8 @@ mod tests {
         );
     }
 
-    /// A colon-less remote would make rclone write to a local path
-    /// instead of the bucket.
+    /// A colon-less remote would make rclone write to a local path instead
+    /// of the bucket.
     #[test]
     fn colon_less_remote_is_rejected() {
         let mut vars: Vec<(&str, &str)> = BASE.to_vec();

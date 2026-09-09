@@ -1,28 +1,24 @@
-//! DB keepalive settings (opt-in via SUPERVISOR_DB_KEEPALIVE): the
-//! [`DbKeepalive`] carried by `Config` and consumed by
-//! `crate::runtime::db::keepalive`, the runner.
+//! DB keepalive settings (SUPERVISOR_DB_KEEPALIVE).
 
 use std::time::Duration;
 
 use crate::util::log;
 
-/// DB keepalive: issues a trivial query on a cadence so hosts that suspend
-/// an idle database (scale-to-zero / auto-stop) stay awake for the vault.
-/// Opt-in via SUPERVISOR_DB_KEEPALIVE (seconds; unset = off, 0 = off).
+/// Issues a trivial query on a cadence so hosts that suspend an idle
+/// database (scale-to-zero / auto-stop) stay awake for the vault.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DbKeepalive {
-    /// vaultwarden's database URL (`VAULTWARDEN_DATABASE_URL`) — the ping
-    /// must reach the same DB the vault uses; never logged (carries
-    /// credentials)
+    /// vaultwarden's database URL — the ping must reach the same DB the
+    /// vault uses; never logged (carries credentials)
     pub url: String,
     /// ping cadence
     pub interval: Duration,
 }
 
 impl DbKeepalive {
-    /// Empty/0 = off; non-numeric warns and disables; a non-postgres URL
-    /// disables (warns only when the knob was explicitly set) — the
-    /// supervisor speaks only the postgres wire protocol.
+    /// Empty/0 = off; non-numeric or non-postgres URL disables (warns only
+    /// when the knob was explicitly set — the supervisor speaks only the
+    /// postgres wire protocol).
     pub fn from_parts(raw: &str, db_url: Option<String>) -> Option<Self> {
         let explicit = !raw.is_empty();
         let interval = match raw.parse::<u64>() {
@@ -63,9 +59,6 @@ impl DbKeepalive {
 mod tests {
     use super::*;
 
-    /// Keepalive resolution: off by default, cadence knob drives it, and it
-    /// only arms when the vault's DB is a postgres URL (the supervisor's
-    /// ping speaks the postgres wire protocol).
     #[test]
     fn db_keepalive_resolution() {
         fn with(raw: &str, db: Option<&str>) -> Option<DbKeepalive> {

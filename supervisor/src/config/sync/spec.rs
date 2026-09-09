@@ -1,20 +1,14 @@
-//! The [`SyncConfig`] carried by `Config`: S3 state-sync settings for
-//! rclone, consumed by `crate::runtime::sync` (state persistence) and
-//! reused by the DB backup.
+//! S3 state-sync settings for rclone, reused by the DB backup.
 
 use std::time::Duration;
 
-/// Uppercased rclone remote name (the part before ':' in `remote:path`):
-/// prefix of the RCLONE_CONFIG_* backend env vars.
+/// Uppercased rclone remote name: prefix of the RCLONE_CONFIG_* env vars.
 pub(super) fn remote_env_name(remote: &str) -> String {
     remote.split(':').next().unwrap_or_default().to_uppercase()
 }
 
 /// S3-backed persistence for /data identity files (opt-in): the same
 /// tailnet node and vaultwarden RSA keys survive ephemeral redeploys.
-/// Single instance per bucket. Cloned into
-/// [`super::super::backup::DbBackupConfig`], which reuses the credentials
-/// and remote.
 #[derive(Clone)]
 pub struct SyncConfig {
     /// rclone destination `remote:path` (e.g. `r2:vw-state`)
@@ -28,7 +22,7 @@ pub struct SyncConfig {
 impl SyncConfig {
     /// Build from raw knob values; empty `endpoint` = provider default.
     /// Backend config rides env — never argv, which is world-readable
-    /// in /proc. `RCLONE_CONFIG=/dev/null` disables the config file.
+    /// in /proc.
     pub fn new(
         remote: String,
         key_id: String,
