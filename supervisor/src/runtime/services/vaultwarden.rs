@@ -1,47 +1,21 @@
 //! vaultwarden child process control.
 
+use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
-use crate::config::{VAULTWARDEN, is_supervisor_key, vaultwarden_key};
+use crate::config::{VAULTWARDEN, is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
 use crate::runtime::{Pid, spawn};
 
-/// vaultwarden in the foreground with a *granted* environment (default
-/// deny): the ambient container env contributes ONLY `VAULTWARDEN_*`
-/// keys (stripped to the plain upstream name — orchestrator/platform
-/// settings must not shape the vault); the dotenv-file vars are the
-/// explicit grant surface (this makes image-baked posture defaults
-/// overridable, and bare upstream names in the file keep working); then
-/// hard invariants: ROCKET_PORT (internal vault port), ROCKET_ADDRESS
-/// (loopback-only: the API is reachable solely via `tailscale serve`),
-/// DATA_FOLDER, and WEB_VAULT_ENABLED re-derived from what the image
-/// actually baked (the image default never reaches this child, and an
-/// API-only build must not boot with vaultwarden's compiled default).
-/// Spawn failure returns `None`; the caller tears down and exits 1.
+/// vaultwarden in the foreground with a *granted* environment (see
+/// [`granted_env`]). Spawn failure returns `None`; the caller tears down
+/// and exits 1.
 pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
     let mut cmd = Command::new(VAULTWARDEN);
     cmd.env_clear();
-    for (k, v) in env::vars_os() {
-        if let Some(key) = ambient_key(&k) {
-            cmd.env(key, v);
-        }
-    }
-    for (k, v) in extra_env {
-        if let Some(key) = file_key(OsStr::new(k)) {
-            cmd.env(key, v);
-        }
-    }
-    cmd.env("ROCKET_PORT", vault_port)
-        .env("ROCKET_ADDRESS", "127.0.0.1")
-        .env("DATA_FOLDER", "/data");
-    // The image's WEB_VAULT_ENABLED default never reaches this child (the
-    // ambient env is default-deny), so it is re-derived from what was
-    // actually baked: an API-only build (empty /web-vault) must not boot
-    // with vaultwarden's compiled default (enabled) — the vault exits 1
-    // on the missing index.html. A populated folder leaves the knob unset.
-    if let Some((key, value)) = web_vault_flag(WEB_VAULT_INDEX) {
-        cmd.env(key, value);
+    for (k, v) in granted_env(env::vars_os(), extra_env, vault_port) {
+        cmd.env(k, v);
     }
     spawn(&mut cmd)
 }
@@ -60,17 +34,62 @@ fn web_vault_flag(index: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// The vaultwarden child's granted environment, in precedence order: the
+/// dotenv-file grant surface first, then the ambient container env
+/// (default-deny: ONLY `VAULTWARDEN_*` keys, stripped to the plain upstream
+/// name — orchestrator/platform settings must not shape the vault) — so a
+/// direct container value wins over the file, matching the supervisor's own
+/// env > file resolution (backup/restore must reach the same DB the vault
+/// uses). Finally the hard invariants, which nothing may override:
+/// ROCKET_PORT (internal vault port), ROCKET_ADDRESS (loopback-only: the
+/// API is reachable solely via `tailscale serve`), DATA_FOLDER, and
+/// WEB_VAULT_ENABLED re-derived from what the image actually baked (the
+/// image default never reaches this child, and an API-only build must not
+/// boot with vaultwarden's compiled default). Supervisor-consumed keys
+/// ([`is_supervisor_consumed`]: supervisor namespaces + the port knobs)
+/// never pass on either path; non-UTF-8 keys are dropped: a key the
+/// supervisor can't read must never reach the child (a mangled
+/// `TAILSCALE_*` secret would otherwise leak into its env).
+fn granted_env(
+    ambient: impl Iterator<Item = (OsString, OsString)>,
+    file: &[(String, String)],
+    vault_port: &str,
+) -> Vec<(String, OsString)> {
+    let mut env: BTreeMap<String, OsString> = BTreeMap::new();
+    for (k, v) in file {
+        if let Some(key) = file_key(OsStr::new(k)) {
+            env.insert(key, v.clone().into());
+        }
+    }
+    for (k, v) in ambient {
+        if let Some(key) = ambient_key(&k) {
+            env.insert(key, v);
+        }
+    }
+    env.insert("ROCKET_PORT".into(), vault_port.into());
+    env.insert("ROCKET_ADDRESS".into(), "127.0.0.1".into());
+    env.insert("DATA_FOLDER".into(), "/data".into());
+    // A populated folder leaves the knob unset; an API-only build (empty
+    // /web-vault) must not boot with vaultwarden's compiled default
+    // (enabled) — the vault exits 1 on the missing index.html.
+    if let Some((key, value)) = web_vault_flag(WEB_VAULT_INDEX) {
+        env.insert(key.into(), value.into());
+    }
+    env.into_iter().collect()
+}
+
 /// Map an *ambient* container-env key for the child (default deny): only
 /// `VAULTWARDEN_*` keys are forwarded, under the stripped plain upstream
-/// name. Supervisor-owned keys are dropped — including after stripping
+/// name. Supervisor-consumed keys are dropped — including after stripping
 /// (a mangled `VAULTWARDEN_TAILSCALE_*` key must not land in the child
 /// as `TAILSCALE_*`) — and bare upstream keys are NOT forwarded: the
-/// dotenv file is the explicit grant surface for those. Non-UTF-8 keys
-/// are dropped: a key the supervisor can't read must never reach the
-/// child (a mangled `TAILSCALE_*` secret would otherwise leak into its
-/// env).
+/// dotenv file is the explicit grant surface for those.
 fn ambient_key(key: &OsStr) -> Option<String> {
-    let stripped = vaultwarden_key(key.to_str()?)?;
+    let k = key.to_str()?;
+    if is_supervisor_consumed(k) {
+        return None;
+    }
+    let stripped = vaultwarden_key(k)?;
     if is_supervisor_key(stripped) {
         return None;
     }
@@ -78,13 +97,13 @@ fn ambient_key(key: &OsStr) -> Option<String> {
 }
 
 /// Map a dotenv-file key for the child (the explicit grant surface):
-/// supervisor-owned keys are dropped (they are routed to the supervisor's
-/// own knobs before this point), `VAULTWARDEN_*` keys are forwarded under
-/// the stripped plain upstream name, bare upstream names verbatim.
-/// Non-UTF-8 keys are dropped, same rationale as [`ambient_key`].
+/// supervisor-consumed keys are dropped (they are routed to the
+/// supervisor's own knobs before this point), `VAULTWARDEN_*` keys are
+/// forwarded under the stripped plain upstream name, bare upstream names
+/// verbatim. Non-UTF-8 keys are dropped, same rationale as [`ambient_key`].
 fn file_key(key: &OsStr) -> Option<String> {
     let k = key.to_str()?;
-    if is_supervisor_key(k) {
+    if is_supervisor_consumed(k) {
         return None;
     }
     let mapped = vaultwarden_key(k).map_or_else(|| k.to_string(), str::to_string);
@@ -130,7 +149,9 @@ mod tests {
 
     /// A `VAULTWARDEN_`-prefixed key whose stripped name lands in the
     /// supervisor namespace must be dropped, not forwarded: the child
-    /// receives no `TAILSCALE_*`/`SUPERVISOR_*` keys from any input.
+    /// receives no `TAILSCALE_*`/`SUPERVISOR_*` keys from any input. The
+    /// supervisor-consumed port knobs never reach the child either (the
+    /// supervisor binds the gate on them and pins the child's port).
     #[test]
     fn vaultwarden_prefixed_supervisor_names_are_dropped() {
         assert_eq!(
@@ -141,17 +162,83 @@ mod tests {
             ambient_key(OsStr::new("VAULTWARDEN_SUPERVISOR_S3_REMOTE")),
             None
         );
+        assert_eq!(ambient_key(OsStr::new("VAULTWARDEN_PORT")), None);
+        assert_eq!(ambient_key(OsStr::new("VAULTWARDEN_ROCKET_PORT")), None);
         // stripped-to-supervisor names stay denied from the file path too
         assert_eq!(file_key(OsStr::new("VAULTWARDEN_TAILSCALE_AUTHKEY")), None);
         assert_eq!(
             file_key(OsStr::new("VAULTWARDEN_SUPERVISOR_S3_REMOTE")),
             None
         );
+        assert_eq!(file_key(OsStr::new("VAULTWARDEN_PORT")), None);
+        assert_eq!(file_key(OsStr::new("VAULTWARDEN_ROCKET_PORT")), None);
         // a stripped-to-empty remainder still passes through the file path
         assert_eq!(
             file_key(OsStr::new("VAULTWARDEN_")).as_deref(),
             Some("VAULTWARDEN_")
         );
+    }
+
+    /// The granted child env: file keys first, ambient keys override (the
+    /// documented "direct value wins" — the supervisor's own resolution
+    /// uses the same order), supervisor-consumed keys never pass, and the
+    /// hard pins close it out. Only ROCKET_ADDRESS/ROCKET_PORT/DATA_FOLDER
+    /// and the re-derived web-vault flag may not be overridden.
+    #[test]
+    fn granted_env_file_first_ambient_wins_pins_last() {
+        let ambient: Vec<(OsString, OsString)> = [
+            ("VAULTWARDEN_DATABASE_URL", "sqlite:///data/env.sqlite3"),
+            ("VAULTWARDEN_SIGNUPS_ALLOWED", "false"),
+            ("VAULTWARDEN_PORT", "9999"),
+            ("TAILSCALE_AUTHKEY", "leak-me"),
+        ]
+        .iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .collect();
+        let file = [
+            (
+                "DATABASE_URL".to_string(),
+                "sqlite:///data/file.sqlite3".to_string(),
+            ),
+            ("SIGNUPS_ALLOWED".to_string(), "true".to_string()),
+            ("VAULTWARDEN_PORT".to_string(), "8888".to_string()),
+            ("DOMAIN".to_string(), "https://f.example".to_string()),
+        ];
+        let env: std::collections::BTreeMap<String, String> =
+            granted_env(ambient.into_iter(), &file, "8081")
+                .into_iter()
+                .map(|(k, v)| (k, v.to_string_lossy().into_owned()))
+                .collect();
+        assert_eq!(
+            env.get("DATABASE_URL").map(String::as_str),
+            Some("sqlite:///data/env.sqlite3"),
+            "ambient env must override the file"
+        );
+        assert_eq!(
+            env.get("SIGNUPS_ALLOWED").map(String::as_str),
+            Some("false"),
+            "ambient env must override the file"
+        );
+        assert_eq!(
+            env.get("DOMAIN").map(String::as_str),
+            Some("https://f.example"),
+            "bare upstream names from the file pass"
+        );
+        assert!(
+            !env.contains_key("PORT"),
+            "port knob must not reach the child"
+        );
+        assert!(
+            !env.contains_key("TAILSCALE_AUTHKEY"),
+            "supervisor secrets must not reach the child"
+        );
+        // the hard pins win over everything
+        assert_eq!(env.get("ROCKET_PORT").map(String::as_str), Some("8081"));
+        assert_eq!(
+            env.get("ROCKET_ADDRESS").map(String::as_str),
+            Some("127.0.0.1")
+        );
+        assert_eq!(env.get("DATA_FOLDER").map(String::as_str), Some("/data"));
     }
 
     /// The dotenv file is the explicit grant surface: bare upstream names
