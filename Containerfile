@@ -24,24 +24,18 @@ ARG RCLONE_SHA256_ARM64=03f2504174034b6d004152ed7369251c9a9ec1f7e0836eda420f5c7a
 
 # Base images float on purpose: rebuilds pick up upstream CVE patches. The
 # runtime uses the -openssl variant (ships libssl/libcrypto, so the runtime
-# needs no hand-copied OpenSSL from the builder). The DB client images
-# supply the supervisor's backup tools; they float so the dump client stays
-# at-or-above the server majors it must read.
+# needs no hand-copied OpenSSL from the builder).
 
 ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder
 ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl
-ARG PG_CLIENT_IMAGE=registry.access.redhat.com/hi/postgresql:latest
-ARG MARIADB_CLIENT_IMAGE=registry.access.redhat.com/hi/mariadb:latest
 
-# BUILD KNOBS — the authoritative docs for every build arg; override with
+# BUILD KNOB — the authoritative doc for the build arg; override with
 # --build-arg (compose passes VAULTWARDEN_WEB_VAULT through from the env).
-# Changing one requires a rebuild.
+# Changing it requires a rebuild.
 #   VAULTWARDEN_WEB_VAULT: web vault UI baked into the image; false = API-only.
-#   DB: backends compiled into vaultwarden — postgresql, sqlite, mysql, or a
-#   comma-separated combination. Default: all three, matching upstream.
+# The database is SQLite (see below) — there is no DB backend knob.
 
 ARG VAULTWARDEN_WEB_VAULT=true
-ARG DB=postgresql,sqlite,mysql
 
 # STAGE 1 — FETCH: download + verify the release tarballs against pinned
 # sha256 digests (same-origin checksum files are NOT trusted; a compromised
@@ -100,79 +94,26 @@ COPY supervisor/src ./src
 # --locked: fail closed on lockfile drift
 RUN cargo build --release --locked && cp target/release/supervisor /out-supervisor
 
-# STAGE 3 — VAULTWARDEN: built from source
+# STAGE 3 — VAULTWARDEN: built from source, SQLite-only
 # Maintenance note: keep comments outside RUN chains — a '#' after '\'
 # truncates the chain.
 
 FROM ${BUILDER_IMAGE} AS vw-build
 ARG TARGETARCH
 ARG VW_VERSION
-ARG DB
-# fail-closed: DB must enable at least one known backend
-RUN case ",${DB}," in \
-        *,sqlite,*|*,sqlite_system,*|*,mysql,*|*,postgresql,*) ;; \
-        *) echo "DB: enable at least one of sqlite, mysql, postgresql (got '${DB}')" && exit 1 ;; \
-    esac \
- && PKGS="tar gzip tzdata openssl-devel" \
- && case ",${DB}," in \
-        *,mysql,*) PKGS="$PKGS mariadb-connector-c-devel" ;; \
-    esac \
- && dnf -y install $PKGS && dnf clean all
+RUN dnf -y install tar gzip tzdata openssl-devel && dnf clean all
 WORKDIR /build
 COPY --from=fetch /fetch/vw.tar.gz .
-# pq-sys@= pinned for reproducible builds; the bundled libpq *source* inside
-# pq-src floats in [0.2,0.4) and resolves at build time. mimalloc = hardened
-# allocator; x86-64-v2 = RHEL 9 baseline. Only the mariadb client lib is
-# staged (the -openssl runtime image provides libssl/libcrypto itself).
+# x86-64-v2 = RHEL 9 baseline; mimalloc = hardened allocator. Only sqlite
+# is compiled in: the DB lives on the data volume, and the supervisor's
+# backup/restore speaks the file format natively.
 RUN tar -xzf vw.tar.gz --strip-components=1 && rm vw.tar.gz \
- && case ",${DB}," in \
-        *,postgresql,*) cargo add pq-sys@=0.7.5 --features bundled ;; \
-    esac \
  && case "${TARGETARCH:-$(uname -m)}" in \
         amd64|x86_64) export RUSTFLAGS="-Ctarget-cpu=x86-64-v2" ;; \
     esac \
  && VW_VERSION=${VW_VERSION} cargo build \
-        --features "${DB},enable_mimalloc" --profile release \
- && mkdir /out-libs \
- && case ",${DB}," in \
-        *,mysql,*) cp -a /usr/lib64/libmariadb.so.3* /out-libs/ ;; \
-    esac \
+        --features "sqlite,enable_mimalloc" --profile release \
  && cp target/release/vaultwarden /out-vaultwarden
-
-# DB CLIENT TOOLS — extracted (not built: the hummingbird builder repo
-# lacks bison/flex/perl) from the official Red Hat client images for the
-# supervisor's backup feature. Each stage collects the client binaries plus
-# their shared-lib closure, minus libs the core runtime already provides.
-# Libs land in a per-flavor private directory the supervisor points
-# LD_LIBRARY_PATH at (pg tools only ever see pg libs, mariadb tools only
-# mariadb libs), so a same-named lib from one distribution can never
-# shadow the other's, and nothing in the runtime is replaced.
-
-FROM ${PG_CLIENT_IMAGE} AS pg-clients
-USER 0
-RUN mkdir -p /out/bin /out/lib \
- && cp /usr/bin/pg_dump /usr/bin/pg_restore /out/bin/ \
- && for lib in $(ldd /usr/bin/pg_dump /usr/bin/pg_restore \
-        | grep "=> /" | cut -d' ' -f3 | sort -u); do \
-        case "$lib" in \
-            /lib64/libc.so.6|/lib64/libgcc_s.so.1|/lib64/libm.so.6|\
-            /lib64/libstdc++.so.6|/lib64/libz.so.1|/lib64/libselinux.so.1|\
-            /lib64/libpcre2-8.so.0|/lib64/libresolv.so.2) ;; \
-            *) cp -L "$lib" /out/lib/ ;; \
-        esac; done
-
-FROM ${MARIADB_CLIENT_IMAGE} AS mdb-clients
-USER 0
-RUN mkdir -p /out/bin /out/lib \
- && cp /usr/bin/mariadb-dump /usr/bin/mariadb /out/bin/ \
- && for lib in $(ldd /usr/bin/mariadb-dump /usr/bin/mariadb \
-        | grep "=> /" | cut -d' ' -f3 | sort -u); do \
-        case "$lib" in \
-            /lib64/libc.so.6|/lib64/libgcc_s.so.1|/lib64/libm.so.6|\
-            /lib64/libstdc++.so.6|/lib64/libz.so.1|/lib64/libselinux.so.1|\
-            /lib64/libpcre2-8.so.0|/lib64/libresolv.so.2) ;; \
-            *) cp -L "$lib" /out/lib/ ;; \
-        esac; done
 
 # STAGE 4 — RUNTIME: minimal shell-less image (uid 65532)
 
@@ -185,9 +126,9 @@ LABEL org.opencontainers.image.title="vaultwarden-hummingbird" \
       org.opencontainers.image.description="Vaultwarden ${VW_VERSION} + Tailscale ${TAILSCALE_VERSION} on Hummingbird core-runtime" \
       org.opencontainers.image.source="https://github.com/dani-garcia/vaultwarden"
 
-# mariadb lib only when DB included mysql (the -openssl runtime provides
-# libssl/libcrypto itself). postgres/sqlite are static in vaultwarden.
-COPY --from=vw-build /out-libs/ /usr/lib64/
+# The -openssl runtime image provides libssl/libcrypto; the sqlite-only
+# vaultwarden build needs no other shared libs copied in. Zoneinfo keeps
+# TZ useful.
 COPY --from=vw-build /usr/share/zoneinfo /usr/share/zoneinfo
 
 COPY --from=supervisor /out-supervisor /entrypoint
@@ -195,11 +136,6 @@ COPY --from=fetch /out/tailscale /usr/local/bin/tailscale
 COPY --from=fetch /out/tailscaled /usr/local/bin/tailscaled
 COPY --from=fetch /out/rclone /usr/local/bin/rclone
 COPY --from=vw-build /out-vaultwarden /vaultwarden
-# DB client tools + their shared-lib closures, per flavor, in a private
-# tree. Both dirs always exist (may be empty) so COPY succeeds regardless
-# of the DB arg.
-COPY --from=pg-clients /out/ /usr/local/lib/dbclients/pg/
-COPY --from=mdb-clients /out/ /usr/local/lib/dbclients/mariadb/
 # web-vault dir always exists (may be empty) so COPY succeeds
 COPY --from=fetch /out/web-vault /web-vault
 COPY --from=fetch --chown=65532:0 /data /data

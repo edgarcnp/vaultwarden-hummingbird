@@ -83,18 +83,6 @@
             "extractVersionTemplate": "^v(?<version>.*)$"
         },
         {
-            "customType": "regex",
-            "description": "pq-sys exact pin (cargo add in the vw-build stage)",
-            "fileMatch": [
-                "^Containerfile$"
-            ],
-            "matchStrings": [
-                "cargo add pq-sys@=(?<currentValue>\\S+)"
-            ],
-            "datasourceTemplate": "crate",
-            "depNameTemplate": "pq-sys"
-        },
-        {
             "description": "Hummingbird base image tag pins",
             "fileMatch": [
                 "^Containerfile$"
@@ -102,19 +90,6 @@
             "matchStrings": [
                 "ARG BUILDER_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/rust):(?<currentValue>\\S+)",
                 "ARG RUNTIME_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/core-runtime):(?<currentValue>\\S+)"
-            ],
-            "datasourceTemplate": "docker",
-            "registryUrlTemplate": "https://registry.access.redhat.com",
-            "pinDigests": false
-        },
-        {
-            "description": "Hummingbird DB client image tag pins (versions surface in Renovate PRs; tags float so the client stays at-or-above the server majors)",
-            "fileMatch": [
-                "^Containerfile$"
-            ],
-            "matchStrings": [
-                "ARG PG_CLIENT_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/postgresql):(?<currentValue>\\S+)",
-                "ARG MARIADB_CLIENT_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/mariadb):(?<currentValue>\\S+)"
             ],
             "datasourceTemplate": "docker",
             "registryUrlTemplate": "https://registry.access.redhat.com",
