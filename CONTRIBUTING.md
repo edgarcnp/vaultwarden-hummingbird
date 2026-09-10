@@ -6,7 +6,7 @@ Thanks for helping out. This project is two parts: a container image (`Container
 
 - [Podman](https://podman.io/) or Docker, to build and run the image.
 - A recent stable Rust toolchain, to work on the supervisor.
-- A Tailscale account and a database if you want to test the running container end to end.
+- A Tailscale account if you want to test the running container end to end.
 
 ## Build and run the image
 
@@ -31,12 +31,12 @@ curl -i http://127.0.0.1:8080/alive
 `--build-arg` lets you change what's baked into the image (all documented in the Containerfile):
 
 - `VAULTWARDEN_WEB_VAULT=false` builds an API-only image without the web UI.
-- `DB=postgresql,sqlite,mysql` picks which databases vaultwarden is compiled to talk to. Default is all three.
+- The database is SQLite on the data volume — there is no DB backend knob.
 - The version pins are kept up to date by Renovate. Don't bump them by hand — the one exception is `VW_SHA256`, which Renovate can't see and must follow `VW_VERSION` manually.
 
 ## Working on the supervisor
 
-The supervisor is a regular Rust crate. It starts Tailscale and vaultwarden, health checks the public port, and handles the optional state sync, backups, and database keepalive.
+The supervisor is a regular Rust crate. It starts Tailscale and vaultwarden, health checks the public port, and handles the optional state sync and backups.
 
 ```sh
 cd supervisor
@@ -46,7 +46,7 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-CI runs exactly those four checks (plus a build), so if they pass locally, CI will pass. Keep the `--locked` flag — the lockfile is committed on purpose.
+CI runs exactly those checks, so if they pass locally, CI will pass. Keep the `--locked` flag — the lockfile is committed on purpose.
 
 ### Where things live
 
@@ -58,8 +58,7 @@ supervisor/src/
     ├── process/   starting and stopping child programs
     ├── services/  tailscaled and vaultwarden themselves
     ├── gate/      the public-port health endpoint
-    ├── backup/    database backups and restore, one folder per database
-    ├── db/        database connections and keepalive
+    ├── backup/    sqlite backup and restore to S3
     └── sync/      saving /data to S3 and back
 ```
 
@@ -79,7 +78,6 @@ A full build gives you a container you can exercise for real:
 ```sh
 podman run --rm -it -p 127.0.0.1:8080:8080 \
   -e TAILSCALE_AUTHKEY=tskey-... \
-  -e VAULTWARDEN_DATABASE_URL=postgresql://... \
   -e VAULTWARDEN_DOMAIN=https://vaultwarden.example.com \
   vaultwarden-hummingbird:local
 

@@ -16,7 +16,6 @@ This container image bundles [Vaultwarden](https://github.com/dani-garcia/vaultw
 ```sh
 podman run --rm -p 127.0.0.1:8080:8080 \
   -e TAILSCALE_AUTHKEY=tskey-... \
-  -e VAULTWARDEN_DATABASE_URL=postgresql://... \
   -e VAULTWARDEN_DOMAIN=https://vaultwarden.example.com \
   ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
 
@@ -32,7 +31,7 @@ Everything is configured in one file. Copy [`.env.example`](.env.example) to `.e
 The variables fall into three groups:
 
 - `TAILSCALE_*` — how the container joins your tailnet (hostname, auth key, and so on).
-- `SUPERVISOR_*` — the optional extras described below (state sync, backups, keepalive).
+- `SUPERVISOR_*` — the optional extras described below (state sync, backups).
 - `VAULTWARDEN_*` — vaultwarden's own settings, with a `VAULTWARDEN_` prefix added. `VAULTWARDEN_DATABASE_URL` becomes `DATABASE_URL` inside. See vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template) for the full list.
 
 If a variable is set both in the file and directly on the container, the direct value wins. An empty value means "not set". The vault's environment is default-deny: on the container env, only `VAULTWARDEN_`-prefixed keys reach the vault; in the file, bare upstream names (e.g. `DATABASE_URL`) work too — use the prefix everywhere and all three modes behave identically.
@@ -60,19 +59,9 @@ It loads them at startup and saves periodically and on shutdown. If you already 
 
 If you'd rather stay fully ephemeral, set `TAILSCALE_STATE_FILE=mem:` and use an `ephemeral=true` auth key — the container registers as a fresh node every boot and devices re-login.
 
-## Keep your database awake
-
-Some managed Postgres free tiers put idle databases to sleep, and the next login then hangs until it wakes up. Ask the container to ping the database every so often:
-
-```sh
-SUPERVISOR_DB_KEEPALIVE=300   # seconds; 0 or unset = off
-```
-
-Postgres only — it needs the database's own protocol. If the ping fails, nothing bad happens; the container just logs it.
-
 ## Back up your vault
 
-With the same S3 credentials as above, the container can also save regular backups of your vault's database to the bucket:
+The vault's database is a single SQLite file on the data volume (`/data/db.sqlite3`) — it is always awake, and there is no external database to configure. With an S3-compatible bucket (Cloudflare R2 works well), the container can save regular backups of it:
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -85,10 +74,10 @@ SUPERVISOR_DB_BACKUP=true
 
 A few things worth knowing:
 
-- Backups are taken without pausing the vault or locking anything: postgres uses `pg_dump`, MySQL/MariaDB uses a consistent snapshot, and SQLite copies itself cleanly.
+- Backups are taken without pausing the vault or locking anything: SQLite copies itself cleanly (`VACUUM INTO`), even while the vault is writing.
 - Backups are uploaded under `db/` with a timestamp in the name, then the oldest ones are deleted to respect `KEEP`. If the container dies mid-backup you lose one backup, never gain a broken one.
 - Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and, at boot, the container will load the newest backup into the database — but only if it can prove the database is empty. If it can't tell, it does nothing rather than guess. It never overwrites existing data.
-- To restore by hand: use `pg_restore` for postgres, `mariadb` for MySQL (see the commands in `.env.example`), or replace `/data/db.sqlite3` for SQLite while the vault is stopped.
+- To restore by hand: stop the vault and replace `/data/db.sqlite3` with the dump file.
 
 ### Hardening the bucket
 
