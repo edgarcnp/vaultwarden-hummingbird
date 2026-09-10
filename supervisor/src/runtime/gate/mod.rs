@@ -4,7 +4,7 @@
 //! refuses everything else (see `server`). Siblings: `probe` (loopback
 //! vault probe, shared with `healthcheck`), `healthcheck` (one-shot image
 //! HEALTHCHECK mode), `limiter` (handler admission cap), `liveness`
-//! (single-flight `/alive` verdicts).
+//! (TTL-cached `/alive` verdicts).
 
 mod healthcheck;
 mod limiter;

@@ -1,11 +1,12 @@
-//! Single-flight liveness verdict for the gate: concurrent `/alive`
-//! requests share one vaultwarden probe. The public port must not fan a
-//! probe flood out into thousands of backend connections; at most one
-//! probe runs per TTL window, and waiters join its verdict. Staleness is
-//! bounded by the same budget an unshared probe already had.
+//! TTL-cached liveness verdict for the gate: `/alive` requests within the
+//! cache window share the last probe's verdict, so a public probe flood
+//! cannot fan out into a backend flood — the backend sees at most
+//! `MAX_CONNS` (the admission cap in `server`) bounded probes per window,
+//! and a steady flood amortizes to one probe per window. Staleness is
+//! bounded by the same budget an uncached probe already had.
 
 use std::net::SocketAddr;
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::probe::{PROBE_TIMEOUT, get_alive};
@@ -16,21 +17,10 @@ use super::probe::{PROBE_TIMEOUT, get_alive};
 /// already had.
 const PROBE_TTL: Duration = PROBE_TIMEOUT;
 
-/// Slack on top of the probe budget for joining an in-flight probe.
-const WAIT_SLACK: Duration = Duration::from_millis(500);
-
 pub(super) struct Liveness {
     vault: Option<SocketAddr>,
     ttl: Duration,
-    flight: Mutex<Flight>,
-    settled: Condvar,
-}
-
-/// One probe window: the last verdict and whether one is in flight.
-#[derive(Default)]
-struct Flight {
-    verdict: Option<(Instant, bool)>,
-    probing: bool,
+    verdict: Mutex<Option<(Instant, bool)>>,
 }
 
 impl Liveness {
@@ -38,50 +28,24 @@ impl Liveness {
         Self {
             vault,
             ttl: PROBE_TTL,
-            flight: Mutex::new(Flight::default()),
-            settled: Condvar::new(),
+            verdict: Mutex::new(None),
         }
     }
 
-    /// Shared verdict: fresh cache hit, join the in-flight probe, or
-    /// probe. At most one backend probe per TTL window.
+    /// Shared verdict: a fresh cache hit, else one bounded probe (its
+    /// result becomes the new window). Both directions are cheap: the
+    /// probe is a loopback roundtrip under [`PROBE_TIMEOUT`].
     pub(super) fn alive(&self) -> bool {
-        let mut f = self.flight.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, ok)) = f.verdict {
-            if at.elapsed() < self.ttl {
-                return ok;
-            }
-            f.verdict = None;
+        let mut cached = self.verdict.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, ok)) = *cached
+            && at.elapsed() < self.ttl
+        {
+            return ok;
         }
-        if f.probing {
-            // Join the in-flight probe. Bounded: a wedged prober must not
-            // hold the gate — fail to the last verdict (or down).
-            let deadline = Instant::now() + PROBE_TIMEOUT + WAIT_SLACK;
-            loop {
-                let now = Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                let (guard, _) = self
-                    .settled
-                    .wait_timeout(f, deadline - now)
-                    .unwrap_or_else(|e| e.into_inner());
-                f = guard;
-                if !f.probing {
-                    break;
-                }
-            }
-            return f.verdict.map(|(_, ok)| ok).unwrap_or(false);
-        }
-        f.probing = true;
-        drop(f);
         let ok = self
             .vault
             .is_some_and(|addr| get_alive(addr, PROBE_TIMEOUT));
-        let mut f = self.flight.lock().unwrap_or_else(|e| e.into_inner());
-        f.probing = false;
-        f.verdict = Some((Instant::now(), ok));
-        self.settled.notify_all();
+        *cached = Some((Instant::now(), ok));
         ok
     }
 
@@ -90,8 +54,7 @@ impl Liveness {
         Self {
             vault,
             ttl,
-            flight: Mutex::new(Flight::default()),
-            settled: Condvar::new(),
+            verdict: Mutex::new(None),
         }
     }
 }

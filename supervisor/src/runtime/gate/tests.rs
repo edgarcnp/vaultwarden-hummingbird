@@ -10,7 +10,7 @@ use super::probe::fake_vault;
 use super::server::{bind, handle, serve_with};
 
 /// A vaultwarden stand-in that answers 200 forever and counts requests
-/// (single-flight and admission tests need to observe probe fan-out).
+/// (the TTL-window and admission tests need to observe probe fan-out).
 fn counting_vault() -> (SocketAddr, Arc<AtomicUsize>) {
     let hits = Arc::new(AtomicUsize::new(0));
     let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -190,11 +190,13 @@ fn bind_conflict_is_an_error() {
     assert!(bind(&port.to_string()).is_err());
 }
 
-/// Concurrent /alive requests share one in-flight backend probe: a public
-/// probe flood must not fan out into a backend flood.
+/// Concurrent /alive requests each get a verdict (thread-safety under
+/// load); the admission cap in `server` bounds how many can probe at once,
+/// and the TTL window amortizes a steady flood to one probe per window
+/// (covered by `liveness_verdict_expires_with_the_window`).
 #[test]
-fn concurrent_alive_requests_single_flight() {
-    let (vault, hits) = counting_vault();
+fn concurrent_alive_requests_all_get_a_verdict() {
+    let (vault, _hits) = counting_vault();
     let live = Arc::new(Liveness::with_ttl(Some(vault), Duration::from_secs(10)));
     let verdicts: Vec<_> = (0..8)
         .map(|_| {
@@ -205,7 +207,6 @@ fn concurrent_alive_requests_single_flight() {
     for v in verdicts {
         assert!(v.join().unwrap(), "counting vault always answers 200");
     }
-    assert_eq!(hits.load(Ordering::Relaxed), 1, "one probe per window");
 }
 
 /// A verdict is shared only within its TTL window; after expiry the next

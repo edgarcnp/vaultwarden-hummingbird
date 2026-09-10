@@ -7,9 +7,9 @@
 //!
 //! The port is public, so load is adversarial: handler threads are
 //! admitted up to a cap and excess connections get an immediate 503 (no
-//! queue, no thread growth), and `/alive` verdicts are single-flight so a
-//! probe flood costs at most one backend probe per window (see `limiter`,
-//! `liveness`).
+//! queue, no thread growth), and `/alive` verdicts are TTL-cached so a
+//! probe flood costs the backend at most one probe per window per
+//! admitted handler (see `limiter`, `liveness`).
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
