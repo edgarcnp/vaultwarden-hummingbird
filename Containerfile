@@ -88,11 +88,17 @@ RUN ARCH="${TARGETARCH:-$(uname -m)}" \
 # STAGE 2 — SUPERVISOR: Rust PID 1 (glibc lockstep with the runtime)
 
 FROM ${BUILDER_IMAGE} AS supervisor
+# TARGETARCH is BuildKit-predefined; uname fallback for non-BuildKit builders
+ARG TARGETARCH
 WORKDIR /src
 COPY supervisor/Cargo.toml supervisor/Cargo.lock ./
 COPY supervisor/src ./src
+# x86-64-v2 = RHEL 9 baseline (same tuning as the vaultwarden stage).
 # --locked: fail closed on lockfile drift
-RUN cargo build --release --locked && cp target/release/supervisor /out-supervisor
+RUN case "${TARGETARCH:-$(uname -m)}" in \
+        amd64|x86_64) export RUSTFLAGS="-Ctarget-cpu=x86-64-v2" ;; \
+    esac \
+ && cargo build --release --locked && cp target/release/supervisor /out-supervisor
 
 # STAGE 3 — VAULTWARDEN: built from source, SQLite-only
 # Maintenance note: keep comments outside RUN chains — a '#' after '\'
