@@ -1,20 +1,17 @@
 //! The container runtime: everything the supervisor *does*, as opposed to
 //! what it is configured with (`crate::config`). Grouped by responsibility:
-//! `backup` (S3 DB dump/restore), `db` (postgres plumbing + keepalive),
-//! `gate` (exposed-port health gate), `process` (supervision core: spawn,
-//! reap, bounded runs, signals, watch loop), `services` (the supervised
-//! children: tailscaled/tailscale, vaultwarden), `sync` (S3 /data state
-//! persistence).
+//! `backup` (S3 DB dump/restore), `gate` (exposed-port health gate),
+//! `process` (supervision core: spawn, reap, bounded runs, signals, watch
+//! loop), `services` (the supervised children: tailscaled/tailscale,
+//! vaultwarden), `sync` (S3 /data state persistence).
 
 mod backup;
-mod db;
 mod gate;
 mod process;
 mod services;
 mod sync;
 
 pub use backup::{restore_if_empty, tick as backup_tick};
-pub use db::db_keepalive_tick;
 pub use gate::{
     bind as gate_bind, describe as gate_describe, healthcheck as gate_healthcheck,
     serve as gate_serve,

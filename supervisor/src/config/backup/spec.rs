@@ -2,23 +2,22 @@
 
 use std::time::Duration;
 
-use super::super::dburl::DbSpec;
 use super::super::sync::SyncConfig;
 
-/// S3-backed DB dumps (opt-in): periodic snapshots pushed to
-/// `<state remote>/db`, pruned to keep-N per backend, plus an opt-in
-/// boot-time restore into an empty DB. Cloned onto the backup thread.
+/// S3-backed sqlite dumps (opt-in): periodic snapshots pushed to
+/// `<state remote>/db`, pruned to keep-N, plus an opt-in boot-time restore
+/// into an empty DB. Cloned onto the backup thread.
 #[derive(Clone)]
 pub struct DbBackupConfig {
     /// S3 credentials + backend env, shared with the state sync (cloned)
     pub sync: SyncConfig,
-    /// parsed vaultwarden database URL (dump/restore target)
-    pub db: DbSpec,
+    /// the vault's sqlite database file (dump/restore target)
+    pub db_path: String,
     /// periodic dumps enabled (SUPERVISOR_DB_BACKUP)
     pub periodic: bool,
     /// periodic dump cadence
     pub interval: Duration,
-    /// per-backend dumps kept in the bucket (oldest pruned after each push)
+    /// dumps kept in the bucket (oldest pruned after each push)
     pub keep: usize,
     /// boot-time restore into an empty DB (SUPERVISOR_DB_BACKUP_RESTORE)
     pub restore: bool,
@@ -30,5 +29,15 @@ impl DbBackupConfig {
     /// Bucket prefix holding the dumps.
     pub fn prefix(&self) -> String {
         format!("{}/db", self.sync.remote)
+    }
+
+    /// Object-name prefix for the dumps (`<remote>/db/sqlite-…`).
+    pub fn db_label(&self) -> &'static str {
+        "sqlite"
+    }
+
+    /// Backup file extension of the dump format.
+    pub fn db_ext(&self) -> &'static str {
+        "sqlite3"
     }
 }

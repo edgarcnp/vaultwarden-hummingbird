@@ -2,20 +2,13 @@
 //! restore miss-never-corrupt. Anything uncertain is Err (ambiguous),
 //! never "empty" — callers fail closed.
 
-use crate::config::{DbBackupConfig, DbSpec};
+use crate::config::DbBackupConfig;
 
-/// Emptiness per backend: sqlite = file absent; postgres = `users` table
-/// verifiably missing; mysql = information_schema count via the mariadb
-/// client.
-pub(super) fn is_empty(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Result<bool, String> {
-    match &cfg.db {
-        DbSpec::Sqlite { path } => super::sqlite::is_empty(path),
-        DbSpec::Postgres { .. } => super::postgres::is_empty(&cfg.db),
-        DbSpec::Mysql { db, .. } => super::mariadb::table_count(cfg, abort).map(|count| match db {
-            None => false,
-            Some(_) => count == 0,
-        }),
-    }
+/// Emptiness: the sqlite file is absent, or a readable database with zero
+/// user tables. Corrupt/unreadable is Err (ambiguous) — never silently
+/// treated as empty, never silently kept.
+pub(super) fn is_empty(cfg: &DbBackupConfig) -> Result<bool, String> {
+    super::sqlite::is_empty(&cfg.db_path)
 }
 
 #[cfg(test)]
@@ -24,9 +17,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sqlite_spec_dispatches_on_path_presence() {
+    fn missing_file_is_empty() {
         let cfg = support::cfg();
-        let no_abort = || false;
-        assert!(is_empty(&cfg, &no_abort).unwrap());
+        assert!(is_empty(&cfg).unwrap());
     }
 }

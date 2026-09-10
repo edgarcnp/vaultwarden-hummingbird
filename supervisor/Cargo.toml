@@ -7,13 +7,9 @@ edition = "2024"
 dotenvy = { version = "0.15", default-features = false }
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
-percent-encoding = { version = "2", default-features = false }
-postgres = { version = "0.19", default-features = false }
-postgres_rustls = "0.1.6"
+percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "custom-provider"] }
 signal-hook = { version = "0.4", default-features = false }
-url = { version = "2", default-features = false }
 
 [profile.release]
 opt-level = 3

@@ -5,14 +5,11 @@
 
 use std::time::Duration;
 
-use crate::config::DbSpec;
 use crate::util::log;
 
-/// `VACUUM INTO` a fresh consistent copy into `staged`.
-pub(crate) fn dump(db: &DbSpec, staged: &str) -> bool {
-    let DbSpec::Sqlite { path } = db else {
-        return false;
-    };
+/// `VACUUM INTO` a fresh consistent copy of the sqlite DB at `path` into
+/// `staged`.
+pub(crate) fn dump(path: &str, staged: &str) -> bool {
     let conn = match rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -55,10 +52,7 @@ mod tests {
         std::fs::write(&src, b"not a database").unwrap();
         let staged = dir.join("dump.sqlite3");
         std::fs::write(&staged, b"pre-existing sentinel").unwrap();
-        let db = DbSpec::Sqlite {
-            path: src.to_string_lossy().into_owned(),
-        };
-        assert!(!dump(&db, staged.to_str().unwrap()));
+        assert!(!dump(src.to_str().unwrap(), staged.to_str().unwrap()));
         assert!(
             !staged.exists(),
             "failed dump must not leave partial output"
@@ -79,10 +73,7 @@ mod tests {
             .unwrap();
         }
         let staged = dir.join("dumped.sqlite3");
-        let db = DbSpec::Sqlite {
-            path: src.to_string_lossy().into_owned(),
-        };
-        assert!(dump(&db, staged.to_str().unwrap()));
+        assert!(dump(src.to_str().unwrap(), staged.to_str().unwrap()));
         let copy = rusqlite::Connection::open_with_flags(
             &staged,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::config::{DbBackupConfig, DbSpec, SyncConfig};
+use crate::config::{DbBackupConfig, SyncConfig};
 
 /// Unique-ish staging dir per test invocation.
 pub(super) fn next_staging() -> String {
@@ -17,15 +17,9 @@ pub(super) fn next_staging() -> String {
     dir.to_string_lossy().into_owned()
 }
 
-/// A sqlite DbBackupConfig with a unique staging dir.
+/// A DbBackupConfig over a nonexistent sqlite source with a unique
+/// staging dir.
 pub(super) fn cfg() -> DbBackupConfig {
-    cfg_with(DbSpec::Sqlite {
-        path: "/nonexistent/db.sqlite3".into(),
-    })
-}
-
-/// A DbBackupConfig over an explicit backend spec with a unique staging dir.
-pub(super) fn cfg_with(db: DbSpec) -> DbBackupConfig {
     DbBackupConfig {
         sync: SyncConfig::new(
             "r2:vw".into(),
@@ -34,7 +28,7 @@ pub(super) fn cfg_with(db: DbSpec) -> DbBackupConfig {
             String::new(),
             Duration::from_secs(60),
         ),
-        db,
+        db_path: "/nonexistent/db.sqlite3".into(),
         periodic: true,
         interval: Duration::from_secs(43_200),
         keep: 3,

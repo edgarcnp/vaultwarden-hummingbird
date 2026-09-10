@@ -94,7 +94,7 @@ QUOTED = "hello world # not a comment"
 SINGLE = 'raw # value'
 export TAILSCALE_AUTHKEY=tskey-auth-file
 SUPERVISOR_ENV_FILE=/elsewhere
-VAULTWARDEN_DATABASE_URL=postgres://db/vw
+VAULTWARDEN_DATABASE_URL=sqlite:///data/db.sqlite3
 
 not a valid line
 "#,
@@ -125,7 +125,7 @@ not a valid line
         );
         assert_eq!(
             cfg.child.get("DATABASE_URL").map(String::as_str),
-            Some("postgres://db/vw")
+            Some("sqlite:///data/db.sqlite3")
         );
         assert_eq!(
             cfg.knobs.get("SUPERVISOR_ENV_FILE").map(String::as_str),

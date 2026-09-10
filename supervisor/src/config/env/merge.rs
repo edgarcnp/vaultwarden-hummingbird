@@ -5,7 +5,6 @@ use std::env;
 
 use crate::config::backup::{DbBackupConfig, resolve_backup};
 use crate::config::dotenv::FileConfig;
-use crate::config::keepalive::DbKeepalive;
 use crate::config::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
@@ -39,8 +38,6 @@ pub struct Config {
     pub sync: Option<SyncConfig>,
     /// DB backup/restore (None = disabled)
     pub backup: Option<DbBackupConfig>,
-    /// DB keepalive ping (None = disabled)
-    pub db_keepalive: Option<DbKeepalive>,
     /// verbatim vaultwarden env (from the dotenv file, if any)
     pub vw_env: Vec<(String, String)>,
 }
@@ -110,9 +107,6 @@ impl Config {
             userspace: flag("TAILSCALE_USERSPACE", true),
             sync,
             backup,
-            // child key: file wins over env — the ping must reach the same
-            // DB the vault uses
-            db_keepalive: DbKeepalive::from_parts(&knob("SUPERVISOR_DB_KEEPALIVE", ""), db_url),
             vw_env: file.child.into_iter().collect(),
         })
     }

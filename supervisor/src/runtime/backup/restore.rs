@@ -1,10 +1,9 @@
 //! The boot-time restore path: verify emptiness (fail closed), pull the
-//! newest backup, dispatch to the per-backend import. A failed import is
-//! fatal: starting the vault on a half-restored database would surface
-//! partial state as the vault's truth — the container exits and the
-//! orchestrator retries instead.
+//! newest backup, import it. A failed import is fatal: starting the vault
+//! on a half-restored database would surface partial state as the vault's
+//! truth — the container exits and the orchestrator retries instead.
 
-use crate::config::{DbBackupConfig, DbSpec};
+use crate::config::DbBackupConfig;
 use crate::util::log;
 
 use super::check::is_empty;
@@ -21,7 +20,7 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> bool 
     if !cfg.restore {
         return true;
     }
-    match is_empty(cfg, &abort) {
+    match is_empty(cfg) {
         Err(e) => log::err(&format!(
             "db restore: cannot verify the DB is empty ({e}); not restoring (fail-closed)"
         )),
@@ -50,10 +49,10 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> bool 
     true
 }
 
-/// The newest dump object for this backend (name order == time order).
+/// The newest dump object (name order == time order).
 fn newest_object(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Option<String> {
     let prefix = cfg.prefix();
-    let pattern = format!("{prefix}/{}-*", cfg.db.label());
+    let pattern = format!("{prefix}/{}-*", cfg.db_label());
     let mut names = super::tools::list_objects(cfg, &pattern, abort)?;
     names.pop().map(|name| format!("{prefix}/{name}"))
 }
@@ -63,17 +62,13 @@ fn restore_object(cfg: &DbBackupConfig, object: &str, abort: &impl Fn() -> bool)
     if !sweep_staging(&cfg.staging) {
         return false;
     }
-    let staged = format!("{}/restore-{}", cfg.staging, cfg.db.label());
+    let staged = format!("{}/restore-{}", cfg.staging, cfg.db_label());
     if !rclone(cfg, &["copyto", object, &staged], abort) {
         log::err("db restore: download failed");
         let _ = std::fs::remove_file(&staged);
         return false;
     }
-    let ok = match &cfg.db {
-        DbSpec::Postgres { .. } => super::postgres::import(cfg, &staged, abort),
-        DbSpec::Mysql { .. } => super::mariadb::import(cfg, &staged, abort),
-        DbSpec::Sqlite { path } => super::sqlite::import(&staged, path),
-    };
+    let ok = super::sqlite::import(&staged, &cfg.db_path);
     let _ = std::fs::remove_file(&staged);
     ok
 }

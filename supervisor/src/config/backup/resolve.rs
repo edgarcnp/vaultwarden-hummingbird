@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use super::super::consts::{BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT, BACKUP_STAGING};
-use super::super::dburl::{self, DbSpec};
+use super::super::dburl;
 use super::super::env::{parse_count, parse_flag};
 use super::super::sync::SyncConfig;
 use super::spec::DbBackupConfig;
@@ -39,15 +39,16 @@ pub(crate) fn resolve_backup(
         return None;
     };
 
-    // The vault's DB: explicit VAULTWARDEN_DATABASE_URL, else vaultwarden's
-    // own default (sqlite under DATA_FOLDER, which the image pins to /data).
-    let db = match db_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
-        Some(url) => match dburl::parse(url) {
-            Some(spec) => spec,
+    // The vault's sqlite DB: explicit VAULTWARDEN_DATABASE_URL (vaultwarden
+    // is built for sqlite only), else vaultwarden's own default (sqlite
+    // under DATA_FOLDER, which the image pins to /data).
+    let db_path = match db_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        Some(url) => match dburl::sqlite_path(url) {
+            Some(path) => path,
             None => {
                 log::err(&format!(
-                    "config: unsupported VAULTWARDEN_DATABASE_URL scheme '{}' (want postgres://, \
-                     mysql:// or sqlite://); backup disabled",
+                    "config: VAULTWARDEN_DATABASE_URL scheme '{}' is not sqlite (the image \
+                     builds sqlite only); backup disabled",
                     log::sanitize(&dburl::scheme_for_log(url))
                 ));
                 return None;
@@ -57,9 +58,7 @@ pub(crate) fn resolve_backup(
             log::info(
                 "config: no VAULTWARDEN_DATABASE_URL; backup assumes the default sqlite DB at /data/db.sqlite3",
             );
-            DbSpec::Sqlite {
-                path: "/data/db.sqlite3".to_string(),
-            }
+            "/data/db.sqlite3".to_string()
         }
     };
 
@@ -89,7 +88,7 @@ pub(crate) fn resolve_backup(
 
     Some(DbBackupConfig {
         sync: sync.clone(),
-        db,
+        db_path,
         periodic,
         interval: Duration::from_secs(secs),
         keep: keep as usize,
@@ -201,12 +200,7 @@ mod tests {
         assert_eq!(cfg.interval, Duration::from_secs(BACKUP_INTERVAL_DEFAULT));
         assert_eq!(cfg.keep, BACKUP_KEEP_DEFAULT as usize);
         // no VAULTWARDEN_DATABASE_URL -> default sqlite
-        assert_eq!(
-            cfg.db,
-            DbSpec::Sqlite {
-                path: "/data/db.sqlite3".into()
-            }
-        );
+        assert_eq!(cfg.db_path, "/data/db.sqlite3");
         assert_eq!(cfg.prefix(), "r2:vw-state/db");
     }
 
@@ -219,12 +213,12 @@ mod tests {
                 S3_KNOBS[2],
                 ("SUPERVISOR_DB_BACKUP_RESTORE", "true"),
             ],
-            "postgres://u:p@h/db",
+            "sqlite:///data/vault.sqlite3",
         )
         .expect("restore enabled");
         assert!(!cfg.periodic);
         assert!(cfg.restore);
-        assert_eq!(cfg.db.label(), "postgres");
+        assert_eq!(cfg.db_path, "/data/vault.sqlite3");
     }
 
     #[test]
@@ -256,20 +250,27 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_url_disables() {
+    fn non_sqlite_url_disables() {
         // VAULTWARDEN_DATABASE_URL is not a supervisor knob; it reaches the
         // resolver through the db_url argument, mirroring what env::build does.
-        assert!(
-            resolved_with_url(
-                &[
-                    S3_KNOBS[0],
-                    S3_KNOBS[1],
-                    S3_KNOBS[2],
-                    ("SUPERVISOR_DB_BACKUP", "true"),
-                ],
-                "oracle://u:p@h/db",
-            )
-            .is_none()
-        );
+        for url in [
+            "oracle://u:p@h/db",
+            "postgres://u:p@h/db",
+            "mysql://u:p@h/db",
+        ] {
+            assert!(
+                resolved_with_url(
+                    &[
+                        S3_KNOBS[0],
+                        S3_KNOBS[1],
+                        S3_KNOBS[2],
+                        ("SUPERVISOR_DB_BACKUP", "true"),
+                    ],
+                    url,
+                )
+                .is_none(),
+                "{url}"
+            );
+        }
     }
 }

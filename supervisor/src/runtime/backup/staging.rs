@@ -61,7 +61,7 @@ mod tests {
     fn staging_sweeps_leftovers() {
         let dir = next_staging();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(format!("{dir}/postgres-stale"), "garbage").unwrap();
+        std::fs::write(format!("{dir}/sqlite-stale"), "garbage").unwrap();
         assert!(sweep_staging(&dir));
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert!(entries.is_empty());

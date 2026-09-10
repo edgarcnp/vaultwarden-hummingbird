@@ -1,16 +1,13 @@
 //! S3 DB backup (opt-in via SUPERVISOR_DB_BACKUP*): periodic consistent
-//! dumps of the vault's database pushed to `<state remote>/db`, pruned to
-//! keep-N per backend — plus an opt-in boot-time restore into an empty DB.
+//! dumps of the vault's sqlite database pushed to `<state remote>/db`,
+//! pruned to keep-N — plus an opt-in boot-time restore into an empty DB.
 //!
 //! The orchestrators `dump` (sweep -> dump -> push -> prune) and `restore`
-//! (boot-time) dispatch into per-backend folders (`postgres/`, `mariadb/`,
-//! `sqlite/`); `check` dispatches the emptiness gate; `tools` runs the
-//! bounded external commands (rclone push/prune + dump/restore binaries),
-//! `staging` owns the staging dir, `timestamp` the object names.
+//! (boot-time) drive the in-process sqlite paths (`sqlite/`); `check`
+//! dispatches the emptiness gate; `tools` runs the bounded external rclone
+//! commands, `staging` owns the staging dir, `timestamp` the object names.
 //!
-//! Consistency per backend: postgres via `pg_dump` (MVCC snapshot, no
-//! downtime); mysql via `mariadb-dump --single-transaction` (InnoDB
-//! snapshot); sqlite via `VACUUM INTO` (consistent copy under WAL).
+//! Consistency: sqlite via `VACUUM INTO` (consistent copy under WAL).
 //! Every phase is bounded and non-fatal: a failed backup logs and
 //! continues; the vault never waits on it.
 //!
@@ -18,13 +15,10 @@
 //! are pushed to a NEW timestamped object (S3 objects are atomic — a
 //! partial upload never materializes); pruning runs strictly after a
 //! successful push. Nothing here writes to the live DB except the opt-in
-//! restore, which only ever touches a verifiably empty database. Secrets
-//! ride env / a 0600 defaults-file — never argv.
+//! restore, which only ever touches a verifiably empty database.
 
 mod check;
 mod dump;
-mod mariadb;
-mod postgres;
 mod prune;
 mod restore;
 mod sqlite;

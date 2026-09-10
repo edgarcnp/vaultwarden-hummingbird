@@ -1,8 +1,6 @@
-//! The periodic backup cycle (sweep -> dump -> push -> prune): the
-//! backend-agnostic orchestrator. Per-backend dumps live in the
-//! `postgres`/`mariadb`/`sqlite` modules.
+//! The periodic backup cycle (sweep -> dump -> push -> prune).
 
-use crate::config::{DbBackupConfig, DbSpec};
+use crate::config::DbBackupConfig;
 use crate::util::log;
 
 use super::prune::prune;
@@ -18,18 +16,13 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         return;
     }
     let ts = timestamp();
-    let staged = format!("{}/{}-{ts}.{}", cfg.staging, cfg.db.label(), cfg.db.ext());
-    let object = format!("{}/{}-{ts}.{}", cfg.prefix(), cfg.db.label(), cfg.db.ext());
+    let staged = format!("{}/{}-{ts}.{}", cfg.staging, cfg.db_label(), cfg.db_ext());
+    let object = format!("{}/{}-{ts}.{}", cfg.prefix(), cfg.db_label(), cfg.db_ext());
 
     if !sweep_staging(&cfg.staging) {
         return;
     }
-    let dumped = match &cfg.db {
-        DbSpec::Postgres { .. } => super::postgres::dump(cfg, &staged, &abort),
-        DbSpec::Mysql { .. } => super::mariadb::dump(cfg, &staged, &abort),
-        DbSpec::Sqlite { .. } => super::sqlite::dump(&cfg.db, &staged),
-    };
-    if !dumped {
+    if !super::sqlite::dump(&cfg.db_path, &staged) {
         log::err("db backup: dump failed; continuing (bucket unchanged)");
         return;
     }

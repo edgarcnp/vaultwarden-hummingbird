@@ -1,32 +1,13 @@
-//! Bounded invocations of the external backup tools (rclone and the
-//! dump/restore binaries), with staged-file cleanup and object listing.
+//! Bounded invocations of the external backup tool (rclone), with object
+//! listing. The sqlite dump/restore itself is in-process (`sqlite/`).
 
-use crate::config::{BACKUP_TIMEOUT, DbBackupConfig, RCLONE, SYNC_TIMEOUT};
-use crate::runtime::{run_bounded_capture, run_bounded_env};
-use crate::util::log;
+use crate::config::{DbBackupConfig, RCLONE, SYNC_TIMEOUT};
+use crate::runtime::run_bounded_capture;
+use crate::runtime::run_bounded_env;
 
 /// One bounded rclone invocation with the shared backend env.
 pub(crate) fn rclone(cfg: &DbBackupConfig, args: &[&str], abort: &impl Fn() -> bool) -> bool {
     run_bounded_env(SYNC_TIMEOUT, RCLONE, args, &cfg.sync.env, abort)
-}
-
-/// Run one dump/import tool, bounded; logs (secret-free) on failure and
-/// removes the staged artifact it would have produced.
-pub(crate) fn tool(
-    name: &str,
-    prog: &str,
-    args: &[&str],
-    env: &[(String, String)],
-    staged: &str,
-    abort: &impl Fn() -> bool,
-) -> bool {
-    if run_bounded_env(BACKUP_TIMEOUT, prog, args, env, abort) {
-        true
-    } else {
-        let _ = std::fs::remove_file(staged);
-        log::err(&format!("db backup: {name} failed or timed out"));
-        false
-    }
 }
 
 /// Names of the objects under `pattern` (`rclone lsf`), sorted so name

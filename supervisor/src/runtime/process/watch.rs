@@ -1,6 +1,6 @@
 //! The vault watch loop and container teardown: the single reaper of the
-//! PID namespace, periodic state sync, DB keepalive ticks, and the ordered
-//! shutdown that brings every child down before exiting.
+//! PID namespace, periodic state sync, and the ordered shutdown that
+//! brings every child down before exiting.
 
 use std::process::exit;
 use std::time::{Duration, Instant};
@@ -9,9 +9,9 @@ use nix::sys::signal::Signal;
 
 use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SyncConfig};
 use crate::runtime::{
-    Gone, POLL, Pid, TERM_GRACE, backup_tick, db_keepalive_tick, exit_code, exit_reason, gate_bind,
-    gate_describe, gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group, stopping,
-    sync_state, take_stop,
+    Gone, POLL, Pid, TERM_GRACE, backup_tick, exit_code, exit_reason, gate_bind, gate_describe,
+    gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group, stopping, sync_state,
+    take_stop,
 };
 use crate::util::log;
 
@@ -87,8 +87,6 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
     }
 
     let mut last_sync = Instant::now();
-    let mut last_sync_keepalive = Instant::now();
-    let mut db_last_ok = None;
     let code = 'watch: loop {
         if let Some((pid, raw)) = reap_any() {
             if pid == vw {
@@ -125,12 +123,6 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
         {
             sync_state(sync, stopping);
             last_sync = Instant::now();
-        }
-        if let Some(db) = &cfg.db_keepalive
-            && last_sync_keepalive.elapsed() >= db.interval
-        {
-            db_keepalive_tick(db, &mut db_last_ok);
-            last_sync_keepalive = Instant::now();
         }
         std::thread::sleep(POLL);
     };
