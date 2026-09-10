@@ -3,9 +3,9 @@
 
 use std::env;
 
-use crate::config::backup::{DbBackupConfig, resolve_backup};
+use crate::config::backup::{resolve_backup, DbBackupConfig};
 use crate::config::dotenv::FileConfig;
-use crate::config::sync::{SyncConfig, resolve_sync};
+use crate::config::sync::{resolve_sync, SyncConfig};
 use crate::util::log;
 
 use super::knobs::{non_empty, parse_flag, resolve_service, valid_port};
@@ -16,7 +16,8 @@ pub struct Config {
     pub state: String,
     /// LocalAPI unix socket (writable, non-volume path)
     pub socket: String,
-    /// exposed (gatekeeper) port: VAULTWARDEN_PORT > VAULTWARDEN_ROCKET_PORT > 8080
+    /// exposed (gatekeeper) port: VAULTWARDEN_PORT > 8080 (the dotenv
+    /// file may also set bare ROCKET_PORT, below env)
     pub port: String,
     /// vaultwarden's port (`port + 1`, loopback-only). None = exposed port
     /// is 65535: boot must fail closed.
@@ -43,8 +44,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// Merge order: knobs = env > file > default; port = VAULTWARDEN_PORT >
-    /// VAULTWARDEN_ROCKET_PORT (env) > file ROCKET_PORT > 8080; vaultwarden
+    /// Merge order: knobs = env > file > default; port = VAULTWARDEN_PORT
+    /// (env) > file ROCKET_PORT > 8080; vaultwarden
     /// keys = file > env.
     /// Empty = unset; bad booleans warn and take the default. Returns None
     /// when a required knob is missing (TAILSCALE_AUTHKEY): the vault is
@@ -57,7 +58,6 @@ impl Config {
     /// never mutating the process env (unsafe and racy).
     fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
         let port = valid_port(lookup("VAULTWARDEN_PORT"))
-            .or_else(|| valid_port(lookup("VAULTWARDEN_ROCKET_PORT")))
             .or_else(|| valid_port(file.child.get("ROCKET_PORT").cloned()))
             .unwrap_or_else(|| "8080".into());
         let vault_port = port
@@ -175,15 +175,10 @@ mod tests {
         assert!(cfg.vw_env.is_empty());
         assert!(cfg.sync.is_none());
 
-        let cfg = mk(&[
-            ("VAULTWARDEN_PORT", "3000"),
-            ("VAULTWARDEN_ROCKET_PORT", "1111"),
-        ]);
+        let cfg = mk(&[("VAULTWARDEN_PORT", "3000")]);
         assert_eq!(cfg.port, "3000");
         assert_eq!(cfg.vault_port.as_deref(), Some("3001"));
-        let cfg = mk(&[("VAULTWARDEN_ROCKET_PORT", "1111")]);
-        assert_eq!(cfg.port, "1111");
-        let cfg = mk(&[("VAULTWARDEN_PORT", ""), ("VAULTWARDEN_ROCKET_PORT", "")]);
+        let cfg = mk(&[("VAULTWARDEN_PORT", "")]);
         assert_eq!(cfg.port, "8080");
 
         // 65535 leaves no room above the exposed port: fail closed.
