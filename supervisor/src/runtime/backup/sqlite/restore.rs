@@ -1,7 +1,7 @@
 //! SQLite restore: emptiness gate (absent, or a valid database with no
-//! user tables) and import (integrity check on the staged copy, then
-//! atomic rename into place). In-process via bundled rusqlite — no
-//! external tool. Same filesystem (data volume), so the rename has no
+//! user tables) and import (integrity check on the staged copy, then a
+//! no-replace link into place). In-process via bundled rusqlite — no
+//! external tool. Same filesystem (data volume), so the link has no
 //! torn-copy window.
 
 use std::os::unix::fs::PermissionsExt;
@@ -64,6 +64,12 @@ pub(crate) fn import(staged: &str, path: &str) -> bool {
             // Unlink the staging name; failure only leaves a stale copy
             // for the next staging sweep, never a wrong live file.
             let _ = std::fs::remove_file(staged);
+            // The published DB must not inherit the replaced file's WAL
+            // siblings: a stale `<db>-wal` from the old inode must not be
+            // picked up by the next opener. Nothing else has the DB open
+            // at boot time, so removing them is safe.
+            let _ = std::fs::remove_file(format!("{path}-wal"));
+            let _ = std::fs::remove_file(format!("{path}-shm"));
             true
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -200,6 +206,31 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert!(!staged.exists(), "staging name is unlinked after publish");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A published DB must not inherit the replaced file's WAL siblings:
+    /// stale `-wal`/`-shm` files are removed on import (a stale WAL from
+    /// the old inode must never be picked up by the next opener).
+    #[test]
+    fn import_removes_stale_wal_siblings() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-sqlw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("staged.sqlite3");
+        let conn = rusqlite::Connection::open(&staged).unwrap();
+        conn.execute_batch("CREATE TABLE restored (v TEXT);")
+            .unwrap();
+        drop(conn);
+        let live = dir.join("live.sqlite3");
+        let wal = dir.join("live.sqlite3-wal");
+        let shm = dir.join("live.sqlite3-shm");
+        std::fs::write(&wal, b"stale").unwrap();
+        std::fs::write(&shm, b"stale").unwrap();
+
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()));
+
+        assert!(!wal.exists(), "stale -wal must be removed");
+        assert!(!shm.exists(), "stale -shm must be removed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
