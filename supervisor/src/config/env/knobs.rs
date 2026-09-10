@@ -68,6 +68,25 @@ pub(crate) fn parse_flag(key: &str, raw: &str, default: bool) -> bool {
     }
 }
 
+/// A numeric knob from its raw value: empty = `default` (silently — unset
+/// means default); invalid = warn and take `default`. Zero is returned
+/// as-is: its meaning (off vs. dangerous) is the caller's to decide.
+pub(crate) fn parse_count(key: &str, raw: &str, default: u64) -> u64 {
+    if raw.is_empty() {
+        return default;
+    }
+    match raw.parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            log::err(&format!(
+                "config: invalid {key} '{}' (want a number); using default {default}",
+                log::sanitize(raw)
+            ));
+            default
+        }
+    }
+}
+
 /// Tailscale Service reference from `TAILSCALE_SERVICE`: a bare name or an
 /// already prefixed `svc:<name>` becomes `svc:<name>`; anything else
 /// (empty, bare `svc:`) warns and disables the advertisement.

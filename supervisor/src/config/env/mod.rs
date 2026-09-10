@@ -3,6 +3,6 @@
 mod knobs;
 mod merge;
 
-pub(crate) use knobs::parse_flag;
 pub use knobs::{is_supervisor_key, vaultwarden_key};
+pub(crate) use knobs::{parse_count, parse_flag};
 pub use merge::Config;

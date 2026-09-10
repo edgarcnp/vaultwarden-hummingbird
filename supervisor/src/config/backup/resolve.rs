@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use super::super::consts::{BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT, BACKUP_STAGING};
 use super::super::dburl::{self, DbSpec};
-use super::super::env::parse_flag;
+use super::super::env::{parse_count, parse_flag};
 use super::super::sync::SyncConfig;
 use super::spec::DbBackupConfig;
 use crate::util::log;
@@ -64,43 +64,27 @@ pub(crate) fn resolve_backup(
     };
 
     let raw_interval = knob("SUPERVISOR_DB_BACKUP_INTERVAL", "");
-    let secs = match raw_interval.parse::<u64>() {
-        Ok(s) if s > 0 => s,
-        Ok(_) => {
+    let secs = match parse_count(
+        "SUPERVISOR_DB_BACKUP_INTERVAL",
+        &raw_interval,
+        BACKUP_INTERVAL_DEFAULT,
+    ) {
+        0 => {
             log::err("config: SUPERVISOR_DB_BACKUP_INTERVAL=0; using default");
             BACKUP_INTERVAL_DEFAULT
         }
-        Err(_) => {
-            if !raw_interval.is_empty() {
-                log::err(&format!(
-                    "config: invalid SUPERVISOR_DB_BACKUP_INTERVAL '{}'; \
-                     using default {BACKUP_INTERVAL_DEFAULT}s",
-                    log::sanitize(&raw_interval)
-                ));
-            }
-            BACKUP_INTERVAL_DEFAULT
-        }
+        s => s,
     };
 
     let raw_keep = knob("SUPERVISOR_DB_BACKUP_KEEP", "");
-    let keep = match raw_keep.parse::<u64>() {
-        Ok(k) if k > 0 => k,
-        Ok(_) => {
+    let keep = match parse_count("SUPERVISOR_DB_BACKUP_KEEP", &raw_keep, BACKUP_KEEP_DEFAULT) {
+        0 => {
             log::err(
                 "config: SUPERVISOR_DB_BACKUP_KEEP=0 would delete every backup; using default",
             );
             BACKUP_KEEP_DEFAULT
         }
-        Err(_) => {
-            if !raw_keep.is_empty() {
-                log::err(&format!(
-                    "config: invalid SUPERVISOR_DB_BACKUP_KEEP '{}'; \
-                     using default {BACKUP_KEEP_DEFAULT}",
-                    log::sanitize(&raw_keep)
-                ));
-            }
-            BACKUP_KEEP_DEFAULT
-        }
+        k => k,
     };
 
     Some(DbBackupConfig {

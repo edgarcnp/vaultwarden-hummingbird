@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use super::super::consts::SYNC_INTERVAL_DEFAULT;
+use super::super::env::parse_count;
 use super::spec::{SyncConfig, remote_env_name};
 use crate::util::log;
 
@@ -31,18 +32,11 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
             ));
             None
         } else {
-            let raw_interval = knob("SUPERVISOR_S3_SYNC_INTERVAL", "");
-            let secs: u64 = match raw_interval.parse() {
-                Ok(secs) => secs,
-                Err(_) => {
-                    log::err(&format!(
-                        "config: invalid SUPERVISOR_S3_SYNC_INTERVAL '{}'; \
-                         using default {SYNC_INTERVAL_DEFAULT}s",
-                        log::sanitize(&raw_interval)
-                    ));
-                    SYNC_INTERVAL_DEFAULT
-                }
-            };
+            let secs = parse_count(
+                "SUPERVISOR_S3_SYNC_INTERVAL",
+                &knob("SUPERVISOR_S3_SYNC_INTERVAL", ""),
+                SYNC_INTERVAL_DEFAULT,
+            );
             Some(SyncConfig::new(
                 remote,
                 key_id,
