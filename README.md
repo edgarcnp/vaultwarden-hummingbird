@@ -35,7 +35,7 @@ The variables fall into three groups:
 - `SUPERVISOR_*` — the optional extras described below (state sync, backups, keepalive).
 - `VAULTWARDEN_*` — vaultwarden's own settings, with a `VAULTWARDEN_` prefix added. `VAULTWARDEN_DATABASE_URL` becomes `DATABASE_URL` inside. See vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template) for the full list.
 
-If a variable is set both in the file and directly on the container, the direct value wins. An empty value means "not set".
+If a variable is set both in the file and directly on the container, the direct value wins. An empty value means "not set". The vault's environment is default-deny: on the container env, only `VAULTWARDEN_`-prefixed keys reach the vault; in the file, bare upstream names (e.g. `DATABASE_URL`) work too — use the prefix everywhere and all three modes behave identically.
 
 ### Tailscale
 

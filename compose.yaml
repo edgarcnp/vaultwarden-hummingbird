@@ -1,7 +1,9 @@
 # Local runner (podman compose / docker compose). One config file (.env,
 # from .env.example), mounted read-only; the supervisor distributes it:
 # SUPERVISOR_*/TAILSCALE_* stay with PID 1, VAULTWARDEN_* reach vaultwarden
-# under the stripped upstream name (the rest is forwarded verbatim).
+# under the stripped upstream name, bare upstream names in the file are
+# forwarded verbatim. Container env is default-deny: only VAULTWARDEN_*
+# keys reach the vault.
 # Alternative: env_file: .env (all keys in container env).
 
 services:
