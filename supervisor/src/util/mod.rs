@@ -2,3 +2,6 @@
 
 pub mod log;
 pub mod net;
+mod staged;
+
+pub use staged::StagedFile;

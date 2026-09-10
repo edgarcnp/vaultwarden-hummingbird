@@ -1,13 +1,11 @@
 //! tailscaled / tailscale CLI control.
 
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 use std::time::Duration;
 
 use crate::config::{TAILSCALE, TAILSCALED};
 use crate::runtime::{Pid, apply_env, run_bounded, run_bounded_capture, spawn};
-use crate::util::log;
+use crate::util::{StagedFile, log};
 
 /// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
 /// /dev/net/tun). `--statedir` (derived from the state file's dir, on the
@@ -42,10 +40,17 @@ pub fn tailscale_up(
     timeout: Duration,
     abort: impl Fn() -> bool,
 ) -> bool {
-    let Some(key_file) = stage_authkey(authkey) else {
-        log::err("tailscale up: cannot stage authkey file; skipping authentication");
-        return false;
+    let mut key_file = match StagedFile::create("ts-authkey") {
+        Ok(f) => f,
+        Err(_) => {
+            log::err("tailscale up: cannot stage authkey file; skipping authentication");
+            return false;
+        }
     };
+    if key_file.write_all(authkey.as_bytes()).is_err() {
+        log::err("tailscale up: cannot write authkey file; skipping authentication");
+        return false;
+    }
     let ok = run_bounded(
         timeout,
         TAILSCALE,
@@ -53,46 +58,15 @@ pub fn tailscale_up(
             "--socket",
             socket,
             "up",
-            &format!("--auth-key=file:{key_file}"),
+            &format!("--auth-key=file:{}", key_file.path()),
             "--hostname",
             hostname,
             "--accept-dns=false",
         ],
         abort,
     );
-    let _ = std::fs::remove_file(&key_file);
+    drop(key_file); // unlink the authkey (0600 staging contract)
     ok
-}
-
-/// Stage the authkey under a unique 0600 file in /tmp; the sequence number
-/// keeps paths collision-proof for tests and retries.
-fn stage_authkey(authkey: &str) -> Option<String> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let path = format!(
-        "/tmp/ts-authkey-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    write_authkey_file(&path, authkey).ok().map(|_| path)
-}
-
-/// Create `path` (0600, must not pre-exist) holding `authkey`; a partial
-/// write removes the file (we only ever clean up files we created).
-fn write_authkey_file(path: &str, authkey: &str) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    if let Err(e) = file
-        .write_all(authkey.as_bytes())
-        .and_then(|_| file.sync_all())
-    {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-        return Err(e);
-    }
-    Ok(())
 }
 
 /// `tailscale serve`: inbound tailnet path for the loopback vault
@@ -183,30 +157,5 @@ mod tests {
             r#"{"Web":{"https://n.ts.net:443":{"Handlers":[{"Proxy":"http://127.0.0.1:9999"}]}}}"#,
             target
         ));
-    }
-
-    /// The staged authkey: 0600 perms, verbatim content, and it is the file
-    /// `--auth-key=file:` will read back. (Removal after `up` is covered by
-    /// the caller's cleanup line; here we just don't leave it behind.)
-    #[test]
-    fn authkey_is_staged_0600_with_verbatim_content() {
-        use std::os::unix::fs::PermissionsExt;
-        let path = stage_authkey("tskey-auth-test").expect("staged");
-        let meta = std::fs::metadata(&path).expect("exists");
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tskey-auth-test");
-        assert!(std::fs::remove_file(&path).is_ok());
-    }
-
-    /// A path that cannot be created must fail cleanly: no file, no partial
-    /// write (the cleanup-after-open path removes the created file).
-    #[test]
-    fn authkey_write_failure_creates_nothing() {
-        let bad = std::env::temp_dir()
-            .join(format!("vw-sup-missing-{}", std::process::id()))
-            .join("nested")
-            .join("authkey");
-        assert!(write_authkey_file(bad.to_str().unwrap(), "secret").is_err());
-        assert!(!bad.exists());
     }
 }

@@ -6,7 +6,6 @@
 //! namespace-wide reaper can reap the zombie first — the registry
 //! preserves the verdict that std's `ECHILD` would otherwise destroy.
 
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -17,7 +16,7 @@ use nix::unistd::Pid as NixPid;
 
 use super::child::POLL;
 use super::stolen;
-use crate::util::log;
+use crate::util::{StagedFile, log};
 
 /// Env keys external children may inherit: secret-free plumbing only.
 /// Everything else (auth keys, S3 credentials, database URLs, SMTP/admin
@@ -86,38 +85,6 @@ pub fn apply_env(cmd: &mut Command, extra_env: &[(String, String)]) {
 /// this path (object names), so megabytes are already extraordinary.
 const CAPTURE_MAX: u64 = 16 * 1024 * 1024;
 
-/// Temp file for captured stdout: unique per call (pid + seq), 0600,
-/// container-private /tmp, unlinked when the guard drops — every exit
-/// path, including panics, cleans it up.
-struct TempOut {
-    file: std::fs::File,
-    path: String,
-}
-
-impl TempOut {
-    fn new() -> std::io::Result<Self> {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = format!(
-            "/tmp/vw-cap-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
-        Ok(Self { file, path })
-    }
-}
-
-impl Drop for TempOut {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 /// Verdict from a reaper-stolen run: a recorded status, or `None`
 /// (stolen with the status lost — the safe direction is failure).
 /// Exit code 0 = success, decoded like the reaper does ([`exit_code`]).
@@ -141,9 +108,9 @@ fn run_bounded_core(
     extra_env: &[(String, String)],
     abort: impl Fn() -> bool,
     capture: bool,
-) -> (bool, Option<TempOut>) {
+) -> (bool, Option<StagedFile>) {
     let cap = if capture {
-        match TempOut::new() {
+        match StagedFile::create("vw-cap") {
             Ok(c) => Some(c),
             Err(_) => return (false, None),
         }
@@ -154,7 +121,7 @@ fn run_bounded_core(
     cmd.args(args).process_group(0);
     if let Some(cap) = &cap {
         use std::process::Stdio;
-        match cap.file.try_clone() {
+        match cap.file().try_clone() {
             // the temp file exists but stdout cannot ride it: fail the run
             Ok(file) => cmd.stdout(Stdio::from(file)),
             Err(_) => return (false, None),
@@ -196,7 +163,7 @@ fn run_bounded_core(
         if capture
             && cap
                 .as_ref()
-                .is_some_and(|c| c.file.metadata().is_ok_and(|m| m.len() > CAPTURE_MAX))
+                .is_some_and(|c| c.file().metadata().is_ok_and(|m| m.len() > CAPTURE_MAX))
         {
             log::err(&format!(
                 "{prog} output exceeded {CAPTURE_MAX} bytes; killing"
@@ -258,15 +225,15 @@ pub fn run_bounded_capture(
     if !success {
         return None;
     }
-    let mut cap = cap?;
+    let cap = cap?;
     let mut out = Vec::new();
-    cap.file.seek(SeekFrom::Start(0)).ok()?;
+    cap.file().seek(SeekFrom::Start(0)).ok()?;
     // Read at most one byte past the cap: the in-loop metadata check can
     // miss a final burst written between the last check and a fast
     // successful exit, and a group-escaped descendant may keep appending
     // to the file-backed stdout afterwards — so the cap is enforced at
     // read time, not trusted from the loop's last check.
-    cap.file
+    cap.file()
         .by_ref()
         .take(CAPTURE_MAX + 1)
         .read_to_end(&mut out)
@@ -331,6 +298,8 @@ mod tests {
     }
 
     /// Captured stdout comes back verbatim on success; stderr stays out.
+    /// (The 0600 + unlink-on-drop contract lives in
+    /// [`crate::util::StagedFile`]'s own tests.)
     #[test]
     fn capture_returns_stdout_verbatim() {
         let out = run_bounded_capture(
@@ -341,22 +310,6 @@ mod tests {
             || false,
         );
         assert_eq!(out.as_deref(), Some("captured-line\n"));
-    }
-
-    /// The temp file is 0600 and unlinked on drop (RAII covers every exit
-    /// path; counting files would race with parallel capture tests).
-    #[test]
-    fn capture_temp_file_is_0600_and_removed_on_drop() {
-        use std::os::unix::fs::PermissionsExt;
-        let out = TempOut::new().expect("temp file created");
-        let meta = std::fs::metadata(&out.path).expect("exists");
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-        let path = out.path.clone();
-        drop(out);
-        assert!(
-            !std::path::Path::new(&path).exists(),
-            "temp file must be removed on drop"
-        );
     }
 
     /// A timeout must not depend on EOF: a descendant that inherited the
