@@ -11,6 +11,16 @@ pub fn is_supervisor_key(key: &str) -> bool {
     key.starts_with("TAILSCALE_") || key.starts_with("SUPERVISOR_")
 }
 
+/// Keys the supervisor consumes itself, on top of its own namespaces: the
+/// exposed-port knob in both spellings (`VAULTWARDEN_PORT`, and its
+/// upstream-named alias `VAULTWARDEN_ROCKET_PORT`). These must resolve the
+/// same way wherever the user defined them (env or dotenv file) and must
+/// never reach the vaultwarden child — the supervisor binds the gate on
+/// them and pins the child's ROCKET_PORT itself.
+pub fn is_supervisor_consumed(key: &str) -> bool {
+    is_supervisor_key(key) || key == "VAULTWARDEN_PORT" || key == "VAULTWARDEN_ROCKET_PORT"
+}
+
 /// The child-side name for a `VAULTWARDEN_*` key: the prefix is stripped so
 /// the child sees the plain upstream name (`VAULTWARDEN_DATABASE_URL` ->
 /// `DATABASE_URL`). `None` = not a prefixed key (forwarded verbatim). A
@@ -113,8 +123,11 @@ mod tests {
             "TAILSCALE_SERVE",
             "SUPERVISOR_ENV_FILE",
             "SUPERVISOR_X",
+            // supervisor-consumed in both spellings
+            "VAULTWARDEN_PORT",
+            "VAULTWARDEN_ROCKET_PORT",
         ] {
-            assert!(is_supervisor_key(key), "{key} should be supervisor-owned");
+            assert!(is_supervisor_consumed(key), "{key} should stay with PID 1");
         }
         for key in [
             "TAILSCALE",
@@ -123,9 +136,17 @@ mod tests {
             "VAULTWARDEN_DATABASE_URL",
             "DATABASE_URL",
             "PORT",
+            "ROCKET_PORT",
+            // prefix only, not the namespace
+            "VAULTWARDEN_",
         ] {
-            assert!(!is_supervisor_key(key), "{key} should reach the child");
+            assert!(
+                !is_supervisor_consumed(key),
+                "{key} should not be supervisor-consumed"
+            );
         }
+        // the plain supervisor-namespace predicate is unchanged
+        assert!(!is_supervisor_key("VAULTWARDEN_PORT"));
     }
 
     #[test]

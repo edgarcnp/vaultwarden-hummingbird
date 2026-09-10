@@ -1,14 +1,15 @@
 //! Supervisor-owned dotenv file (SUPERVISOR_ENV_FILE), split after parse:
-//! `TAILSCALE_*`/`SUPERVISOR_*` keys -> supervisor knobs (never the child,
-//! never `podman inspect`); `VAULTWARDEN_*` keys -> the vaultwarden child
-//! under the stripped plain upstream name; everything else -> forwarded to
-//! the child verbatim. Parsed by `dotenvy`; invalid lines are logged (never
-//! their content — they may carry credentials) and skipped; later
-//! duplicates win.
+//! supervisor-consumed keys (`TAILSCALE_*`/`SUPERVISOR_*` plus the port
+//! knobs — see [`is_supervisor_consumed`]) -> supervisor knobs (never the
+//! child, never `podman inspect`); `VAULTWARDEN_*` keys -> the vaultwarden
+//! child under the stripped plain upstream name; everything else ->
+//! forwarded to the child verbatim. Parsed by `dotenvy`; invalid lines are
+//! logged (never their content — they may carry credentials) and skipped;
+//! later duplicates win.
 
 use std::collections::BTreeMap;
 
-use super::env::{is_supervisor_key, vaultwarden_key};
+use super::env::{is_supervisor_consumed, vaultwarden_key};
 use crate::util::log;
 
 /// Env var holding the dotenv file path (absent/empty = env-only mode).
@@ -16,7 +17,7 @@ const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
 
 #[derive(Default)]
 pub struct FileConfig {
-    /// supervisor knobs (TAILSCALE_*/SUPERVISOR_* keys)
+    /// supervisor-consumed keys (TAILSCALE_*/SUPERVISOR_*/port knobs)
     pub knobs: BTreeMap<String, String>,
     /// child env, VAULTWARDEN_* keys under the stripped upstream name
     pub child: BTreeMap<String, String>,
@@ -49,7 +50,7 @@ impl FileConfig {
         for item in dotenvy::from_read_iter(raw.as_bytes()) {
             match item {
                 Ok((k, v)) => {
-                    if is_supervisor_key(&k) {
+                    if is_supervisor_consumed(&k) {
                         cfg.knobs.insert(k, v);
                     } else if let Some(stripped) = vaultwarden_key(&k) {
                         cfg.child.insert(stripped.to_string(), v);
@@ -131,6 +132,31 @@ not a valid line
             cfg.knobs.get("SUPERVISOR_ENV_FILE").map(String::as_str),
             Some("/elsewhere")
         );
+    }
+
+    /// The port knobs are supervisor-consumed in both spellings: they land
+    /// in the knobs map from the file, never in the child env (the
+    /// supervisor binds the gate on them and pins the child's port).
+    #[test]
+    fn port_knobs_route_to_the_supervisor() {
+        let path =
+            write_tmp("VAULTWARDEN_PORT=8443\nVAULTWARDEN_ROCKET_PORT=9999\nROCKET_PORT=2222\n");
+        let cfg = FileConfig::load_from(Some(&path));
+        assert_eq!(
+            cfg.knobs.get("VAULTWARDEN_PORT").map(String::as_str),
+            Some("8443")
+        );
+        assert_eq!(
+            cfg.knobs.get("VAULTWARDEN_ROCKET_PORT").map(String::as_str),
+            Some("9999")
+        );
+        // bare upstream names still forward verbatim (the port chain's
+        // last file fallback; the supervisor pins the child's real port)
+        assert_eq!(
+            cfg.child.get("ROCKET_PORT").map(String::as_str),
+            Some("2222")
+        );
+        assert!(!cfg.child.contains_key("PORT"));
     }
 
     /// The dotenvy dialect: double quotes unescape `\n` and substitute

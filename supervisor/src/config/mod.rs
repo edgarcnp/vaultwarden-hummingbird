@@ -13,5 +13,5 @@ pub use consts::{
     AUTH_TIMEOUT, BACKUP_FIRST_DELAY, DAEMON_WAIT, RCLONE, SERVE_TIMEOUT, SYNC_TIMEOUT, TAILSCALE,
     TAILSCALED, VAULTWARDEN,
 };
-pub use env::{Config, is_supervisor_key, vaultwarden_key};
+pub use env::{Config, is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
 pub use sync::SyncConfig;
