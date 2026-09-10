@@ -195,8 +195,10 @@ pub fn run_bounded_env(
 /// failure, stop request, timeout, non-zero exit, or oversized output.
 /// Stdout lands in a temp file, not a pipe: the poll loop stays in charge
 /// (no reader thread waiting on an EOF a group-escaped descendant could
-/// hold open) and output is capped — a bucket list too big for
-/// [`CAPTURE_MAX`] fails the run instead of exhausting supervisor memory.
+/// hold open) and output is capped twice — killed at [`CAPTURE_MAX`] while
+/// running, and the final read is itself capped, so a burst written between
+/// cap checks (or by an outliving descendant) fails the run instead of
+/// exhausting supervisor memory.
 pub fn run_bounded_capture(
     timeout: Duration,
     prog: &str,
@@ -264,7 +266,20 @@ pub fn run_bounded_capture(
     }
     let mut out = Vec::new();
     cap.file.seek(SeekFrom::Start(0)).ok()?;
-    cap.file.read_to_end(&mut out).ok()?;
+    // Read at most one byte past the cap: the in-loop metadata check can
+    // miss a final burst written between the last check and a fast
+    // successful exit, and a group-escaped descendant may keep appending
+    // to the file-backed stdout afterwards — so the cap is enforced at
+    // read time, not trusted from the loop's last check.
+    cap.file
+        .by_ref()
+        .take(CAPTURE_MAX + 1)
+        .read_to_end(&mut out)
+        .ok()?;
+    if out.len() as u64 > CAPTURE_MAX {
+        log::err(&format!("{prog} output exceeded {CAPTURE_MAX} bytes"));
+        return None;
+    }
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -385,6 +400,25 @@ mod tests {
             || false,
         );
         assert!(out.is_none(), "oversized output must fail the run");
+    }
+
+    /// The cap must hold even when the writer exits between the loop's
+    /// metadata checks: a burst dumped in one shot (well under one poll
+    /// tick) and a successful exit must still fail the run, because the
+    /// final read itself is capped.
+    #[test]
+    fn capture_fails_closed_on_a_burst_exited_between_cap_checks() {
+        let out = run_bounded_capture(
+            Duration::from_secs(30),
+            "/bin/sh",
+            &["-c", "dd if=/dev/zero bs=1M count=20 2>/dev/null"],
+            &[],
+            || false,
+        );
+        assert!(
+            out.is_none(),
+            "a 20MB burst past the 16MB cap must fail the run"
+        );
     }
 
     /// The allow-list policy: baseline plumbing keys pass, secrets and
