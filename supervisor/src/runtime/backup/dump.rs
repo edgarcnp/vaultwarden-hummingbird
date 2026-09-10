@@ -9,8 +9,8 @@ use super::timestamp::timestamp;
 use super::tools::rclone;
 
 /// One periodic backup cycle: sweep staging, dump, push, prune. Runs on
-/// the watch loop's spawned backup thread; never fatal, aborting early on
-/// a stop request.
+/// a detached maintenance thread; never fatal, aborting early on a stop
+/// request.
 pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     if abort() {
         return;

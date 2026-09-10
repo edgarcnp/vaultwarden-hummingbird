@@ -6,7 +6,8 @@ use super::super::sync::SyncConfig;
 
 /// S3-backed sqlite dumps (opt-in): periodic snapshots pushed to
 /// `<state remote>/db`, pruned to keep-N, plus an opt-in boot-time restore
-/// into an empty DB. Cloned onto the backup thread.
+/// into an empty DB. Cloned onto the maintenance thread that runs the
+/// periodic dumps.
 #[derive(Clone)]
 pub struct DbBackupConfig {
     /// S3 credentials + backend env, shared with the state sync (cloned)

@@ -9,7 +9,6 @@ use super::super::env::parse_count;
 use super::spec::{SyncConfig, remote_env_name};
 use crate::util::log;
 
-/// Resolve the S3 state-sync knobs into a [`SyncConfig`].
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
     let remote = knob("SUPERVISOR_S3_REMOTE", "");
     let key_id = knob("SUPERVISOR_S3_ACCESS_KEY_ID", "");

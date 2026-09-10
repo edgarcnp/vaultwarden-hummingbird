@@ -4,9 +4,7 @@
 
 use crate::config::DbBackupConfig;
 
-/// Emptiness: the sqlite file is absent, or a readable database with zero
-/// user tables. Corrupt/unreadable is Err (ambiguous) — never silently
-/// treated as empty, never silently kept.
+/// Emptiness per [`super::sqlite::is_empty`]'s never-overwrite contract.
 pub(super) fn is_empty(cfg: &DbBackupConfig) -> Result<bool, String> {
     super::sqlite::is_empty(&cfg.db_path)
 }

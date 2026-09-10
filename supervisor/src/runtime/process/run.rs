@@ -1,10 +1,7 @@
 //! Bounded child runs: run a CLI child to completion with a hard timeout,
 //! killing its whole process group on expiry so nothing it spawned
 //! outlives the budget. Each child registers with the stolen-exit
-//! registry ([`super::stolen`]): a bounded run may own its child from a
-//! non-main thread (the backup thread), where the main thread's
-//! namespace-wide reaper can reap the zombie first — the registry
-//! preserves the verdict that std's `ECHILD` would otherwise destroy.
+//! registry ([`super::stolen`]; see there for the reaper race it closes).
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -206,12 +203,9 @@ pub fn run_bounded_env(
 /// [`run_bounded_env`] capturing the child's stdout; stderr stays
 /// inherited so failures remain visible in container logs. `None` = spawn
 /// failure, stop request, timeout, non-zero exit, or oversized output.
-/// Stdout lands in a temp file, not a pipe: the poll loop stays in charge
-/// (no reader thread waiting on an EOF a group-escaped descendant could
-/// hold open) and output is capped twice — killed at [`CAPTURE_MAX`] while
-/// running, and the final read is itself capped, so a burst written between
-/// cap checks (or by an outliving descendant) fails the run instead of
-/// exhausting supervisor memory.
+/// Stdout lands in a temp file, not a pipe, so the poll loop stays in
+/// charge (why: the stdout-holding-descendant test below); output is
+/// capped twice — in-loop and at the final read.
 pub fn run_bounded_capture(
     timeout: Duration,
     prog: &str,

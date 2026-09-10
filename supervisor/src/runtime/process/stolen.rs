@@ -1,11 +1,12 @@
 //! Stolen-exit-status registry: the main thread's namespace-wide reaper
 //! (`reap_any` = `waitpid(-1, WNOHANG)`) can reap a bounded-run child
-//! owned by another thread (the backup thread) before that thread's own
-//! `try_wait` sees it; std then reports `ECHILD` and the run's true exit
-//! status is lost. When `reap_any` reaps a registered pid it records the
-//! wait status here; the bounded run consults the registry before giving
-//! up. `take` distinguishes "status recorded" from "reaped unknown" —
-//! the latter must still be treated as failure (safe direction).
+//! owned by another thread (e.g. a periodic-maintenance thread) before
+//! that thread's own `try_wait` sees it; std then reports `ECHILD` and
+//! the run's true exit status is lost. When `reap_any` reaps a registered
+//! pid it records the wait status here; the bounded run consults the
+//! registry before giving up. `take` distinguishes "status recorded" from
+//! "reaped unknown" — the latter must still be treated as failure (safe
+//! direction).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

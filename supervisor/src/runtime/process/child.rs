@@ -1,20 +1,8 @@
 //! Child primitives: spawning, liveness, and group signaling, plus the
 //! shared timing constants of the reap/watch loops and the [`Pid`] alias.
-//!
-//! Reaping is race-free by ownership (see `reap` / `run`):
-//! - Long-running children ([`spawn`]) are process-group leaders; their
-//!   `std::process::Child` handle is dropped on purpose — statuses come only
-//!   from the namespace-wide reaper ([`super::reap::reap_any`]), never std's
-//!   targeted `try_wait`/`wait`, which would race it over the same zombie.
-//! - Bounded CLI children ([`super::run::run_bounded_env`]) are reaped via
-//!   std, but the main thread's namespace-wide reaper may steal the zombie
-//!   first when the run happens off the main thread (the backup thread);
-//!   the stolen-exit registry ([`super::stolen`]) preserves the verdict.
-//!   They are also group leaders, so a timeout kill reaches
-//!   anything they spawned.
-//! - As PID 1, any orphan re-parents to us; only the namespace-wide
-//!   `waitpid` there (not std) reaps those, and skipping them would leak
-//!   zombies.
+//! Which waiter may reap which child, and why, is specced where the
+//! mechanisms live: the namespace-wide reaper ([`super::reap`]), bounded
+//! runs ([`super::run`]), and the stolen-exit registry ([`super::stolen`]).
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -40,7 +28,10 @@ pub type Pid = i32;
 
 /// Spawn `cmd` as the leader of its own process group. Doing it in the
 /// child (`process_group(0)`) closes the race where the child execs before
-/// the parent could `setpgid` it.
+/// the parent could `setpgid` it. The `std::process::Child` handle is
+/// dropped on purpose: long-running children are reaped only by the
+/// namespace-wide reaper ([`super::reap::reap_any`]) — a targeted std
+/// wait would race it over the same zombie.
 pub fn spawn(cmd: &mut Command) -> Option<Pid> {
     cmd.process_group(0);
     match cmd.spawn() {

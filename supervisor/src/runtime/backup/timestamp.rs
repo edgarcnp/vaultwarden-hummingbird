@@ -1,7 +1,6 @@
 //! Object-name timestamps for the backup bucket: UTC, sortable by name,
-//! with a collision-proof random suffix. Backups keep names within one
-//! second distinct (clock corrections, retries), so no upload can ever
-//! overwrite another.
+//! with a collision-proof random suffix (the full contract is on
+//! [`timestamp`] itself).
 
 use jiff::Timestamp;
 

@@ -4,11 +4,9 @@
 //!
 //! All signal *delivery* (forwarding to children, escalation,
 //! reaping) happens on the main thread, which owns the child pids as plain
-//! locals and polls [`take_stop`]. No shared pid tables, no arming gates,
-//! no registration windows: a signal arriving in ANY phase is observed at
-//! the next tick and acted on with full context; forwarding latency is
-//! bounded by one poll tick (~100 ms) — irrelevant next to container stop
-//! timeouts.
+//! locals and polls [`take_stop`]: a signal arriving in ANY phase is
+//! observed at the next tick (~100 ms) and acted on with full context —
+//! irrelevant next to container stop timeouts.
 //!
 //! SIGTERM/SIGINT/SIGHUP/SIGQUIT are all stop requests (from a container
 //! orchestrator's perspective that is what they are); SIGCHLD and SIGPIPE

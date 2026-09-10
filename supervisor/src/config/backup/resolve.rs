@@ -12,7 +12,6 @@ use super::super::sync::SyncConfig;
 use super::spec::DbBackupConfig;
 use crate::util::log;
 
-/// Resolve the DB backup knobs into a [`DbBackupConfig`].
 pub(crate) fn resolve_backup(
     knob: &dyn Fn(&str, &str) -> String,
     sync: Option<&SyncConfig>,

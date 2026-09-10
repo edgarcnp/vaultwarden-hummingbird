@@ -11,10 +11,8 @@ use std::time::{Duration, Instant};
 
 use super::probe::{PROBE_TIMEOUT, get_alive};
 
-/// Cache window for a completed probe. The probe itself is bounded by
-/// [`PROBE_TIMEOUT`], so worst-case verdict age stays at
-/// TTL + PROBE_TIMEOUT — the same order a fresh probe on every request
-/// already had.
+/// Cache window for a completed probe (= the probe budget, so worst-case
+/// verdict age stays in the same order as an uncached probe).
 const PROBE_TTL: Duration = PROBE_TIMEOUT;
 
 pub(super) struct Liveness {
