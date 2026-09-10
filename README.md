@@ -90,8 +90,8 @@ The container verifies that a downloaded backup is a parseable database dump, bu
 
 ## What's on by default
 
-- Sign-ups are off. Temporarily set `VAULTWARDEN_SIGNUPS_ALLOWED=true` to create your account, then set it back.
-- Organizations and attachments are disabled. Sends are enabled (`VAULTWARDEN_SENDS_ALLOWED=false` to turn them off).
+- Sign-ups are open. Set `VAULTWARDEN_SIGNUPS_ALLOWED=false` to close them once your accounts exist.
+- Attachment uploads are disabled. Sends are enabled (`VAULTWARDEN_SENDS_ALLOWED=false` to turn them off).
 - The web vault is included and enabled. Build with `VAULTWARDEN_WEB_VAULT=false` if you only want the API, or set `VAULTWARDEN_WEB_VAULT_ENABLED=false` at runtime to hide it without rebuilding.
 - The admin panel is off. If you never set an admin token, it stays off.
 - Mobile push notifications are optional: get free credentials at https://bitwarden.com/host and set `VAULTWARDEN_PUSH_ENABLED=true` plus the ID and key.
