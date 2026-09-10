@@ -15,8 +15,10 @@ use crate::runtime::{Pid, spawn};
 /// overridable, and bare upstream names in the file keep working); then
 /// hard invariants: ROCKET_PORT (internal vault port), ROCKET_ADDRESS
 /// (loopback-only: the API is reachable solely via `tailscale serve`),
-/// DATA_FOLDER. Spawn failure returns `None`; the caller tears down and
-/// exits 1.
+/// DATA_FOLDER, and WEB_VAULT_ENABLED re-derived from what the image
+/// actually baked (the image default never reaches this child, and an
+/// API-only build must not boot with vaultwarden's compiled default).
+/// Spawn failure returns `None`; the caller tears down and exits 1.
 pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
     let mut cmd = Command::new(VAULTWARDEN);
     cmd.env_clear();
@@ -33,7 +35,29 @@ pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Opti
     cmd.env("ROCKET_PORT", vault_port)
         .env("ROCKET_ADDRESS", "127.0.0.1")
         .env("DATA_FOLDER", "/data");
+    // The image's WEB_VAULT_ENABLED default never reaches this child (the
+    // ambient env is default-deny), so it is re-derived from what was
+    // actually baked: an API-only build (empty /web-vault) must not boot
+    // with vaultwarden's compiled default (enabled) — the vault exits 1
+    // on the missing index.html. A populated folder leaves the knob unset.
+    if let Some((key, value)) = web_vault_flag(WEB_VAULT_INDEX) {
+        cmd.env(key, value);
+    }
     spawn(&mut cmd)
+}
+
+/// Where the image bakes the web vault (WEB_VAULT_FOLDER in the
+/// Containerfile).
+const WEB_VAULT_INDEX: &str = "/web-vault/index.html";
+
+/// `Some(("WEB_VAULT_ENABLED", "false"))` for an API-only image (no baked
+/// index.html); `None` = leave the knob at vaultwarden's own default.
+fn web_vault_flag(index: &str) -> Option<(&'static str, &'static str)> {
+    if std::path::Path::new(index).exists() {
+        None
+    } else {
+        Some(("WEB_VAULT_ENABLED", "false"))
+    }
 }
 
 /// Map an *ambient* container-env key for the child (default deny): only
@@ -144,5 +168,24 @@ mod tests {
             file_key(OsStr::new("TAILSCALE")).as_deref(),
             Some("TAILSCALE")
         );
+    }
+
+    /// An API-only image (no baked index.html) must disable the web vault
+    /// for the child; a populated folder leaves the knob at its default.
+    #[test]
+    fn web_vault_flag_tracks_the_baked_index() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-wv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("index.html");
+        let path = index.to_str().unwrap();
+        let _ = std::fs::remove_file(&index);
+        assert_eq!(
+            web_vault_flag(path),
+            Some(("WEB_VAULT_ENABLED", "false")),
+            "missing index.html = API-only build"
+        );
+        std::fs::write(&index, b"<html>").unwrap();
+        assert_eq!(web_vault_flag(path), None, "baked vault = default");
+        let _ = std::fs::remove_file(&index);
     }
 }
