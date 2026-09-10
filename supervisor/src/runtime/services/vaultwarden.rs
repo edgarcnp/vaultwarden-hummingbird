@@ -42,8 +42,11 @@ fn web_vault_flag(index: &str) -> Option<(&'static str, &'static str)> {
 /// env > file resolution (backup/restore must reach the same DB the vault
 /// uses). Finally the hard invariants, which nothing may override:
 /// ROCKET_PORT (internal vault port), ROCKET_ADDRESS (loopback-only: the
-/// API is reachable solely via `tailscale serve`), DATA_FOLDER, and
-/// WEB_VAULT_ENABLED re-derived from what the image actually baked (the
+/// API is reachable solely via `tailscale serve`), DATA_FOLDER,
+/// WEB_VAULT_FOLDER (where the image bakes the vault — the re-derived
+/// WEB_VAULT_ENABLED checks this same path, so a child override would
+/// desync the pair), and WEB_VAULT_ENABLED re-derived from what the image
+/// actually baked (the
 /// image default never reaches this child, and an API-only build must not
 /// boot with vaultwarden's compiled default). Supervisor-consumed keys
 /// ([`is_supervisor_consumed`]: supervisor namespaces + the port knobs)
@@ -69,6 +72,7 @@ fn granted_env(
     env.insert("ROCKET_PORT".into(), vault_port.into());
     env.insert("ROCKET_ADDRESS".into(), "127.0.0.1".into());
     env.insert("DATA_FOLDER".into(), "/data".into());
+    env.insert("WEB_VAULT_FOLDER".into(), "/web-vault".into());
     // A populated folder leaves the knob unset; an API-only build (empty
     // /web-vault) must not boot with vaultwarden's compiled default
     // (enabled) — the vault exits 1 on the missing index.html.
@@ -183,13 +187,16 @@ mod tests {
     /// documented "direct value wins" — the supervisor's own resolution
     /// uses the same order), supervisor-consumed keys never pass, and the
     /// hard pins close it out. Only ROCKET_ADDRESS/ROCKET_PORT/DATA_FOLDER
-    /// and the re-derived web-vault flag may not be overridden.
+    /// /WEB_VAULT_FOLDER and the re-derived web-vault flag may not be
+    /// overridden.
     #[test]
     fn granted_env_file_first_ambient_wins_pins_last() {
         let ambient: Vec<(OsString, OsString)> = [
             ("VAULTWARDEN_DATABASE_URL", "sqlite:///data/env.sqlite3"),
             ("VAULTWARDEN_SIGNUPS_ALLOWED", "false"),
             ("VAULTWARDEN_PORT", "9999"),
+            ("VAULTWARDEN_WEB_VAULT_FOLDER", "/leak/ambient"),
+            ("WEB_VAULT_FOLDER", "/leak/ambient-bare"),
             ("TAILSCALE_AUTHKEY", "leak-me"),
         ]
         .iter()
@@ -202,6 +209,7 @@ mod tests {
             ),
             ("SIGNUPS_ALLOWED".to_string(), "true".to_string()),
             ("VAULTWARDEN_PORT".to_string(), "8888".to_string()),
+            ("WEB_VAULT_FOLDER".to_string(), "/leak/file".to_string()),
             ("DOMAIN".to_string(), "https://f.example".to_string()),
         ];
         let env: std::collections::BTreeMap<String, String> =
@@ -239,6 +247,12 @@ mod tests {
             Some("127.0.0.1")
         );
         assert_eq!(env.get("DATA_FOLDER").map(String::as_str), Some("/data"));
+        assert_eq!(
+            env.get("WEB_VAULT_FOLDER").map(String::as_str),
+            Some("/web-vault"),
+            "the baked folder is pinned: the re-derived WEB_VAULT_ENABLED \
+             checks the same path"
+        );
     }
 
     /// The dotenv file is the explicit grant surface: bare upstream names
