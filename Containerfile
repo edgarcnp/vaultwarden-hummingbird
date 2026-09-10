@@ -150,7 +150,10 @@ COPY --from=fetch --chown=65532:0 /data /data
 # user config (that flows via the dotenv file). ROCKET_ADDRESS is also
 # hard-pinned to 127.0.0.1 by the supervisor at spawn (defense in depth:
 # the image default must not reintroduce a 0.0.0.0 API listener if run
-# without the supervisor).
+# without the supervisor). WEB_VAULT_ENABLED is likewise re-derived by
+# the supervisor from the baked folder (ambient env is default-deny for
+# the vault child), so an API-only build stays API-only under the
+# supervisor too.
 
 ENV DATA_FOLDER=/data \
     I_REALLY_WANT_VOLATILE_STORAGE=true \
