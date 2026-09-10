@@ -22,9 +22,9 @@ ARG RCLONE_VERSION=1.75.1
 ARG RCLONE_SHA256_AMD64=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
 ARG RCLONE_SHA256_ARM64=03f2504174034b6d004152ed7369251c9a9ec1f7e0836eda420f5c7a5ec0dff9
 
-# Base images float on purpose: rebuilds pick up upstream CVE patches. The
-# runtime uses the -openssl variant (ships libssl/libcrypto, so the runtime
-# needs no hand-copied OpenSSL from the builder).
+# BASE IMAGES — float on purpose: rebuilds pick up upstream CVE patches.
+# The runtime uses the -openssl variant (ships libssl/libcrypto, so the
+# runtime needs no hand-copied OpenSSL from the builder).
 
 ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder
 ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl
@@ -132,9 +132,9 @@ LABEL org.opencontainers.image.title="vaultwarden-hummingbird" \
       org.opencontainers.image.description="Vaultwarden ${VW_VERSION} + Tailscale ${TAILSCALE_VERSION} on Hummingbird core-runtime" \
       org.opencontainers.image.source="https://github.com/dani-garcia/vaultwarden"
 
-# The -openssl runtime image provides libssl/libcrypto; the sqlite-only
-# vaultwarden build needs no other shared libs copied in. Zoneinfo keeps
-# TZ useful.
+# RUNTIME CONTENTS — the -openssl runtime image provides libssl/libcrypto;
+# the sqlite-only vaultwarden build needs no other shared libs copied in.
+# Zoneinfo keeps TZ useful.
 COPY --from=vw-build /usr/share/zoneinfo /usr/share/zoneinfo
 
 COPY --from=supervisor /out-supervisor /entrypoint
@@ -146,7 +146,7 @@ COPY --from=vw-build /out-vaultwarden /vaultwarden
 COPY --from=fetch /out/web-vault /web-vault
 COPY --from=fetch --chown=65532:0 /data /data
 
-# Runtime defaults (plain upstream names): the image-default layer, not
+# RUNTIME DEFAULTS — plain upstream names: the image-default layer, not
 # user config (that flows via the dotenv file). ROCKET_ADDRESS is also
 # hard-pinned to 127.0.0.1 by the supervisor at spawn (defense in depth:
 # the image default must not reintroduce a 0.0.0.0 API listener if run
@@ -166,6 +166,9 @@ ENV DATA_FOLDER=/data \
     USER_ATTACHMENT_LIMIT=0 \
     WEB_VAULT_ENABLED=${VAULTWARDEN_WEB_VAULT} \
     WEB_VAULT_FOLDER=/web-vault
+
+# CONTAINER SHAPE — persistent data volume, the gate port, non-root
+# entrypoint (the supervisor).
 
 VOLUME /data
 EXPOSE 8080
