@@ -2,11 +2,11 @@
 //! snapshot). Credentials ride a 0600 defaults-file — mariadb tools have
 //! no password env var and argv is world-readable in /proc.
 
-use crate::config::{BACKUP_TIMEOUT, DbBackupConfig, DbSpec, MARIADB_DUMP};
-use crate::runtime::run_bounded_env;
+use crate::config::{DbBackupConfig, DbSpec, MARIADB_DUMP};
+use crate::runtime::db::tools::{defaults_file, mysql_env};
 use crate::util::log;
 
-use crate::runtime::db::tools::{defaults_file, mysql_env};
+use super::super::tools::tool;
 
 /// mariadb-dump (`--single-transaction` InnoDB snapshot) into `staged`.
 pub(crate) fn dump(cfg: &DbBackupConfig, staged: &str, abort: &impl Fn() -> bool) -> bool {
@@ -33,19 +33,19 @@ pub(crate) fn dump(cfg: &DbBackupConfig, staged: &str, abort: &impl Fn() -> bool
     ];
     args.extend(db.iter().cloned());
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let ok = run_bounded_env(BACKUP_TIMEOUT, MARIADB_DUMP, &argv, &mysql_env(), || {
-        abort()
-    });
+    // tool() bounds the run and removes the staged file on failure:
+    // mariadb-dump writes --result-file directly, so a failed run leaves a
+    // partial (sensitive) dump that must not linger.
+    let ok = tool(
+        "mariadb-dump",
+        MARIADB_DUMP,
+        &argv,
+        &mysql_env(),
+        staged,
+        abort,
+    );
     let _ = std::fs::remove_file(&cnf);
-    if ok {
-        true
-    } else {
-        // mariadb-dump writes --result-file directly: a failed run leaves
-        // a partial (sensitive) dump; remove it now, not at the next sweep.
-        let _ = std::fs::remove_file(staged);
-        log::err("db backup: mariadb-dump failed or timed out");
-        false
-    }
+    ok
 }
 
 #[cfg(test)]
