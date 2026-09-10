@@ -1,13 +1,14 @@
 //! The vault watch loop and container teardown: the single reaper of the
-//! PID namespace, periodic state sync, and the ordered shutdown that
-//! brings every child down before exiting.
+//! PID namespace, detached periodic-maintenance threads (state sync, DB
+//! backup), and the ordered shutdown that brings every child down before
+//! exiting.
 
 use std::process::exit;
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
 
-use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SyncConfig};
+use crate::config::{BACKUP_FIRST_DELAY, Config, SyncConfig};
 use crate::runtime::{
     Gone, POLL, Pid, TERM_GRACE, backup_tick, exit_code, exit_reason, gate_bind, gate_describe,
     gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group, stopping, sync_state,
@@ -15,41 +16,42 @@ use crate::runtime::{
 };
 use crate::util::log;
 
-/// Sleep slice for the backup thread's cadence: coarse enough not to
+/// Sleep slice for the maintenance threads' cadence: coarse enough not to
 /// churn, fine enough that a stop request is honored promptly.
-const BACKUP_SLEEP: Duration = Duration::from_secs(1);
+const SLEEP: Duration = Duration::from_secs(1);
 
-/// Periodic DB backups on their own thread: the first dump
-/// [`BACKUP_FIRST_DELAY`] after the vault starts, then one per
-/// `interval`. Detached — bounded phases self-abort on stop, and exit()
-/// reaps everything else.
-fn spawn_backup_thread(backup: DbBackupConfig) {
+/// Run `task` on its own detached thread: first after `first_delay`, then
+/// once per `interval`, returning promptly on a stop request. Detached —
+/// bounded phases self-abort on stop, and exit() reaps everything else.
+/// The task must only ever wait on children it spawned itself (the
+/// watch loop's namespace-wide reaping stays single-owner).
+fn spawn_periodic(first_delay: Duration, interval: Duration, task: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
-        let mut due = Instant::now() + BACKUP_FIRST_DELAY;
+        let mut due = Instant::now() + first_delay;
         loop {
             while Instant::now() < due {
                 if stopping() {
                     return;
                 }
-                std::thread::sleep(BACKUP_SLEEP.min(due.saturating_duration_since(Instant::now())));
+                std::thread::sleep(SLEEP.min(due.saturating_duration_since(Instant::now())));
             }
             if stopping() {
                 return;
             }
-            backup_tick(&backup, stopping);
-            due = Instant::now() + backup.interval;
+            task();
+            due = Instant::now() + interval;
         }
     });
 }
 
 /// Hand off to vaultwarden and supervise it: bind the exposed-port
 /// gatekeeper (the only `0.0.0.0` listener), start the loopback-only vault,
-/// then watch — observing vaultwarden's exit or a stop request, driving
-/// periodic sync, then tearing down tailscaled and exiting with
-/// vaultwarden's code. Tailscale is the sole inbound path: if tailscaled
-/// dies mid-run the vault is torn down too (exit 1) so the orchestrator
-/// restarts the whole container — a vault nobody can reach is worse than a
-/// short outage.
+/// then watch — observing vaultwarden's exit or a stop request while
+/// detached threads drive periodic state sync and DB backup — then tearing
+/// down tailscaled and exiting with vaultwarden's code. Tailscale is the
+/// sole inbound path: if tailscaled dies mid-run the vault is torn down
+/// too (exit 1) so the orchestrator restarts the whole container — a vault
+/// nobody can reach is worse than a short outage.
 pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
     // fail closed on a missing internal port: co-binding would expose the vault
     let Some(vault_port) = &cfg.vault_port else {
@@ -82,11 +84,20 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
     let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
         shutdown(Some(tsd), None, 1, None)
     };
+    // Periodic maintenance runs off the watch loop: a bounded sync push or
+    // backup must never delay reaping or stop observation by up to its
+    // timeout (60s).
     if let Some(backup) = cfg.backup.clone().filter(|b| b.periodic) {
-        spawn_backup_thread(backup);
+        spawn_periodic(BACKUP_FIRST_DELAY, backup.interval, move || {
+            backup_tick(&backup, stopping);
+        });
+    }
+    if let Some(sync) = cfg.sync.clone().filter(|s| !s.interval.is_zero()) {
+        spawn_periodic(sync.interval, sync.interval, move || {
+            sync_state(&sync, stopping);
+        });
     }
 
-    let mut last_sync = Instant::now();
     let code = 'watch: loop {
         if let Some((pid, raw)) = reap_any() {
             if pid == vw {
@@ -116,14 +127,8 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
         }
         // A vw exit is only ever observed through reap_any above (zombies
         // answer kill(pid, 0), and no other code path reaps vw while the
-        // loop runs), so there is no separate liveness check here.
-        if let Some(sync) = &cfg.sync
-            && !sync.interval.is_zero()
-            && last_sync.elapsed() >= sync.interval
-        {
-            sync_state(sync, stopping);
-            last_sync = Instant::now();
-        }
+        // loop runs — the maintenance threads only ever wait on children
+        // they spawned themselves), so there is no separate liveness check.
         std::thread::sleep(POLL);
     };
 
