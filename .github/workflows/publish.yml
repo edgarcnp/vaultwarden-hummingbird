@@ -1,7 +1,7 @@
 # Build and publish the multi-arch image to ghcr.io. The workflow changes
 # no versions: it builds whatever ARG pins the Containerfile holds (Renovate
 # owns the bumps).
-name: publish
+name: Publish
 
 on:
   workflow_dispatch:
