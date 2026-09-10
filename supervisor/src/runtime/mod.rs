@@ -20,7 +20,7 @@ pub use gate::{
     serve as gate_serve,
 };
 pub use process::{
-    Gone, POLL, Pid, TERM_GRACE, alive, apply_env, exit_code, exit_reason, install_signal_handlers,
+    Gone, POLL, Pid, TERM_GRACE, apply_env, exit_code, exit_reason, install_signal_handlers,
     reap_any, reap_until_gone, run_bounded, run_bounded_capture, run_bounded_env, shutdown,
     signal_group, spawn, start_vw, stopping, take_stop,
 };

@@ -9,9 +9,9 @@ use nix::sys::signal::Signal;
 
 use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SyncConfig};
 use crate::runtime::{
-    Gone, POLL, Pid, TERM_GRACE, alive, backup_tick, db_keepalive_tick, exit_code, exit_reason,
-    gate_bind, gate_describe, gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group,
-    stopping, sync_state, take_stop,
+    Gone, POLL, Pid, TERM_GRACE, backup_tick, db_keepalive_tick, exit_code, exit_reason, gate_bind,
+    gate_describe, gate_serve, reap_any, reap_until_gone, run_vaultwarden, signal_group, stopping,
+    sync_state, take_stop,
 };
 use crate::util::log;
 
@@ -116,9 +116,9 @@ pub fn start_vw(cfg: &Config, tsd: Pid) -> ! {
                 _ => 1,
             };
         }
-        if !alive(vw) {
-            break 'watch 1;
-        }
+        // A vw exit is only ever observed through reap_any above (zombies
+        // answer kill(pid, 0), and no other code path reaps vw while the
+        // loop runs), so there is no separate liveness check here.
         if let Some(sync) = &cfg.sync
             && !sync.interval.is_zero()
             && last_sync.elapsed() >= sync.interval

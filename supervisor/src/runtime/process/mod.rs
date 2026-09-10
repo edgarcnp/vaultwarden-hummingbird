@@ -11,7 +11,7 @@ mod signals;
 mod stolen;
 mod watch;
 
-pub use child::{POLL, Pid, TERM_GRACE, alive, signal_group, spawn};
+pub use child::{POLL, Pid, TERM_GRACE, signal_group, spawn};
 pub use reap::{Gone, exit_code, exit_reason, reap_any, reap_until_gone};
 pub use run::{apply_env, run_bounded, run_bounded_capture, run_bounded_env};
 pub use signals::{install_signal_handlers, stopping, take_stop};

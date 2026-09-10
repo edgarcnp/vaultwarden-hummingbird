@@ -55,11 +55,6 @@ pub fn spawn(cmd: &mut Command) -> Option<Pid> {
     }
 }
 
-/// Liveness probe: `None` sends signal 0, checking existence only.
-pub fn alive(pid: Pid) -> bool {
-    kill(NixPid::from_raw(pid), None).is_ok()
-}
-
 /// Signal the whole process group of a child spawned via [`spawn`] (pgid ==
 /// pid), falling back to the bare pid if the group vanished. Refuses
 /// pid <= 1: `kill(-1, …)` would signal every process in the namespace.
