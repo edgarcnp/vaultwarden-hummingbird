@@ -54,7 +54,7 @@ mod tests {
     /// cleanly, nothing staged, nothing uploaded.
     #[test]
     fn tick_fails_cleanly_on_missing_source() {
-        let cfg = support::cfg("sqlite:///nonexistent/db.sqlite3");
+        let cfg = support::cfg();
         tick(&cfg, || false);
         let entries: Vec<_> = std::fs::read_dir(&cfg.staging)
             .expect("staging dir created")

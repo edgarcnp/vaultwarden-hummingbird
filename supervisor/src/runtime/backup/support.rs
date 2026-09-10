@@ -17,19 +17,15 @@ pub(super) fn next_staging() -> String {
     dir.to_string_lossy().into_owned()
 }
 
-/// A sqlite DbBackupConfig pointed at `url` with a unique staging dir.
-pub(super) fn cfg(url: &str) -> DbBackupConfig {
-    cfg_with(
-        url,
-        DbSpec::Sqlite {
-            path: "/nonexistent/db.sqlite3".into(),
-        },
-    )
+/// A sqlite DbBackupConfig with a unique staging dir.
+pub(super) fn cfg() -> DbBackupConfig {
+    cfg_with(DbSpec::Sqlite {
+        path: "/nonexistent/db.sqlite3".into(),
+    })
 }
 
-/// A DbBackupConfig over an explicit backend spec (the URL is only kept
-/// for the log/label path) with a unique staging dir.
-pub(super) fn cfg_with(url: &str, db: DbSpec) -> DbBackupConfig {
+/// A DbBackupConfig over an explicit backend spec with a unique staging dir.
+pub(super) fn cfg_with(db: DbSpec) -> DbBackupConfig {
     DbBackupConfig {
         sync: SyncConfig::new(
             "r2:vw".into(),
@@ -38,7 +34,6 @@ pub(super) fn cfg_with(url: &str, db: DbSpec) -> DbBackupConfig {
             String::new(),
             Duration::from_secs(60),
         ),
-        url: url.to_string(),
         db,
         periodic: true,
         interval: Duration::from_secs(43_200),

@@ -85,17 +85,14 @@ mod tests {
 
     #[test]
     fn restore_noop_when_disabled() {
-        assert!(restore_if_empty(
-            &support::cfg("sqlite:///nonexistent/db.sqlite3"),
-            || false
-        ));
+        assert!(restore_if_empty(&support::cfg(), || false));
     }
 
     /// No backup in the bucket is not a failure: a fresh deployment
     /// legitimately boots on an empty DB.
     #[test]
     fn restore_with_no_backup_found_is_not_fatal() {
-        let mut cfg = support::cfg("sqlite:///nonexistent/db.sqlite3");
+        let mut cfg = support::cfg();
         cfg.restore = true;
         assert!(restore_if_empty(&cfg, || false));
     }

@@ -2,15 +2,16 @@
 
 use std::time::Duration;
 
+use crate::config::dburl::{self, DbSpec};
 use crate::util::log;
 
 /// Issues a trivial query on a cadence so hosts that suspend an idle
 /// database (scale-to-zero / auto-stop) stay awake for the vault.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DbKeepalive {
-    /// vaultwarden's database URL — the ping must reach the same DB the
-    /// vault uses; never logged (carries credentials)
-    pub url: String,
+    /// the vault's parsed postgres URL — the ping must reach the same DB
+    /// the vault uses
+    pub db: DbSpec,
     /// ping cadence
     pub interval: Duration,
 }
@@ -35,13 +36,16 @@ impl DbKeepalive {
                 return None;
             }
         };
-        match db_url.as_deref().map(str::trim) {
-            Some(u) if u.starts_with("postgres://") || u.starts_with("postgresql://") => {
-                Some(Self {
-                    url: u.to_string(),
-                    interval: Duration::from_secs(interval),
-                })
-            }
+        let spec = db_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .and_then(dburl::parse);
+        match spec {
+            Some(db @ DbSpec::Postgres { .. }) => Some(Self {
+                db,
+                interval: Duration::from_secs(interval),
+            }),
             _ => {
                 if explicit {
                     log::err(
@@ -58,6 +62,13 @@ impl DbKeepalive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pg_spec(db_url: &str) -> DbSpec {
+        match dburl::parse(db_url) {
+            Some(s @ DbSpec::Postgres { .. }) => s,
+            other => panic!("expected a postgres spec, got {other:?}"),
+        }
+    }
 
     #[test]
     fn db_keepalive_resolution() {
@@ -77,19 +88,19 @@ mod tests {
         assert!(with("300", Some("sqlite:///data/db.sqlite3")).is_none());
         assert!(with("300", Some("mysql://u:p@h/db")).is_none());
 
-        // armed: cadence honored, URL carried verbatim
+        // armed: cadence honored, URL parsed into the spec
         let ka =
             with("300", Some("postgres://u:p@h:5432/db?sslmode=require")).expect("keepalive armed");
         assert_eq!(ka.interval, Duration::from_secs(300));
-        assert_eq!(ka.url, "postgres://u:p@h:5432/db?sslmode=require");
+        assert_eq!(ka.db, pg_spec("postgres://u:p@h:5432/db?sslmode=require"));
         assert!(with("300", Some("postgresql://u:p@h/db")).is_some());
 
-        // whitespace-padded URL is trimmed
+        // whitespace-padded URL is trimmed before parsing
         assert_eq!(
             with("300", Some("  postgres://u:p@h/db  "))
                 .expect("armed")
-                .url,
-            "postgres://u:p@h/db"
+                .db,
+            pg_spec("postgres://u:p@h/db")
         );
 
         // invalid cadence: disabled (warn logged, non-fatal)

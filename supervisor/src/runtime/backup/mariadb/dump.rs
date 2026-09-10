@@ -61,16 +61,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let staged = dir.join("dump.sql");
         std::fs::write(&staged, b"pre-existing sentinel").unwrap();
-        let cfg = support::cfg_with(
-            "mariadb://u:p@127.0.0.1:1/vault",
-            DbSpec::Mysql {
-                host: Some("127.0.0.1".into()),
-                port: 1,
-                user: Some("u".into()),
-                password: Some("p".into()),
-                db: Some("vault".into()),
-            },
-        );
+        let cfg = support::cfg_with(DbSpec::Mysql {
+            host: Some("127.0.0.1".into()),
+            port: 1,
+            user: Some("u".into()),
+            password: Some("p".into()),
+            db: Some("vault".into()),
+        });
         assert!(!dump(&cfg, staged.to_str().unwrap(), &|| false));
         assert!(
             !staged.exists(),

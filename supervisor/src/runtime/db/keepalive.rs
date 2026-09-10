@@ -11,7 +11,7 @@ use super::pg;
 /// [`DB_PING_TIMEOUT`]. Steady success stays silent (a short cadence would
 /// otherwise spam the logs); failures and recoveries log on state change.
 pub fn tick(cfg: &DbKeepalive, last_ok: &mut Option<bool>) {
-    let ok = ping(&cfg.url);
+    let ok = ping(&cfg.db);
     if *last_ok != Some(ok) {
         *last_ok = Some(ok);
         if ok {
@@ -23,8 +23,8 @@ pub fn tick(cfg: &DbKeepalive, last_ok: &mut Option<bool>) {
 }
 
 /// Fresh connection + trivial query; nothing is pooled or reused.
-fn ping(url: &str) -> bool {
-    let Some(mut client) = pg::connect(url, DB_PING_TIMEOUT) else {
+fn ping(db: &crate::config::DbSpec) -> bool {
+    let Some(mut client) = pg::connect(db, DB_PING_TIMEOUT) else {
         return false;
     };
     client.simple_query("SELECT 1").is_ok()
@@ -35,24 +35,37 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn spec() -> crate::config::DbSpec {
+        crate::config::DbSpec::Postgres {
+            host: Some("127.0.0.1".into()),
+            port: 1,
+            user: Some("u".into()),
+            password: Some("p".into()),
+            db: Some("db".into()),
+            sslmode: Some("disable".into()),
+        }
+    }
+
     /// An unreachable (connection-refused) Postgres must fail fast and
     /// cleanly, not hang the watch loop.
     #[test]
     fn ping_fails_fast_on_refused_connection() {
-        assert!(!ping("postgres://u:p@127.0.0.1:1/db?sslmode=disable"));
+        assert!(!ping(&spec()));
     }
 
-    /// A malformed URL must fail cleanly without panicking.
+    /// A non-postgres spec must fail cleanly without panicking.
     #[test]
-    fn ping_fails_on_malformed_url() {
-        assert!(!ping("not-a-url"));
+    fn ping_fails_on_non_postgres_spec() {
+        assert!(!ping(&crate::config::DbSpec::Sqlite {
+            path: "/nonexistent/db.sqlite3".into()
+        }));
     }
 
     #[test]
     fn tick_tracks_state_across_failures() {
         let cfg = DbKeepalive {
             interval: Duration::from_secs(60),
-            url: "postgres://u:p@127.0.0.1:1/db?sslmode=disable".into(),
+            db: spec(),
         };
         let mut last = None;
         tick(&cfg, &mut last);

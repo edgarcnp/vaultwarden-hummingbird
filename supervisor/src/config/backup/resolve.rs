@@ -41,12 +41,6 @@ pub(crate) fn resolve_backup(
 
     // The vault's DB: explicit VAULTWARDEN_DATABASE_URL, else vaultwarden's
     // own default (sqlite under DATA_FOLDER, which the image pins to /data).
-    let url = db_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-        .unwrap_or("/data/db.sqlite3")
-        .to_string();
     let db = match db_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         Some(url) => match dburl::parse(url) {
             Some(spec) => spec,
@@ -111,7 +105,6 @@ pub(crate) fn resolve_backup(
 
     Some(DbBackupConfig {
         sync: sync.clone(),
-        url,
         db,
         periodic,
         interval: Duration::from_secs(secs),
@@ -189,13 +182,15 @@ mod tests {
         assert!(resolved(S3_KNOBS).is_none());
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP", "true")]).is_none());
         // invalid flag values degrade to disabled (warn only)
-        assert!(resolved(&[
-            S3_KNOBS[0],
-            S3_KNOBS[1],
-            S3_KNOBS[2],
-            ("SUPERVISOR_DB_BACKUP", "definitely")
-        ])
-        .is_none());
+        assert!(
+            resolved(&[
+                S3_KNOBS[0],
+                S3_KNOBS[1],
+                S3_KNOBS[2],
+                ("SUPERVISOR_DB_BACKUP", "definitely")
+            ])
+            .is_none()
+        );
     }
 
     #[test]
@@ -203,11 +198,13 @@ mod tests {
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP", "true")]).is_none());
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP_RESTORE", "true")]).is_none());
         // remote without credentials disables sync itself -> no backup
-        assert!(resolved(&[
-            ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
-            ("SUPERVISOR_DB_BACKUP", "true"),
-        ])
-        .is_none());
+        assert!(
+            resolved(&[
+                ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
+                ("SUPERVISOR_DB_BACKUP", "true"),
+            ])
+            .is_none()
+        );
     }
 
     #[test]
@@ -278,15 +275,17 @@ mod tests {
     fn unsupported_url_disables() {
         // VAULTWARDEN_DATABASE_URL is not a supervisor knob; it reaches the
         // resolver through the db_url argument, mirroring what env::build does.
-        assert!(resolved_with_url(
-            &[
-                S3_KNOBS[0],
-                S3_KNOBS[1],
-                S3_KNOBS[2],
-                ("SUPERVISOR_DB_BACKUP", "true"),
-            ],
-            "oracle://u:p@h/db",
-        )
-        .is_none());
+        assert!(
+            resolved_with_url(
+                &[
+                    S3_KNOBS[0],
+                    S3_KNOBS[1],
+                    S3_KNOBS[2],
+                    ("SUPERVISOR_DB_BACKUP", "true"),
+                ],
+                "oracle://u:p@h/db",
+            )
+            .is_none()
+        );
     }
 }

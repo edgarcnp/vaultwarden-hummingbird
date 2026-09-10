@@ -17,9 +17,12 @@ use crate::runtime::db::tools::pg_env;
 /// with other deployments' tables, migration artifacts, or user objects
 /// must never qualify for automatic restore. Connection/query failures are
 /// Err (ambiguous), never "empty".
-pub(crate) fn is_empty(url: &str) -> Result<bool, String> {
+pub(crate) fn is_empty(db: &DbSpec) -> Result<bool, String> {
+    let DbSpec::Postgres { .. } = db else {
+        return Err("not a postgres URL".to_string());
+    };
     let mut client =
-        pg::connect(url, DB_PING_TIMEOUT).ok_or_else(|| "postgres unreachable".to_string())?;
+        pg::connect(db, DB_PING_TIMEOUT).ok_or_else(|| "postgres unreachable".to_string())?;
     let rows = client
         .query(
             "SELECT 1 FROM pg_catalog.pg_tables \

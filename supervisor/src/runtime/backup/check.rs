@@ -10,7 +10,7 @@ use crate::config::{DbBackupConfig, DbSpec};
 pub(super) fn is_empty(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Result<bool, String> {
     match &cfg.db {
         DbSpec::Sqlite { path } => super::sqlite::is_empty(path),
-        DbSpec::Postgres { .. } => super::postgres::is_empty(&cfg.url),
+        DbSpec::Postgres { .. } => super::postgres::is_empty(&cfg.db),
         DbSpec::Mysql { db, .. } => super::mariadb::table_count(cfg, abort).map(|count| match db {
             None => false,
             Some(_) => count == 0,
@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn sqlite_spec_dispatches_on_path_presence() {
-        let cfg = support::cfg("sqlite:///nonexistent/db.sqlite3");
+        let cfg = support::cfg();
         let no_abort = || false;
         assert!(is_empty(&cfg, &no_abort).unwrap());
     }
