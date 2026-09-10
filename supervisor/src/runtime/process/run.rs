@@ -127,99 +127,45 @@ fn stolen_verdict(pid: i32) -> Option<bool> {
         .map(|st: WaitStatus| super::reap::exit_code(st) == 0)
 }
 
-/// Run a child to completion with a hard timeout; kill on expiry. Aborts
-/// early when `abort` fires, so a stop request never waits out a bounded
-/// phase. stdio is inherited so failures stay visible in container logs.
-pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn() -> bool) -> bool {
-    run_bounded_env(timeout, prog, args, &[], abort)
-}
-
-/// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
-/// The child runs as its own process-group leader, so the expiry/abort kill
-/// reaches anything it spawned, not just the direct child. Its environment
-/// is allow-listed ([`apply_env`]) — the supervisor's env never leaks.
-pub fn run_bounded_env(
+/// Core of both bounded runs: spawn, register, poll (verdict / abort /
+/// timeout / capture cap), then group-kill on failure and settle the
+/// stolen-exit entry. `capture` redirects stdout to a temp file and
+/// enforces the capture cap while the child runs; the file comes back so
+/// the capture wrapper can do its own capped final read. Returns
+/// `(success, captured stdout file)`; the file is `None` when not
+/// capturing or when the run never got far enough to matter.
+fn run_bounded_core(
     timeout: Duration,
     prog: &str,
     args: &[&str],
     extra_env: &[(String, String)],
     abort: impl Fn() -> bool,
-) -> bool {
+    capture: bool,
+) -> (bool, Option<TempOut>) {
+    let cap = if capture {
+        match TempOut::new() {
+            Ok(c) => Some(c),
+            Err(_) => return (false, None),
+        }
+    } else {
+        None
+    };
     let mut cmd = Command::new(prog);
     cmd.args(args).process_group(0);
-    apply_env(&mut cmd, extra_env);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            log::err(&format!("{prog} spawn failed: {e}"));
-            return false;
-        }
-    };
-    let pid = child.id() as i32;
-    stolen::register(pid);
-    let start = Instant::now();
-    let success = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st.success(),
-            Ok(None) => {}
-            // ECHILD (or another wait error): the main reaper may have
-            // stolen the zombie; consult the registry before failing.
-            Err(_) => {
-                if let Some(v) = stolen_verdict(pid) {
-                    break v;
-                }
-            }
-        }
-        if abort() {
-            log::info(&format!("stop requested; aborting {prog}"));
-            break false;
-        }
-        if start.elapsed() > timeout {
-            log::err(&format!("{prog} timed out after {timeout:?}"));
-            break false;
-        }
-        std::thread::sleep(POLL);
-    };
-    if !success {
-        // Whole-group kill first, then the direct child, then reap.
-        let _ = killpg(NixPid::from_raw(pid), Signal::SIGKILL);
-        let _ = child.kill();
+    if let Some(cap) = &cap {
+        use std::process::Stdio;
+        match cap.file.try_clone() {
+            // the temp file exists but stdout cannot ride it: fail the run
+            Ok(file) => cmd.stdout(Stdio::from(file)),
+            Err(_) => return (false, None),
+        };
     }
-    let _ = child.wait();
-    let _ = stolen::take(pid); // drop the entry if it was never consulted
-    success
-}
-
-/// [`run_bounded_env`] capturing the child's stdout; stderr stays
-/// inherited so failures remain visible in container logs. `None` = spawn
-/// failure, stop request, timeout, non-zero exit, or oversized output.
-/// Stdout lands in a temp file, not a pipe: the poll loop stays in charge
-/// (no reader thread waiting on an EOF a group-escaped descendant could
-/// hold open) and output is capped twice — killed at [`CAPTURE_MAX`] while
-/// running, and the final read is itself capped, so a burst written between
-/// cap checks (or by an outliving descendant) fails the run instead of
-/// exhausting supervisor memory.
-pub fn run_bounded_capture(
-    timeout: Duration,
-    prog: &str,
-    args: &[&str],
-    extra_env: &[(String, String)],
-    abort: impl Fn() -> bool,
-) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    use std::process::Stdio;
-
-    let mut cap = TempOut::new().ok()?;
-    let mut cmd = Command::new(prog);
-    cmd.args(args)
-        .process_group(0)
-        .stdout(Stdio::from(cap.file.try_clone().ok()?));
     apply_env(&mut cmd, extra_env);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             log::err(&format!("{prog} spawn failed: {e}"));
-            return None;
+            return (false, None);
         }
     };
     let pid = child.id() as i32;
@@ -247,7 +193,11 @@ pub fn run_bounded_capture(
         }
         // Output cap: checked while the child still runs, so an oversized
         // listing is killed at the cap, never read in full afterwards.
-        if cap.file.metadata().is_ok_and(|m| m.len() > CAPTURE_MAX) {
+        if capture
+            && cap
+                .as_ref()
+                .is_some_and(|c| c.file.metadata().is_ok_and(|m| m.len() > CAPTURE_MAX))
+        {
             log::err(&format!(
                 "{prog} output exceeded {CAPTURE_MAX} bytes; killing"
             ));
@@ -256,14 +206,59 @@ pub fn run_bounded_capture(
         std::thread::sleep(POLL);
     };
     if !success {
+        // Whole-group kill first, then the direct child, then reap.
         let _ = killpg(NixPid::from_raw(pid), Signal::SIGKILL);
         let _ = child.kill();
     }
     let _ = child.wait();
     let _ = stolen::take(pid); // drop the entry if it was never consulted
+    (success, cap)
+}
+
+/// Run a child to completion with a hard timeout; kill on expiry. Aborts
+/// early when `abort` fires, so a stop request never waits out a bounded
+/// phase. stdio is inherited so failures stay visible in container logs.
+pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn() -> bool) -> bool {
+    run_bounded_env(timeout, prog, args, &[], abort)
+}
+
+/// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
+/// The child runs as its own process-group leader, so the expiry/abort kill
+/// reaches anything it spawned, not just the direct child. Its environment
+/// is allow-listed ([`apply_env`]) — the supervisor's env never leaks.
+pub fn run_bounded_env(
+    timeout: Duration,
+    prog: &str,
+    args: &[&str],
+    extra_env: &[(String, String)],
+    abort: impl Fn() -> bool,
+) -> bool {
+    run_bounded_core(timeout, prog, args, extra_env, abort, false).0
+}
+
+/// [`run_bounded_env`] capturing the child's stdout; stderr stays
+/// inherited so failures remain visible in container logs. `None` = spawn
+/// failure, stop request, timeout, non-zero exit, or oversized output.
+/// Stdout lands in a temp file, not a pipe: the poll loop stays in charge
+/// (no reader thread waiting on an EOF a group-escaped descendant could
+/// hold open) and output is capped twice — killed at [`CAPTURE_MAX`] while
+/// running, and the final read is itself capped, so a burst written between
+/// cap checks (or by an outliving descendant) fails the run instead of
+/// exhausting supervisor memory.
+pub fn run_bounded_capture(
+    timeout: Duration,
+    prog: &str,
+    args: &[&str],
+    extra_env: &[(String, String)],
+    abort: impl Fn() -> bool,
+) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let (success, cap) = run_bounded_core(timeout, prog, args, extra_env, abort, true);
     if !success {
         return None;
     }
+    let mut cap = cap?;
     let mut out = Vec::new();
     cap.file.seek(SeekFrom::Start(0)).ok()?;
     // Read at most one byte past the cap: the in-loop metadata check can
