@@ -3,9 +3,9 @@
 
 use std::env;
 
-use crate::config::backup::{resolve_backup, DbBackupConfig};
+use crate::config::backup::{DbBackupConfig, resolve_backup};
 use crate::config::dotenv::FileConfig;
-use crate::config::sync::{resolve_sync, SyncConfig};
+use crate::config::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
 use super::knobs::{non_empty, parse_flag, resolve_service, valid_port};
