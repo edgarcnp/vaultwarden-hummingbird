@@ -153,10 +153,11 @@ COPY --from=fetch --chown=65532:0 /data /data
 # without the supervisor). WEB_VAULT_ENABLED is likewise re-derived by
 # the supervisor from the baked folder (ambient env is default-deny for
 # the vault child), so an API-only build stays API-only under the
-# supervisor too.
+# supervisor too. Volatile storage is OPT-IN: vaultwarden refuses to boot
+# when it detects a non-persistent /data; users accept that explicitly
+# with VAULTWARDEN_I_REALLY_WANT_VOLATILE_STORAGE=true.
 
 ENV DATA_FOLDER=/data \
-    I_REALLY_WANT_VOLATILE_STORAGE=true \
     ORG_ATTACHMENT_LIMIT=0 \
     ORG_CREATION_USERS=all \
     ROCKET_ADDRESS=127.0.0.1 \

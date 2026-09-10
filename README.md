@@ -57,7 +57,7 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 
 It loads them at startup and saves periodically and on shutdown. If you already mount a real volume at `/data`, skip this entirely. Either way, keep the bucket private (it holds secrets) and run only one container against it.
 
-If you'd rather stay fully ephemeral, set `TAILSCALE_STATE_FILE=mem:` and use an `ephemeral=true` auth key — the container registers as a fresh node every boot and devices re-login.
+If you'd rather stay fully ephemeral, set `TAILSCALE_STATE_FILE=mem:` and use an `ephemeral=true` auth key — the container registers as a fresh node every boot and devices re-login. vaultwarden likewise refuses to boot when it detects a non-persistent `/data`; set `VAULTWARDEN_I_REALLY_WANT_VOLATILE_STORAGE=true` to accept ephemeral vault storage.
 
 ## Back up your vault
 
