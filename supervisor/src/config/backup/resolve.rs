@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use super::super::consts::{BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT, BACKUP_STAGING};
 use super::super::dburl::{self, DbSpec};
-use super::super::env::parse_bool;
+use super::super::env::parse_flag;
 use super::super::sync::SyncConfig;
 use super::spec::DbBackupConfig;
 use crate::util::log;
@@ -18,34 +18,16 @@ pub(crate) fn resolve_backup(
     sync: Option<&SyncConfig>,
     db_url: Option<String>,
 ) -> Option<DbBackupConfig> {
-    let periodic = match knob("SUPERVISOR_DB_BACKUP", "").as_str() {
-        "" => false,
-        v => match parse_bool(v) {
-            Some(b) => b,
-            None => {
-                log::err(&format!(
-                    "config: invalid SUPERVISOR_DB_BACKUP '{}' (want true/false); \
-                     periodic backups disabled",
-                    log::sanitize(v)
-                ));
-                false
-            }
-        },
-    };
-    let restore = match knob("SUPERVISOR_DB_BACKUP_RESTORE", "").as_str() {
-        "" => false,
-        v => match parse_bool(v) {
-            Some(b) => b,
-            None => {
-                log::err(&format!(
-                    "config: invalid SUPERVISOR_DB_BACKUP_RESTORE '{}' (want true/false); \
-                     restore disabled",
-                    log::sanitize(v)
-                ));
-                false
-            }
-        },
-    };
+    let periodic = parse_flag(
+        "SUPERVISOR_DB_BACKUP",
+        &knob("SUPERVISOR_DB_BACKUP", ""),
+        false,
+    );
+    let restore = parse_flag(
+        "SUPERVISOR_DB_BACKUP_RESTORE",
+        &knob("SUPERVISOR_DB_BACKUP_RESTORE", ""),
+        false,
+    );
     if !periodic && !restore {
         return None;
     }
@@ -207,15 +189,13 @@ mod tests {
         assert!(resolved(S3_KNOBS).is_none());
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP", "true")]).is_none());
         // invalid flag values degrade to disabled (warn only)
-        assert!(
-            resolved(&[
-                S3_KNOBS[0],
-                S3_KNOBS[1],
-                S3_KNOBS[2],
-                ("SUPERVISOR_DB_BACKUP", "definitely")
-            ])
-            .is_none()
-        );
+        assert!(resolved(&[
+            S3_KNOBS[0],
+            S3_KNOBS[1],
+            S3_KNOBS[2],
+            ("SUPERVISOR_DB_BACKUP", "definitely")
+        ])
+        .is_none());
     }
 
     #[test]
@@ -223,13 +203,11 @@ mod tests {
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP", "true")]).is_none());
         assert!(resolved(&[("SUPERVISOR_DB_BACKUP_RESTORE", "true")]).is_none());
         // remote without credentials disables sync itself -> no backup
-        assert!(
-            resolved(&[
-                ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
-                ("SUPERVISOR_DB_BACKUP", "true"),
-            ])
-            .is_none()
-        );
+        assert!(resolved(&[
+            ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
+            ("SUPERVISOR_DB_BACKUP", "true"),
+        ])
+        .is_none());
     }
 
     #[test]
@@ -300,17 +278,15 @@ mod tests {
     fn unsupported_url_disables() {
         // VAULTWARDEN_DATABASE_URL is not a supervisor knob; it reaches the
         // resolver through the db_url argument, mirroring what env::build does.
-        assert!(
-            resolved_with_url(
-                &[
-                    S3_KNOBS[0],
-                    S3_KNOBS[1],
-                    S3_KNOBS[2],
-                    ("SUPERVISOR_DB_BACKUP", "true"),
-                ],
-                "oracle://u:p@h/db",
-            )
-            .is_none()
-        );
+        assert!(resolved_with_url(
+            &[
+                S3_KNOBS[0],
+                S3_KNOBS[1],
+                S3_KNOBS[2],
+                ("SUPERVISOR_DB_BACKUP", "true"),
+            ],
+            "oracle://u:p@h/db",
+        )
+        .is_none());
     }
 }

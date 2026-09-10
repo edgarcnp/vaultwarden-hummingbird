@@ -9,7 +9,7 @@ use crate::config::keepalive::DbKeepalive;
 use crate::config::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
-use super::knobs::{non_empty, parse_bool, resolve_service, valid_port};
+use super::knobs::{non_empty, parse_flag, resolve_service, valid_port};
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
@@ -86,21 +86,7 @@ impl Config {
             .or_else(|| non_empty(lookup("VAULTWARDEN_DATABASE_URL")));
         let backup = resolve_backup(&knob, sync.as_ref(), db_url.clone());
 
-        let flag = |key: &str, default: bool| -> bool {
-            match knob(key, "") {
-                v if v.is_empty() => default,
-                v => match parse_bool(&v) {
-                    Some(b) => b,
-                    None => {
-                        log::err(&format!(
-                            "config: invalid {key} '{}' (want true/false); using default {default}",
-                            log::sanitize(&v)
-                        ));
-                        default
-                    }
-                },
-            }
-        };
+        let flag = |key: &str, default: bool| parse_flag(key, &knob(key, ""), default);
 
         let authkey = knob("TAILSCALE_AUTHKEY", "");
         if authkey.is_empty() {

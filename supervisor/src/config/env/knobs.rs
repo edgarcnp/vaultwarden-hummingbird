@@ -42,11 +42,29 @@ pub(super) fn valid_port(v: Option<String>) -> Option<String> {
 }
 
 /// Lenient on/off knob parse; `None` = callers warn and use their default.
-pub(crate) fn parse_bool(v: &str) -> Option<bool> {
+fn parse_bool(v: &str) -> Option<bool> {
     match v.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
         "false" | "0" | "no" | "off" => Some(false),
         _ => None,
+    }
+}
+
+/// A boolean knob from its raw value: empty = `default`; a bad value warns
+/// and takes the default instead of failing the boot.
+pub(crate) fn parse_flag(key: &str, raw: &str, default: bool) -> bool {
+    if raw.is_empty() {
+        return default;
+    }
+    match parse_bool(raw) {
+        Some(b) => b,
+        None => {
+            log::err(&format!(
+                "config: invalid {key} '{}' (want true/false); using default {default}",
+                log::sanitize(raw)
+            ));
+            default
+        }
     }
 }
 
