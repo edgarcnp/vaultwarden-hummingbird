@@ -34,20 +34,16 @@ fn web_vault_flag(index: &str) -> Option<(&'static str, &'static str)> {
 /// dotenv-file child map first (pre-routed at load: only stripped
 /// `VAULTWARDEN_*` keys are in it — the file refused everything else),
 /// then the ambient container env (default-deny: ONLY `VAULTWARDEN_*`
-/// keys, stripped to the plain upstream name — orchestrator/platform
-/// settings must not shape the vault) — so a direct container value wins
-/// over the file, matching the supervisor's own env > file resolution
-/// (backup/restore must reach the same DB the vault uses). Finally the
-/// hard invariants, which nothing may override: ROCKET_PORT (internal
-/// vault port), ROCKET_ADDRESS (loopback-only: the API is reachable
-/// solely via `tailscale serve`), DATA_FOLDER, WEB_VAULT_FOLDER (where
-/// the image bakes the vault — the re-derived WEB_VAULT_ENABLED checks
-/// this same path, so a child override would desync the pair), and
-/// WEB_VAULT_ENABLED re-derived from what the image actually baked (the
-/// image default never reaches this child, and an API-only build must
-/// not boot with vaultwarden's compiled default). Non-UTF-8 keys are
-/// dropped: a key the supervisor can't read must never reach the child
-/// (a mangled `TAILSCALE_*` secret would otherwise leak into its env).
+/// keys, stripped to the plain upstream name) — so a direct container
+/// value wins over the file, matching the supervisor's own env > file
+/// resolution (backup/restore must reach the same DB the vault uses).
+/// Finally the hard pins: ROCKET_PORT (internal vault port),
+/// ROCKET_ADDRESS (loopback-only: the API is reachable solely via
+/// `tailscale serve`), DATA_FOLDER, WEB_VAULT_FOLDER (the re-derived
+/// WEB_VAULT_ENABLED checks this same path, so a child override would
+/// desync the pair), and WEB_VAULT_ENABLED re-derived from what the
+/// image actually baked (an API-only build must not boot with
+/// vaultwarden's compiled default). Non-UTF-8 keys are dropped.
 fn granted_env(
     ambient: impl Iterator<Item = (OsString, OsString)>,
     file: &[(String, String)],

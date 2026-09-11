@@ -39,8 +39,7 @@ const BASELINE_ENV: &[&str] = &[
 ];
 
 /// The allow-listed subset of `vars` that children may inherit (pure, so
-/// the policy is unit-testable). Non-UTF-8 keys are dropped, like the
-/// vaultwarden child env: a mangled key must not reach a child.
+/// the policy is unit-testable).
 pub(crate) fn allowlisted(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     vars.filter(|(k, _)| BASELINE_ENV.contains(&k.as_str()))
         .collect()
@@ -48,9 +47,10 @@ pub(crate) fn allowlisted(vars: impl Iterator<Item = (String, String)>) -> Vec<(
 
 /// [`allowlisted`] over the supervisor's own environment, applied as an
 /// [`EnvGrant`]: clear, allow-listed plumbing, then `extra_env`
-/// (connection config rides there — e.g. pg_env). Never place secrets
-/// here. Shared by the bounded runs and the long-running tailscaled
-/// spawn.
+/// (connection config rides there — e.g. pg_env). Non-UTF-8 keys are
+/// dropped, like the vaultwarden child env: a mangled key must not reach
+/// a child. Never place secrets here. Shared by the bounded runs and the
+/// long-running tailscaled spawn.
 pub fn apply_env(cmd: &mut Command, extra_env: &[(String, String)]) {
     EnvGrant::new()
         .layer(

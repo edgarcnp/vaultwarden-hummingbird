@@ -217,8 +217,8 @@ static IDLE: Mutex<bool> = Mutex::new(true);
 static IDLE_CV: Condvar = Condvar::new();
 
 /// Wait for one full clean reaper pass (nothing ready, no strays) —
-/// shutdown uses this instead of the old synchronous stray drain, so the
-/// single-waitpid-owner rule survives teardown too. Bounded by `timeout`.
+/// shutdown uses this so the single-waitpid-owner rule survives teardown
+/// too. Bounded by `timeout`.
 pub(crate) fn quiesce(timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());

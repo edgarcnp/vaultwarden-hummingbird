@@ -35,8 +35,7 @@ fn build(cfg: &SyncConfig) -> Option<Client> {
 
 /// Pull identity files from the bucket into /data. Called at boot, before
 /// tailscaled is spawned, so a restored state file wins over nothing.
-/// Only keys inside the identity set are written — and only files: a key
-/// that looks like a directory marker is ignored.
+/// Only keys inside the identity set are written.
 pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;

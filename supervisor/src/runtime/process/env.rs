@@ -1,7 +1,8 @@
 //! Child-environment grants: one generic mechanism for "what environment
 //! does this child get?" Every child spawn clears the inherited
 //! environment and applies an explicit grant — a layered filter over the
-//! ambient env plus hard pins nothing may override. Consumers:
+//! ambient env plus hard pins (built last, so nothing overrides them).
+//! Consumers:
 //! bounded CLI runs (allow-listed plumbing only, see [`super::run`]) and
 //! the vaultwarden child (default-deny `VAULTWARDEN_*` routing, see
 //! `runtime::services::vaultwarden`).
@@ -30,7 +31,8 @@ impl EnvGrant {
         self
     }
 
-    /// Pin a key: nothing layered before or after may override it.
+    /// Pin a key, overriding everything layered before it. Grant
+    /// builders apply pins last, so in practice nothing overrides them.
     pub fn pin(mut self, key: &str, value: &str) -> Self {
         self.0.insert(key.into(), value.into());
         self

@@ -154,8 +154,7 @@ impl Client {
             }
             let url = action.sign(SIGN_EXPIRE);
             // The listing body is capped: an endpoint gone rogue cannot
-            // exhaust memory within the request timeout (same intent as
-            // the old capture cap).
+            // exhaust memory within the request timeout.
             let mut reader = self
                 .agent
                 .get(url.as_str())

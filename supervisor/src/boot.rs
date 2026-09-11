@@ -1,7 +1,6 @@
 //! The boot sequence as an explicit phase machine. Every phase's policy
-//! for a stop request and for failure lives in this one table — the same
-//! policies the pre-machine implementation encoded across `main.rs`,
-//! `watch.rs`, and the services modules, now auditable at a glance.
+//! for a stop request and for failure lives in this one table, auditable
+//! at a glance.
 //!
 //! | Phase        | Stop request                       | Failure                     |
 //! |--------------|------------------------------------|-----------------------------|
@@ -37,8 +36,8 @@ enum Outcome {
     Exit(i32),
 }
 
-/// Boot phases, in execution order. `Vault` is not here: it is the fold's
-/// tail and never returns.
+/// Boot phases, in execution order. `Vault` is not here: it is the
+/// loop's tail and never returns.
 #[derive(Clone, Copy)]
 enum Phase {
     RestoreDb,

@@ -5,8 +5,9 @@
 use crate::config::{DbBackupConfig, SYNC_TIMEOUT};
 pub(crate) use crate::s3::Client;
 
-/// One client for a backup run. `None` = unusable configuration (logged
-/// by the client); callers skip the run rather than guess.
+/// One client for a backup run. `None` = unusable configuration (the
+/// connect error is discarded here); callers log the skip and never
+/// guess.
 pub(crate) fn client(cfg: &DbBackupConfig) -> Option<Client> {
     Client::connect(&cfg.sync.target, SYNC_TIMEOUT).ok()
 }

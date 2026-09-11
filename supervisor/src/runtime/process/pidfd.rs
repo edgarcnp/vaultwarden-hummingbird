@@ -105,8 +105,6 @@ mod tests {
     /// Exit flips the pidfd to ready, and it stays ready even after the
     /// reaper hub reaps the zombie. The test never calls waitpid itself:
     /// with the hub running in this process, that would race it.
-    // The child is deliberately never waited on here (see above); the
-    // reaper hub reaps it, or the test process's exit does.
     #[test]
     #[allow(clippy::zombie_processes)]
     fn exit_flips_the_pidfd_to_ready() {

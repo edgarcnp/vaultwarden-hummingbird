@@ -16,9 +16,10 @@ pub struct Config {
     pub state: String,
     /// LocalAPI unix socket (writable, non-volume path)
     pub socket: String,
-    /// exposed (gatekeeper) port: `VAULTWARDEN_PORT` (or its upstream-named
-    /// alias `VAULTWARDEN_ROCKET_PORT`), process env before dotenv file,
-    /// then the file's bare ROCKET_PORT, then 8080
+    /// exposed (gatekeeper) port: `VAULTWARDEN_PORT`, process env before
+    /// dotenv file, then 8080. The legacy `VAULTWARDEN_ROCKET_PORT` and
+    /// bare `ROCKET_PORT` spellings refuse the boot — see
+    /// [`Self::from_env`].
     pub port: String,
     /// vaultwarden's port (`port + 1`, loopback-only). None = exposed port
     /// is 65535: boot must fail closed.
