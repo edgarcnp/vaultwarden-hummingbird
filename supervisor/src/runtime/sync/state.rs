@@ -22,10 +22,13 @@ const INCLUDES: [&str; 6] = [
 ];
 
 /// rclone argv for one copy operation; backend config rides env (never
-/// argv — /proc cmdline is world-readable). Uploads skip the bucket
-/// pre-check (see [`RCLONE_NO_CHECK_BUCKET`]); harmless on the pull path.
+/// argv — /proc cmdline is world-readable). `--no-traverse` swaps the
+/// destination listing (Class A) for per-file HEADs (Class B, 12.5×
+/// cheaper on R2): six files compare cheaper as HEADs than as a bucket
+/// list. Uploads skip the bucket pre-check (see [`RCLONE_NO_CHECK_BUCKET`]);
+/// harmless on the pull path.
 fn copy_args(src: &str, dst: &str) -> Vec<String> {
-    ["copy", RCLONE_NO_CHECK_BUCKET, src, dst]
+    ["copy", RCLONE_NO_CHECK_BUCKET, "--no-traverse", src, dst]
         .into_iter()
         .chain(INCLUDES)
         .map(String::from)
@@ -66,12 +69,18 @@ mod tests {
     fn copy_args_covers_scope_and_direction() {
         let a = copy_args("/data", "r2:vw-state");
         assert_eq!(
-            &a[..4],
-            &["copy", RCLONE_NO_CHECK_BUCKET, "/data", "r2:vw-state"]
+            &a[..5],
+            &[
+                "copy",
+                RCLONE_NO_CHECK_BUCKET,
+                "--no-traverse",
+                "/data",
+                "r2:vw-state"
+            ]
         );
-        assert_eq!(&a[4..], &INCLUDES);
+        assert_eq!(&a[5..], &INCLUDES);
         let b = copy_args("r2:vw-state", "/data");
-        assert_eq!(&b[2..4], &["r2:vw-state", "/data"]);
+        assert_eq!(&b[3..5], &["r2:vw-state", "/data"]);
     }
 
     #[test]

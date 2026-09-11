@@ -68,7 +68,15 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     }
     lock_down(&staged);
     let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
-    if !rclone(cfg, &["copyto", &staged, &object], &abort) {
+    // --no-check-dest: the object name is timestamped and unique, so the
+    // destination can never exist and the pre-upload HEAD is a wasted call.
+    // Only sound where overwrite is impossible — never reuse this on a path
+    // that updates files in place.
+    if !rclone(
+        cfg,
+        &["copyto", "--no-check-dest", &staged, &object],
+        &abort,
+    ) {
         log::err("db backup: push failed; continuing (previous backups intact)");
         let _ = std::fs::remove_file(&staged);
         return;
