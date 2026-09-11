@@ -1,9 +1,11 @@
 //! S3 connection settings shared by the state sync and the DB backup.
 //! The `remote` knob keeps its `name:bucket[/prefix]` shape, but it is
-//! parsed here into the parts the in-crate S3 client needs — no external
-//! tool consumes it anymore.
+//! parsed here into a [`RemoteSpec`] — the parts the in-crate S3 client
+//! needs — no external tool consumes it anymore.
 
 use std::time::Duration;
+
+use crate::s3::RemoteSpec;
 
 /// S3-backed persistence for /data identity files (opt-in): the same
 /// tailnet node and vaultwarden RSA keys survive ephemeral redeploys.
@@ -11,14 +13,8 @@ use std::time::Duration;
 pub struct SyncConfig {
     /// the remote as configured (e.g. `r2:vw-state/sub`), for logs
     pub remote: String,
-    /// S3 bucket name (between `:` and the first `/`)
-    pub bucket: String,
-    /// bucket-relative key prefix: empty, or ending in `/`
-    pub prefix: String,
-    pub key_id: String,
-    pub key_secret: String,
-    /// custom S3 endpoint (empty = AWS default)
-    pub endpoint: String,
+    /// the resolved bucket/prefix/credentials/endpoint
+    pub target: RemoteSpec,
     /// periodic push cadence (0 disables periodic pushes)
     pub interval: Duration,
 }
@@ -34,25 +30,31 @@ impl SyncConfig {
         endpoint: String,
         interval: Duration,
     ) -> Result<Self, String> {
-        let (bucket, prefix) = parse_remote(&remote)?;
+        let target = parse_remote(&remote, key_id, key_secret, endpoint)?;
         Ok(Self {
             remote,
-            bucket,
-            prefix,
-            key_id,
-            key_secret,
-            endpoint,
+            target,
             interval,
         })
     }
+
+    /// The sync's bucket-relative key prefix (empty, or ending in `/`).
+    pub fn prefix(&self) -> &str {
+        &self.target.prefix
+    }
 }
 
-/// Parse `name:bucket[/prefix]`. The name before the colon is rclone
-/// legacy and is accepted but ignored. Bucket sanity: non-empty, no
-/// `/`, `:`, or whitespace — provider-specific rules are the operator's
-/// business, exactly as they were with rclone. The prefix is normalized
-/// to end with `/` (or be empty).
-fn parse_remote(remote: &str) -> Result<(String, String), String> {
+/// Parse `name:bucket[/prefix]` into a [`RemoteSpec`]. The name before
+/// the colon is rclone legacy and is accepted but ignored. Bucket
+/// sanity: non-empty, no `/`, `:`, or whitespace — provider-specific
+/// rules are the operator's business, exactly as they were with rclone.
+/// The prefix is normalized to end with `/` (or be empty).
+fn parse_remote(
+    remote: &str,
+    key_id: String,
+    key_secret: String,
+    endpoint: String,
+) -> Result<RemoteSpec, String> {
     let Some((_, path)) = remote.split_once(':') else {
         return Err("must be remote:bucket[/prefix]".into());
     };
@@ -75,7 +77,13 @@ fn parse_remote(remote: &str) -> Result<(String, String), String> {
     } else {
         format!("{prefix}/")
     };
-    Ok((bucket.to_string(), prefix))
+    Ok(RemoteSpec {
+        bucket: bucket.to_string(),
+        prefix,
+        key_id,
+        key_secret,
+        endpoint,
+    })
 }
 
 #[cfg(test)]
@@ -93,7 +101,7 @@ mod tests {
             Duration::from_secs(60),
         )
         .expect("valid remote");
-        (cfg.bucket, cfg.prefix)
+        (cfg.target.bucket, cfg.target.prefix)
     }
 
     #[test]

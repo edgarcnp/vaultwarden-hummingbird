@@ -8,7 +8,7 @@ pub(crate) use crate::s3::Client;
 /// One client for a backup run. `None` = unusable configuration (logged
 /// by the client); callers skip the run rather than guess.
 pub(crate) fn client(cfg: &DbBackupConfig) -> Option<Client> {
-    Client::new(&cfg.sync, SYNC_TIMEOUT).ok()
+    Client::connect(&cfg.sync.target, SYNC_TIMEOUT).ok()
 }
 
 /// The dump objects in the bucket under the backup prefix

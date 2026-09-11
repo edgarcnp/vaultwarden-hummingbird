@@ -45,11 +45,6 @@ pub(super) fn sweep_staging(dir: &str) -> bool {
     true
 }
 
-/// Restrict a staged dump to owner-only before it leaves the volume.
-pub(super) fn lock_down(path: &str) {
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;

@@ -4,10 +4,10 @@
 //! that ownership; pushes from a DB that cannot prove continuity are
 //! refused instead of silently shadowing good backups.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::util::log;
+use crate::util::make_private;
 
 /// Sidecar next to the live database holding the newest dump object name
 /// this lineage has produced (after a push) or adopted (after a restore
@@ -43,7 +43,7 @@ pub(super) fn write(db_path: &str, object_name: &str) {
         ));
         return;
     }
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    let _ = make_private(&path);
 }
 
 /// Whether this database may push its next dump into the bucket.

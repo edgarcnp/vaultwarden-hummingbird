@@ -4,10 +4,10 @@
 //! external tool. Same filesystem (data volume), so the link has no
 //! torn-copy window.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::util::log;
+use crate::util::make_private;
 
 /// Emptiness per the never-overwrite invariant: the live file is absent,
 /// or a readable SQLite database with zero user tables (a freshly created
@@ -55,7 +55,7 @@ pub(crate) fn import(staged: &str, path: &str) -> bool {
         ));
         return false;
     }
-    if let Err(e) = std::fs::set_permissions(staged, std::fs::Permissions::from_mode(0o600)) {
+    if let Err(e) = make_private(staged) {
         log::err(&format!("db restore: cannot secure staged dump: {e}"));
         return false;
     }

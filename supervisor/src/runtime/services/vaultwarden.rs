@@ -1,22 +1,18 @@
 //! vaultwarden child process control.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
 use crate::config::{VAULTWARDEN, is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
-use crate::runtime::{Handle, spawn};
+use crate::runtime::{EnvGrant, Handle, spawn};
 
 /// vaultwarden in the foreground with a *granted* environment (see
 /// [`granted_env`]). Spawn failure returns `None`; the caller tears down
 /// and exits 1.
 pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Handle> {
     let mut cmd = Command::new(VAULTWARDEN);
-    cmd.env_clear();
-    for (k, v) in granted_env(env::vars_os(), extra_env, vault_port) {
-        cmd.env(k, v);
-    }
+    granted_env(env::vars_os(), extra_env, vault_port).apply(&mut cmd);
     spawn(&mut cmd)
 }
 
@@ -56,27 +52,22 @@ fn granted_env(
     ambient: impl Iterator<Item = (OsString, OsString)>,
     file: &[(String, String)],
     vault_port: &str,
-) -> Vec<(String, OsString)> {
-    let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-    for (k, v) in file {
-        env.insert(k.clone(), v.clone().into());
-    }
-    for (k, v) in ambient {
-        if let Some(key) = ambient_key(&k) {
-            env.insert(key, v);
-        }
-    }
-    env.insert("ROCKET_PORT".into(), vault_port.into());
-    env.insert("ROCKET_ADDRESS".into(), "127.0.0.1".into());
-    env.insert("DATA_FOLDER".into(), "/data".into());
-    env.insert("WEB_VAULT_FOLDER".into(), "/web-vault".into());
+) -> EnvGrant {
+    let grant = EnvGrant::new()
+        .layer(file.iter().map(|(k, v)| (k.clone(), v.clone().into())))
+        .layer(ambient.filter_map(|(k, v)| ambient_key(&k).map(|key| (key, v))));
     // A populated folder leaves the knob unset; an API-only build (empty
     // /web-vault) must not boot with vaultwarden's compiled default
     // (enabled) — the vault exits 1 on the missing index.html.
-    if let Some((key, value)) = web_vault_flag(WEB_VAULT_INDEX) {
-        env.insert(key.into(), value.into());
-    }
-    env.into_iter().collect()
+    let grant = match web_vault_flag(WEB_VAULT_INDEX) {
+        Some((key, value)) => grant.pin(key, value),
+        None => grant,
+    };
+    grant
+        .pin("ROCKET_PORT", vault_port)
+        .pin("ROCKET_ADDRESS", "127.0.0.1")
+        .pin("DATA_FOLDER", "/data")
+        .pin("WEB_VAULT_FOLDER", "/web-vault")
 }
 
 /// Map an *ambient* container-env key for the child (default deny): only
@@ -184,8 +175,8 @@ mod tests {
         ];
         let env: std::collections::BTreeMap<String, String> =
             granted_env(ambient.into_iter(), &file, "8081")
-                .into_iter()
-                .map(|(k, v)| (k, v.to_string_lossy().into_owned()))
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_string_lossy().into_owned()))
                 .collect();
         assert_eq!(
             env.get("DATABASE_URL").map(String::as_str),

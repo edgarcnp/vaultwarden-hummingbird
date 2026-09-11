@@ -94,9 +94,12 @@ mod tests {
         ])
         .expect("sync enabled");
         assert_eq!(sync.remote, "r2:vw-state");
-        assert_eq!(sync.bucket, "vw-state");
-        assert_eq!(sync.prefix, "");
-        assert_eq!(sync.endpoint, "https://acct.r2.cloudflarestorage.com");
+        assert_eq!(sync.target.bucket, "vw-state");
+        assert_eq!(sync.prefix(), "");
+        assert_eq!(
+            sync.target.endpoint,
+            "https://acct.r2.cloudflarestorage.com"
+        );
         assert_eq!(sync.interval, Duration::from_secs(90));
     }
 

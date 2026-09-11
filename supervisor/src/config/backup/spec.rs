@@ -29,7 +29,7 @@ pub struct DbBackupConfig {
 impl DbBackupConfig {
     /// Bucket-relative prefix holding the dumps; ends with `/`.
     pub fn prefix(&self) -> String {
-        format!("{}db/", self.sync.prefix)
+        format!("{}db/", self.sync.prefix())
     }
 
     /// Object-name prefix for the dumps (`<remote>/db/sqlite-…`).

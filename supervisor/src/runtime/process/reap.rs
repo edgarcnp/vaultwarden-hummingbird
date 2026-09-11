@@ -2,7 +2,7 @@
 //! itself lives in the reaper hub ([`super::reaper`]) — the only waitpid
 //! caller in the process; this module just reads delivered statuses.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nix::sys::signal::Signal;
 use nix::sys::wait::WaitStatus;
@@ -10,6 +10,7 @@ use nix::sys::wait::WaitStatus;
 use super::child::{KILL_GRACE, POLL, signal_group};
 use super::reaper::Handle;
 use crate::util::log;
+use crate::util::wait_until;
 
 /// Container exit code: the child's own code, or 128+signal (a SIGTERM'd
 /// service reports 143 — same as tini / plain Docker).
@@ -45,26 +46,20 @@ pub enum Gone {
 /// Escalates SIGTERM→SIGKILL once `grace` passes, then gives up after
 /// [`KILL_GRACE`] more seconds rather than hanging the container's exit.
 pub fn reap_until_gone(child: &Handle, grace: Duration) -> Gone {
-    let mut deadline = Instant::now() + grace;
-    let mut killed = false;
-    loop {
-        if let Some(status) = child.status() {
-            return Gone::Reaped(status);
+    let reaped = || child.status();
+    if let Some(status) = wait_until(reaped, grace, || false, POLL) {
+        return Gone::Reaped(status);
+    }
+    signal_group(child.pid, Signal::SIGKILL);
+    match wait_until(reaped, KILL_GRACE, || false, POLL) {
+        Some(status) => Gone::Reaped(status),
+        None => {
+            log::err(&format!(
+                "pid {} unreapable; continuing shutdown",
+                child.pid
+            ));
+            Gone::Stuck
         }
-        let now = Instant::now();
-        if now >= deadline {
-            if killed {
-                log::err(&format!(
-                    "pid {} unreapable; continuing shutdown",
-                    child.pid
-                ));
-                return Gone::Stuck;
-            }
-            signal_group(child.pid, Signal::SIGKILL);
-            killed = true;
-            deadline = now + KILL_GRACE;
-        }
-        std::thread::sleep(POLL);
     }
 }
 

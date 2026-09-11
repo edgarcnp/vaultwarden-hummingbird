@@ -2,10 +2,11 @@
 
 use crate::config::DbBackupConfig;
 use crate::util::log;
+use crate::util::make_private;
 
 use super::lineage;
 use super::prune::prune;
-use super::staging::{lock_down, sweep_staging};
+use super::staging::sweep_staging;
 use super::timestamp::timestamp;
 use super::tools::{client, list_objects};
 use super::unchanged;
@@ -71,7 +72,8 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         log::err("db backup: dump failed; continuing (bucket unchanged)");
         return;
     }
-    lock_down(&staged);
+    // Owner-only before the staged dump leaves the volume.
+    let _ = make_private(&staged);
     let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
     // Skip a redundant upload only while this lineage still owns the
     // bucket's newest object: if that object was deleted externally, the

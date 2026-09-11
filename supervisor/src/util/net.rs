@@ -1,7 +1,12 @@
 //! Unix-socket readiness probing for the tailscaled LocalAPI.
 
 use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::wait_until;
+
+/// Poll cadence for socket readiness.
+const TICK: Duration = Duration::from_millis(100);
 
 /// Authoritative readiness check: connect() to the LocalAPI socket (the fd
 /// closes on drop). A CLI probe would false-negative on a fresh, logged-out
@@ -11,25 +16,23 @@ fn unix_socket_alive(path: &str) -> bool {
 }
 
 /// Poll the LocalAPI socket until tailscaled is listening, or until
-/// timeout/abort (`abort` is checked each tick so a stop request never
-/// waits out the wait; the caller distinguishes the two outcomes).
+/// timeout/abort (`None` covers both; the caller distinguishes the two
+/// outcomes via its own stop flag).
 pub fn wait_daemon(socket: &str, timeout: Duration, abort: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if unix_socket_alive(socket) {
-            return true;
-        }
-        if abort() || Instant::now() > deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_until(
+        || unix_socket_alive(socket).then_some(()),
+        timeout,
+        abort,
+        TICK,
+    )
+    .is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+    use std::time::Instant;
 
     fn sock_path(name: &str) -> String {
         std::env::temp_dir()

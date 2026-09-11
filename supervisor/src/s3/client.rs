@@ -14,7 +14,7 @@ use std::time::Duration;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use url::Url;
 
-use crate::config::SyncConfig;
+use super::remote::RemoteSpec;
 
 /// Presigned-URL lifetime; must comfortably exceed the per-request
 /// timeout (the request is issued immediately after signing).
@@ -30,8 +30,8 @@ const MAX_LIST_KEYS: usize = 10_000;
 /// memory grows.
 const LIST_BODY_CAP: u64 = 16 * 1024 * 1024;
 
-/// AWS default when SUPERVISOR_S3_ENDPOINT is empty (rclone's old
-/// default region too).
+/// AWS default when the remote's endpoint is empty (rclone's old default
+/// region too).
 const AWS_ENDPOINT: &str = "https://s3.us-east-1.amazonaws.com";
 const AWS_REGION: &str = "us-east-1";
 /// Custom endpoints (R2 et al) accept/ignore the region; "auto" is R2's
@@ -54,25 +54,29 @@ pub struct Client {
 }
 
 impl Client {
-    /// Build from resolved sync config. `Err` = unusable configuration
-    /// (bad endpoint URL) — callers treat it as a failed operation, per
-    /// each caller's own failure semantics.
-    pub fn new(cfg: &SyncConfig, timeout: Duration) -> Result<Self, String> {
-        let endpoint: Url = if cfg.endpoint.is_empty() {
+    /// Connect to the remote. `Err` = unusable configuration (bad
+    /// endpoint URL) — callers treat it as a failed operation, per each
+    /// caller's own failure semantics.
+    pub fn connect(spec: &RemoteSpec, timeout: Duration) -> Result<Self, String> {
+        let endpoint: Url = if spec.endpoint.is_empty() {
             AWS_ENDPOINT
         } else {
-            &cfg.endpoint
+            &spec.endpoint
         }
         .parse()
         .map_err(|e| format!("invalid S3 endpoint: {e}"))?;
-        let region = if cfg.endpoint.is_empty() {
+        let region = if spec.endpoint.is_empty() {
             AWS_REGION
         } else {
             CUSTOM_REGION
         };
-        let bucket_name = cfg.bucket.clone();
-        let bucket = Bucket::new(endpoint, UrlStyle::Path, bucket_name, region.to_string())
-            .map_err(|e| format!("invalid S3 bucket configuration: {e}"))?;
+        let bucket = Bucket::new(
+            endpoint,
+            UrlStyle::Path,
+            spec.bucket.clone(),
+            region.to_string(),
+        )
+        .map_err(|e| format!("invalid S3 bucket configuration: {e}"))?;
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .max_redirects(0) // a presigned URL must never be re-signed by a redirect
@@ -80,7 +84,7 @@ impl Client {
             .new_agent();
         Ok(Self {
             bucket,
-            credentials: Credentials::new(&cfg.key_id, &cfg.key_secret),
+            credentials: Credentials::new(&spec.key_id, &spec.key_secret),
             agent,
         })
     }
@@ -216,32 +220,30 @@ fn http_err(e: &ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SyncConfig;
     use std::time::Duration;
 
-    fn cfg(endpoint: &str) -> SyncConfig {
-        SyncConfig::new(
-            "r2:vw-state".into(),
-            "id".into(),
-            "secret".into(),
-            endpoint.into(),
-            Duration::from_secs(60),
-        )
-        .expect("valid test remote")
+    fn spec(endpoint: &str) -> RemoteSpec {
+        RemoteSpec {
+            bucket: "vw-state".into(),
+            prefix: String::new(),
+            key_id: "id".into(),
+            key_secret: "secret".into(),
+            endpoint: endpoint.into(),
+        }
     }
 
     #[test]
     fn client_builds_for_aws_default_and_custom_endpoints() {
-        assert!(Client::new(&cfg(""), Duration::from_secs(60)).is_ok());
+        assert!(Client::connect(&spec(""), Duration::from_secs(60)).is_ok());
         assert!(
-            Client::new(
-                &cfg("https://acct.r2.cloudflarestorage.com"),
+            Client::connect(
+                &spec("https://acct.r2.cloudflarestorage.com"),
                 Duration::from_secs(60)
             )
             .is_ok()
         );
         // An unparseable endpoint is a construction error, never a panic.
-        assert!(Client::new(&cfg("not a url"), Duration::from_secs(60)).is_err());
+        assert!(Client::connect(&spec("not a url"), Duration::from_secs(60)).is_err());
     }
 
     /// Operations against a non-listening endpoint fail closed, bounded,
@@ -250,7 +252,7 @@ mod tests {
     #[test]
     fn operations_fail_closed_on_unreachable_endpoint() {
         // Port 1 on localhost: connection refused immediately.
-        let client = Client::new(&cfg("http://127.0.0.1:1"), Duration::from_secs(5))
+        let client = Client::connect(&spec("http://127.0.0.1:1"), Duration::from_secs(5))
             .expect("local endpoint parses");
         let abort = || false;
         // an existing local file, so the failure is the HTTP layer's
@@ -274,8 +276,8 @@ mod tests {
     /// The abort flag wins before any request is attempted.
     #[test]
     fn abort_beats_the_request() {
-        let client = Client::new(
-            &cfg("https://acct.r2.cloudflarestorage.com"),
+        let client = Client::connect(
+            &spec("https://acct.r2.cloudflarestorage.com"),
             Duration::from_secs(5),
         )
         .expect("client");

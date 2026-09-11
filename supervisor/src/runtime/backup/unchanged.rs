@@ -11,10 +11,10 @@
 //! instead of skipped over.
 
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::util::log;
+use crate::util::make_private;
 
 /// 64 KiB comparison chunks: bounded memory, few syscalls per MiB.
 const CHUNK: usize = 64 * 1024;
@@ -77,7 +77,7 @@ pub(super) fn retain(staged: &str, db_path: &str) {
     let last = last_path(db_path);
     match std::fs::rename(staged, &last) {
         Ok(()) => {
-            let _ = std::fs::set_permissions(&last, std::fs::Permissions::from_mode(0o600));
+            let _ = make_private(&last);
         }
         Err(e) => {
             let _ = std::fs::remove_file(staged);
@@ -91,6 +91,8 @@ pub(super) fn retain(staged: &str, db_path: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn scratch(name: &str) -> (String, String) {

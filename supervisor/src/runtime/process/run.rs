@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::Signal;
 
 use super::child::{KILL_GRACE, POLL, signal_group, spawn};
+use super::env::EnvGrant;
 use super::reap::exit_code;
 use crate::util::{StagedFile, log};
 
@@ -45,34 +46,23 @@ pub(crate) fn allowlisted(vars: impl Iterator<Item = (String, String)>) -> Vec<(
         .collect()
 }
 
-/// Clear the child's environment and set only the allow-listed subset of
-/// `source` plus the explicit `extra_env` (connection config rides there
-/// — e.g. pg_env). Never place secrets here.
-fn apply_env_from(
-    cmd: &mut Command,
-    extra_env: &[(String, String)],
-    source: impl Iterator<Item = (String, String)>,
-) {
-    cmd.env_clear();
-    for (k, v) in allowlisted(source) {
-        cmd.env(k, v);
-    }
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-}
-
-/// [`apply_env_from`] over the supervisor's own environment. Shared by the
-/// bounded runs and the long-running tailscaled spawn.
+/// [`allowlisted`] over the supervisor's own environment, applied as an
+/// [`EnvGrant`]: clear, allow-listed plumbing, then `extra_env`
+/// (connection config rides there — e.g. pg_env). Never place secrets
+/// here. Shared by the bounded runs and the long-running tailscaled
+/// spawn.
 pub fn apply_env(cmd: &mut Command, extra_env: &[(String, String)]) {
-    apply_env_from(
-        cmd,
-        extra_env,
-        std::env::vars_os().filter_map(|(k, v)| {
-            let k = k.to_str()?;
-            Some((k.to_string(), v.to_string_lossy().into_owned()))
-        }),
-    );
+    EnvGrant::new()
+        .layer(
+            allowlisted(std::env::vars_os().filter_map(|(k, v)| {
+                let k = k.to_str()?;
+                Some((k.to_string(), v.to_string_lossy().into_owned()))
+            }))
+            .into_iter()
+            .map(|(k, v)| (k, v.into())),
+        )
+        .layer(extra_env.iter().cloned().map(|(k, v)| (k, v.into())))
+        .apply(cmd);
 }
 
 /// Cap on stdout captured by [`run_bounded_capture`]: a listing far beyond
@@ -318,7 +308,7 @@ mod tests {
 
     /// The allow-list policy: baseline plumbing keys pass, secrets and
     /// everything else do not, and the child env is exactly
-    /// baseline + extra_env (apply_env_from clears the rest).
+    /// baseline + extra_env (EnvGrant clears the rest).
     #[test]
     fn env_allowlist_passes_plumbing_and_blocks_secrets() {
         let vars = [
@@ -339,11 +329,14 @@ mod tests {
             ("HOME".to_string(), "/root".to_string()),
         ];
         let mut cmd = Command::new("unused");
-        apply_env_from(
-            &mut cmd,
-            &[("MARKER".to_string(), "yes".to_string())],
-            vars.into_iter(),
-        );
+        EnvGrant::new()
+            .layer(
+                allowlisted(vars.into_iter())
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into())),
+            )
+            .layer([("MARKER".to_string(), "yes".into())])
+            .apply(&mut cmd);
         let envs: std::collections::BTreeMap<String, String> = cmd
             .get_envs()
             .map(|(k, v)| {

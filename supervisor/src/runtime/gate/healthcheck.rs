@@ -4,12 +4,13 @@
 //! report the verdict a platform health probe would get.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::probe::{PROBE_TIMEOUT, get_alive};
 
 use crate::runtime::POLL;
 use crate::util::log;
+use crate::util::wait_until;
 
 /// Hard overall deadline: a boot-time gate that is not yet bound is retried
 /// until this expires. Worst case is budget + probe; 6 + 2 = 8s stays under
@@ -39,16 +40,13 @@ pub fn healthcheck(exposed: &str) -> bool {
 /// suite fast). Termination is by construction: each iteration checks the
 /// deadline, and the probe itself is bounded by [`PROBE_TIMEOUT`].
 fn healthcheck_until(addr: SocketAddr, budget: Duration) -> bool {
-    let deadline = Instant::now() + budget;
-    loop {
-        if get_alive(addr, PROBE_TIMEOUT) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(POLL);
-    }
+    wait_until(
+        || get_alive(addr, PROBE_TIMEOUT).then_some(()),
+        budget,
+        || false,
+        POLL,
+    )
+    .is_some()
 }
 
 #[cfg(test)]

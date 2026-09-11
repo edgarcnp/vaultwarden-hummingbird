@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(cfg.db_path, "/data/db.sqlite3");
         // prefix() is now bucket-relative: <sync prefix>db/
         assert_eq!(cfg.prefix(), "db/");
-        assert_eq!(cfg.sync.prefix, "");
+        assert_eq!(cfg.sync.prefix(), "");
     }
 
     #[test]

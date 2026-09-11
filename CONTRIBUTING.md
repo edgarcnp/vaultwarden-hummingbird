@@ -53,9 +53,12 @@ CI runs exactly those checks, so if they pass locally, CI will pass. Keep the `-
 ```
 supervisor/src/
 ├── main.rs        startup and the --healthcheck mode
+├── boot.rs        the boot phase machine
 ├── config/        reading .env and environment into a Config
+├── s3/            the minimal S3 client (RemoteSpec + put/get/list/delete)
+├── util/          shared helpers (logging, bounded waits, staged files)
 └── runtime/
-    ├── process/   starting and stopping child programs
+    ├── process/   starting and stopping child programs, env grants
     ├── services/  tailscaled and vaultwarden themselves
     ├── gate/      the public-port health endpoint
     ├── backup/    sqlite backup and restore to S3
