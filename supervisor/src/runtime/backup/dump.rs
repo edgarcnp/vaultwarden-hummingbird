@@ -63,7 +63,7 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     }
     let ts = timestamp();
     let staged = format!("{}/{}-{ts}.{}", cfg.staging, cfg.db_label(), cfg.db_ext());
-    let object = format!("{}/{}-{ts}.{}", cfg.prefix(), cfg.db_label(), cfg.db_ext());
+    let object = object_key(cfg, &ts);
 
     if !sweep_staging(&cfg.staging) {
         return;
@@ -106,8 +106,19 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     prune(&s3, cfg, names, &abort);
 }
 
+/// The bucket key for a dump: `<prefix><label>-<ts>.<ext>`. The prefix
+/// already ends with `/` — an extra separator would hide the object from
+/// every `db/`-relative listing (prune, restore, lineage).
+fn object_key(cfg: &DbBackupConfig, ts: &str) -> String {
+    format!("{}{}-{ts}.{}", cfg.prefix(), cfg.db_label(), cfg.db_ext())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use crate::config::SyncConfig;
+
     use super::super::support;
     use super::*;
 
@@ -137,5 +148,26 @@ mod tests {
         tick(&cfg, || false);
         assert!(!std::path::Path::new(&cfg.staging).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn object_key_never_doubles_the_slash() {
+        for remote in ["r2:bucket", "r2:bucket/sub"] {
+            let sync = SyncConfig::new(
+                remote.into(),
+                "id".into(),
+                "secret".into(),
+                String::new(),
+                Duration::from_secs(60),
+            )
+            .expect("valid test remote");
+            let cfg = support::cfg_with_sync(sync);
+            let key = object_key(&cfg, "20260911T182850Z");
+            assert_eq!(
+                key,
+                format!("{}sqlite-20260911T182850Z.sqlite3", cfg.prefix())
+            );
+            assert!(!key.contains("//"), "no doubled separator allowed: {key}");
+        }
     }
 }
