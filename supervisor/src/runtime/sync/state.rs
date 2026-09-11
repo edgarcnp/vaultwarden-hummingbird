@@ -6,7 +6,7 @@
 //! bucket/path. Every failure is non-fatal; worst case is a fresh node
 //! registration, one client re-login, or one cert re-issuance.
 
-use crate::config::{RCLONE, SYNC_TIMEOUT, SyncConfig};
+use crate::config::{RCLONE, RCLONE_NO_CHECK_BUCKET, SYNC_TIMEOUT, SyncConfig};
 use crate::runtime::run_bounded_env;
 use crate::util::log;
 
@@ -22,9 +22,10 @@ const INCLUDES: [&str; 6] = [
 ];
 
 /// rclone argv for one copy operation; backend config rides env (never
-/// argv — /proc cmdline is world-readable).
+/// argv — /proc cmdline is world-readable). Uploads skip the bucket
+/// pre-check (see [`RCLONE_NO_CHECK_BUCKET`]); harmless on the pull path.
 fn copy_args(src: &str, dst: &str) -> Vec<String> {
-    ["copy", src, dst]
+    ["copy", RCLONE_NO_CHECK_BUCKET, src, dst]
         .into_iter()
         .chain(INCLUDES)
         .map(String::from)
@@ -64,10 +65,13 @@ mod tests {
     #[test]
     fn copy_args_covers_scope_and_direction() {
         let a = copy_args("/data", "r2:vw-state");
-        assert_eq!(&a[..3], &["copy", "/data", "r2:vw-state"]);
-        assert_eq!(&a[3..], &INCLUDES);
+        assert_eq!(
+            &a[..4],
+            &["copy", RCLONE_NO_CHECK_BUCKET, "/data", "r2:vw-state"]
+        );
+        assert_eq!(&a[4..], &INCLUDES);
         let b = copy_args("r2:vw-state", "/data");
-        assert_eq!(&b[1..3], &["r2:vw-state", "/data"]);
+        assert_eq!(&b[2..4], &["r2:vw-state", "/data"]);
     }
 
     #[test]
