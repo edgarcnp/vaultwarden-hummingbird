@@ -202,9 +202,28 @@ red).
   hub-driven teardown). Image: 321 MB (rclone ~55 MB layer gone;
   supervisor grew by ureq/rustls).
 
+- 2026-09-11 — **Phase 3 complete** (uncommitted): breaking config
+  simplification. The dotenv file is strict — only TAILSCALE_*/
+  SUPERVISOR_*/VAULTWARDEN_* keys are accepted; anything else (bare
+  upstream names, a VAULTWARDEN_ key stripping into the supervisor
+  namespace) refuses the boot naming the offending keys, values never
+  logged. The port has ONE spelling (VAULTWARDEN_PORT); the legacy
+  VAULTWARDEN_ROCKET_PORT alias and bare ROCKET_PORT refuse the boot
+  with a message naming the valid spelling (ambient bare ROCKET_PORT
+  was never consumed, so ambient handling is unchanged). FileConfig
+  gained `invalid`; vaultwarden.rs `file_key` deleted (the file map
+  arrives pre-routed); db_url empty-file-value now means unset.
+  Docs rewritten: README config section, .env.example header with
+  migration note, compose.yaml header. Verified: 114 tests ×3, fmt,
+  clippy -D warnings, check --release, image build, and real-binary
+  smoke tests: bare-key file refuses naming DATABASE_URL; alias file
+  and alias env refuse with the specific message; strict prefix-only
+  file proceeds past config to the Tailscale gate.
+
 ## Status
 
-- Phases 1–2: **done** (1 committed, 2 uncommitted).
-- Phases 3–5: pending. Next action on resume: Phase 3 (breaking config
-  simplification). UNKNOWN until a live run: real R2 round-trip
-  (put/list/get/delete + wrong-credentials fail-closed).
+- Phases 1–2: **done** (committed: e888022, 03b06dd). Phase 3: done,
+  uncommitted.
+- Phases 4–5: pending. Next action on resume: Phase 4 (boot state
+  machine). UNKNOWN until a live run: real R2 round-trip (put/list/
+  get/delete + wrong-credentials fail-closed).

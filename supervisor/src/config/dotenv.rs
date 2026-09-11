@@ -1,15 +1,17 @@
-//! Supervisor-owned dotenv file (SUPERVISOR_ENV_FILE), split after parse:
-//! supervisor-consumed keys (`TAILSCALE_*`/`SUPERVISOR_*` plus the port
-//! knobs — see [`is_supervisor_consumed`]) -> supervisor knobs (never the
-//! child, never `podman inspect`); `VAULTWARDEN_*` keys -> the vaultwarden
-//! child under the stripped plain upstream name; everything else ->
-//! forwarded to the child verbatim. Parsed by `dotenvy`; invalid lines are
-//! logged (never their content — they may carry credentials) and skipped;
-//! later duplicates win.
+//! Supervisor-owned dotenv file (SUPERVISOR_ENV_FILE). The file is the
+//! explicit grant surface and is STRICT: every key must belong to one of
+//! the three namespaces — `TAILSCALE_*`/`SUPERVISOR_*` (supervisor knobs,
+//! never the child, never `podman inspect`), `VAULTWARDEN_*` (forwarded
+//! to the vaultwarden child under the stripped plain upstream name), or
+//! nothing else — bare upstream names (`DATABASE_URL`) and any other key
+//! are collected in [`FileConfig::invalid`] and REFUSE the boot: a
+//! typo'd or legacy key must never be silently ignored. Parsed by
+//! `dotenvy`; invalid syntax is logged (never its content — lines may
+//! carry credentials) and skipped; later duplicates win.
 
 use std::collections::BTreeMap;
 
-use super::env::{is_supervisor_consumed, vaultwarden_key};
+use super::env::{is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
 use crate::util::log;
 
 /// Env var holding the dotenv file path (absent/empty = env-only mode).
@@ -17,10 +19,14 @@ const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
 
 #[derive(Default)]
 pub struct FileConfig {
-    /// supervisor-consumed keys (TAILSCALE_*/SUPERVISOR_*/port knobs)
+    /// supervisor-consumed keys (TAILSCALE_*/SUPERVISOR_*/port knob)
     pub knobs: BTreeMap<String, String>,
-    /// child env, VAULTWARDEN_* keys under the stripped upstream name
+    /// vaultwarden child env, `VAULTWARDEN_*` keys under the stripped
+    /// plain upstream name
     pub child: BTreeMap<String, String>,
+    /// keys outside the accepted namespaces — boot refuses when
+    /// non-empty (key names only; values may be secrets)
+    pub invalid: Vec<String>,
 }
 
 impl FileConfig {
@@ -53,9 +59,17 @@ impl FileConfig {
                     if is_supervisor_consumed(&k) {
                         cfg.knobs.insert(k, v);
                     } else if let Some(stripped) = vaultwarden_key(&k) {
-                        cfg.child.insert(stripped.to_string(), v);
+                        // A VAULTWARDEN_ key stripping into the supervisor's
+                        // namespace (VAULTWARDEN_TAILSCALE_*) is a dangerous
+                        // misconfiguration, not a child key: strict refusal.
+                        if is_supervisor_key(stripped) {
+                            cfg.invalid.push(k);
+                        } else {
+                            cfg.child.insert(stripped.to_string(), v);
+                        }
                     } else {
-                        cfg.child.insert(k, v);
+                        // bare upstream names and anything unrecognized
+                        cfg.invalid.push(k);
                     }
                 }
                 // LineParse embeds the raw line — never log it (it may hold
@@ -89,12 +103,11 @@ mod tests {
         let path = write_tmp(
             r#"
 # full-line comment
-DOMAIN = https://vault.example.com   # trailing comment stripped
-SIGNUPS_ALLOWED=false
-QUOTED = "hello world # not a comment"
-SINGLE = 'raw # value'
+VAULTWARDEN_DOMAIN = https://vault.example.com   # trailing comment stripped
+VAULTWARDEN_SIGNUPS_ALLOWED=false
+VAULTWARDEN_QUOTED = "hello world # not a comment"
+VAULTWARDEN_SINGLE = 'raw # value'
 export TAILSCALE_AUTHKEY=tskey-auth-file
-SUPERVISOR_ENV_FILE=/elsewhere
 VAULTWARDEN_DATABASE_URL=sqlite:///data/db.sqlite3
 
 not a valid line
@@ -117,9 +130,7 @@ not a valid line
             cfg.child.get("SINGLE").map(String::as_str),
             Some("raw # value")
         );
-        assert!(!cfg.child.keys().any(|k| k.starts_with("TAILSCALE_")));
-        assert!(!cfg.child.keys().any(|k| k.starts_with("SUPERVISOR_")));
-        assert!(!cfg.child.keys().any(|k| k.starts_with("VAULTWARDEN_")));
+        assert!(cfg.invalid.is_empty(), "prefixed keys are all valid");
         assert_eq!(
             cfg.knobs.get("TAILSCALE_AUTHKEY").map(String::as_str),
             Some("tskey-auth-file")
@@ -128,15 +139,43 @@ not a valid line
             cfg.child.get("DATABASE_URL").map(String::as_str),
             Some("sqlite:///data/db.sqlite3")
         );
-        assert_eq!(
-            cfg.knobs.get("SUPERVISOR_ENV_FILE").map(String::as_str),
-            Some("/elsewhere")
-        );
     }
 
-    /// The port knobs are supervisor-consumed in both spellings: they land
-    /// in the knobs map from the file, never in the child env (the
-    /// supervisor binds the gate on them and pins the child's port).
+    /// Everything outside the three namespaces is invalid — bare upstream
+    /// names included: the file is the explicit grant surface, so a
+    /// legacy or typo'd key refuses the boot instead of being ignored.
+    #[test]
+    fn unprefixed_keys_are_invalid() {
+        let path = write_tmp(
+            "DATABASE_URL=sqlite:///data/db.sqlite3\nDOMAIN=https://x.example\nTAILSCALE_AUTHKEY=ok\n",
+        );
+        let cfg = FileConfig::load_from(Some(&path));
+        assert_eq!(
+            cfg.invalid,
+            vec!["DATABASE_URL".to_string(), "DOMAIN".to_string()]
+        );
+        // valid keys still route normally
+        assert!(cfg.child.is_empty());
+        assert!(cfg.knobs.contains_key("TAILSCALE_AUTHKEY"));
+    }
+
+    /// A VAULTWARDEN_ key stripping into the supervisor's namespace is a
+    /// dangerous misconfiguration (a secret in the wrong namespace):
+    /// strict refusal, never a silent drop.
+    #[test]
+    fn vaultwarden_prefixed_supervisor_names_are_invalid() {
+        let path = write_tmp("VAULTWARDEN_TAILSCALE_AUTHKEY=leak\nTAILSCALE_HOSTNAME=ok\n");
+        let cfg = FileConfig::load_from(Some(&path));
+        assert_eq!(
+            cfg.invalid,
+            vec!["VAULTWARDEN_TAILSCALE_AUTHKEY".to_string()]
+        );
+        assert!(cfg.knobs.contains_key("TAILSCALE_HOSTNAME"));
+    }
+
+    /// The port knobs are supervisor-consumed: they land in the knobs map
+    /// from the file, never in the child env (the supervisor binds the
+    /// gate on them and pins the child's port).
     #[test]
     fn port_knobs_route_to_the_supervisor() {
         let path =
@@ -146,16 +185,14 @@ not a valid line
             cfg.knobs.get("VAULTWARDEN_PORT").map(String::as_str),
             Some("8443")
         );
+        // the legacy alias routes to knobs (it is consumed) and is
+        // refused at resolution time
         assert_eq!(
             cfg.knobs.get("VAULTWARDEN_ROCKET_PORT").map(String::as_str),
             Some("9999")
         );
-        // bare upstream names still forward verbatim (the port chain's
-        // last file fallback; the supervisor pins the child's real port)
-        assert_eq!(
-            cfg.child.get("ROCKET_PORT").map(String::as_str),
-            Some("2222")
-        );
+        // the bare upstream spelling is simply invalid
+        assert_eq!(cfg.invalid, vec!["ROCKET_PORT".to_string()]);
         assert!(!cfg.child.contains_key("PORT"));
     }
 
@@ -164,7 +201,7 @@ not a valid line
     #[test]
     fn double_quotes_expand_and_single_quotes_stay_raw() {
         let path = write_tmp(
-            "BASE=base\nNEWLINE=\"a\\nb\"\nRAW='a\\nb'\nEXPANDED=\"${BASE}/x\"\nLITERAL='no ${BASE} here'\nPASS='p@ss:wo\"rd'\n",
+            "VAULTWARDEN_BASE=base\nVAULTWARDEN_NEWLINE=\"a\\nb\"\nVAULTWARDEN_RAW='a\\nb'\nVAULTWARDEN_EXPANDED=\"${VAULTWARDEN_BASE}/x\"\nVAULTWARDEN_LITERAL='no ${BASE} here'\n",
         );
         let cfg = FileConfig::load_from(Some(&path));
         assert_eq!(cfg.child.get("NEWLINE").map(String::as_str), Some("a\nb"));
@@ -177,10 +214,6 @@ not a valid line
             cfg.child.get("LITERAL").map(String::as_str),
             Some("no ${BASE} here")
         );
-        assert_eq!(
-            cfg.child.get("PASS").map(String::as_str),
-            Some("p@ss:wo\"rd")
-        );
     }
 
     #[test]
@@ -188,6 +221,7 @@ not a valid line
         let cfg = FileConfig::load_from(None);
         assert!(cfg.child.is_empty());
         assert!(cfg.knobs.is_empty());
+        assert!(cfg.invalid.is_empty());
     }
 
     #[test]
@@ -197,10 +231,11 @@ not a valid line
     }
 
     #[test]
-    fn duplicates_win_later_and_bad_keys_are_dropped() {
-        let path = write_tmp("A=1\nA=2\nBAD-KEY=3\njust words\n");
+    fn duplicates_win_later() {
+        let path = write_tmp("VAULTWARDEN_A=1\nVAULTWARDEN_A=2\n");
         let cfg = FileConfig::load_from(Some(&path));
         assert_eq!(cfg.child.len(), 1);
         assert_eq!(cfg.child.get("A").map(String::as_str), Some("2"));
+        assert!(cfg.invalid.is_empty());
     }
 }

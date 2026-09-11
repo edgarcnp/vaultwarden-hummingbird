@@ -12,11 +12,13 @@ pub fn is_supervisor_key(key: &str) -> bool {
 }
 
 /// Keys the supervisor consumes itself, on top of its own namespaces: the
-/// exposed-port knob in both spellings (`VAULTWARDEN_PORT`, and its
-/// upstream-named alias `VAULTWARDEN_ROCKET_PORT`). These must resolve the
-/// same way wherever the user defined them (env or dotenv file) and must
-/// never reach the vaultwarden child — the supervisor binds the gate on
-/// them and pins the child's ROCKET_PORT itself.
+/// exposed-port knob (`VAULTWARDEN_PORT`), and the legacy alias
+/// `VAULTWARDEN_ROCKET_PORT` — which is consumed only so it can be routed
+/// away from the child and refused at resolution with a message naming
+/// the one valid spelling. These must resolve the same way wherever the
+/// user defined them (env or dotenv file) and must never reach the
+/// vaultwarden child — the supervisor binds the gate on them and pins
+/// the child's ROCKET_PORT itself.
 pub fn is_supervisor_consumed(key: &str) -> bool {
     is_supervisor_key(key) || key == "VAULTWARDEN_PORT" || key == "VAULTWARDEN_ROCKET_PORT"
 }

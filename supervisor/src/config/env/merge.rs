@@ -47,15 +47,19 @@ pub struct Config {
 }
 
 impl Config {
-    /// Merge order, everywhere: env > file > default. The gatekeeper port
-    /// accepts both knob spellings from either layer, then the file's bare
-    /// ROCKET_PORT; vaultwarden keys (incl. the DB URL) likewise resolve
-    /// env first, so the supervisor always sees the same values the child
-    /// gets ([`crate::runtime::services::vaultwarden`] applies file, then
-    /// ambient, then the pins). Empty = unset; bad booleans warn and take
-    /// the default. Returns None when a required knob is missing
-    /// (TAILSCALE_AUTHKEY): the vault is unreachable without Tailscale, so
-    /// boot must fail closed.
+    /// Merge order, everywhere: env > file > default. The dotenv file is
+    /// strict (see [`FileConfig`]): only the three namespaces are
+    /// accepted and any unrecognized key refuses the boot. The
+    /// gatekeeper port has ONE spelling, `VAULTWARDEN_PORT` — the legacy
+    /// `VAULTWARDEN_ROCKET_PORT` alias and a bare `ROCKET_PORT` refuse
+    /// the boot with a message naming the valid spelling. vaultwarden
+    /// keys (incl. the DB URL) resolve env first, so the supervisor
+    /// always sees the same values the child gets
+    /// ([`crate::runtime::services::vaultwarden`] applies file, then
+    /// ambient, then the pins). Empty = unset; bad booleans warn and
+    /// take the default. Returns None when a required knob is missing
+    /// (TAILSCALE_AUTHKEY) or anything refuses: the vault is unreachable
+    /// without Tailscale, so boot must fail closed.
     pub fn from_env() -> Option<Self> {
         Self::build(FileConfig::load(), |k| env::var(k).ok())
     }
@@ -63,14 +67,51 @@ impl Config {
     /// [`Self::from_env`] with the env source injected: tests pass a map,
     /// never mutating the process env (unsafe and racy).
     fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        // Legacy port spellings refuse the boot, naming the one valid
+        // spelling: they once changed behavior, so silently ignoring
+        // them would silently change the deployment.
+        if non_empty(lookup("VAULTWARDEN_ROCKET_PORT")).is_some() {
+            log::err(
+                "config: VAULTWARDEN_ROCKET_PORT (from the environment) is no longer accepted; \
+                 use VAULTWARDEN_PORT; refusing to start",
+            );
+            return None;
+        }
+        if non_empty(file.knobs.get("VAULTWARDEN_ROCKET_PORT").cloned()).is_some() {
+            log::err(
+                "config: VAULTWARDEN_ROCKET_PORT (from the dotenv file) is no longer accepted; \
+                 use VAULTWARDEN_PORT; refusing to start",
+            );
+            return None;
+        }
+        if file.invalid.iter().any(|k| k == "ROCKET_PORT") {
+            log::err(
+                "config: bare ROCKET_PORT (from the dotenv file) is no longer accepted; \
+                 use VAULTWARDEN_PORT; refusing to start",
+            );
+            return None;
+        }
+        // Any other key outside the accepted namespaces is a typo or a
+        // legacy spelling: name it and refuse — never ignore silently.
+        if !file.invalid.is_empty() {
+            let names = file
+                .invalid
+                .iter()
+                .map(|k| log::sanitize(k))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::err(&format!(
+                "config: unrecognized dotenv file keys ({names}); only TAILSCALE_*/\
+                 SUPERVISOR_*/VAULTWARDEN_* keys are accepted; refusing to start"
+            ));
+            return None;
+        }
+
         // The gatekeeper port: first valid candidate wins (invalid values
         // warn and fall through), process env before the dotenv file.
         let port = [
             lookup("VAULTWARDEN_PORT"),
-            lookup("VAULTWARDEN_ROCKET_PORT"),
             file.knobs.get("VAULTWARDEN_PORT").cloned(),
-            file.knobs.get("VAULTWARDEN_ROCKET_PORT").cloned(),
-            file.child.get("ROCKET_PORT").cloned(),
         ]
         .into_iter()
         .find_map(valid_port)
@@ -91,12 +132,11 @@ impl Config {
 
         // The vault's DB URL: env wins over file — the same precedence the
         // child env applies, so dumps and restores always reach the same DB
-        // the vault uses. (A bare DATABASE_URL on the container env is
-        // default-deny for the child and is NOT consulted here: consuming
-        // it would desync the backup target from the vault's actual DB.
-        // The file's bare spelling is the explicit grant surface.)
+        // the vault uses. The file's entry arrives only via the strict
+        // routing (`VAULTWARDEN_DATABASE_URL` stripped); a bare
+        // `DATABASE_URL` in the file already refused the boot above.
         let db_url = non_empty(lookup("VAULTWARDEN_DATABASE_URL"))
-            .or_else(|| file.child.get("DATABASE_URL").cloned());
+            .or_else(|| non_empty(file.child.get("DATABASE_URL").cloned()));
         let backup = resolve_backup(&knob, sync.as_ref(), db_url.clone());
 
         let flag = |key: &str, default: bool| parse_flag(key, &knob(key, ""), default);
@@ -257,7 +297,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("vw-sup-cfg-{}.env", std::process::id()));
         fs::write(
             &path,
-            "VAULTWARDEN_ROCKET_PORT=2222\nTAILSCALE_HOSTNAME=file-host\nTAILSCALE_AUTHKEY=file-key\nTAILSCALE_SERVE=false\nVAULTWARDEN_DOMAIN=https://f.example\n",
+            "VAULTWARDEN_PORT=2222\nTAILSCALE_HOSTNAME=file-host\nTAILSCALE_AUTHKEY=file-key\nTAILSCALE_SERVE=false\nVAULTWARDEN_DOMAIN=https://f.example\n",
         )
         .unwrap();
         let path_str = path.to_str().unwrap();
@@ -300,48 +340,75 @@ mod tests {
         assert!(cfg.serve);
     }
 
-    /// The gatekeeper port resolves from any layer and either spelling,
-    /// process env before the dotenv file. The file's VAULTWARDEN_PORT
-    /// previously leaked to the child as PORT instead of being consumed.
+    /// The gatekeeper port has ONE spelling, `VAULTWARDEN_PORT`, in both
+    /// layers, env first. The file's VAULTWARDEN_PORT previously leaked
+    /// to the child as PORT instead of being consumed.
     #[test]
-    fn port_resolves_from_any_source_env_first() {
-        // file spelling VAULTWARDEN_PORT (documented in .env.example)
+    fn port_resolves_from_env_then_file() {
+        // file spelling (documented in .env.example)
         let cfg = mk_with_file(
             &[],
             FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_PORT=8443\n"))),
         );
         assert_eq!(cfg.port, "8443");
         assert_eq!(cfg.vault_port.as_deref(), Some("8444"));
-        // file alias spelling
-        let cfg = mk_with_file(
-            &[],
-            FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_ROCKET_PORT=8445\n"))),
-        );
-        assert_eq!(cfg.port, "8445");
-        // file's bare ROCKET_PORT keeps working as the last fallback
-        let cfg = mk_with_file(
-            &[],
-            FileConfig::load_from(Some(&env_dotenv("ROCKET_PORT=8446\n"))),
-        );
-        assert_eq!(cfg.port, "8446");
-        // env beats the file at every spelling
+        // env beats the file
         let cfg = mk_with_file(
             &[("VAULTWARDEN_PORT", "3000")],
             FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_PORT=8443\n"))),
         );
         assert_eq!(cfg.port, "3000");
-        // env alias beats file knob
-        let cfg = mk_with_file(
-            &[("VAULTWARDEN_ROCKET_PORT", "3001")],
-            FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_PORT=8443\n"))),
-        );
-        assert_eq!(cfg.port, "3001");
         // an invalid env value warns and falls through to the file
         let cfg = mk_with_file(
             &[("VAULTWARDEN_PORT", "not-a-port")],
             FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_PORT=8443\n"))),
         );
         assert_eq!(cfg.port, "8443");
+    }
+
+    /// Legacy port spellings refuse the boot with a message naming the
+    /// one valid spelling — they once changed behavior, so silently
+    /// ignoring them would silently change the deployment.
+    #[test]
+    fn legacy_port_spellings_refuse_the_boot() {
+        // env alias
+        let map: BTreeMap<String, String> =
+            [("VAULTWARDEN_ROCKET_PORT".to_string(), "3001".to_string())]
+                .into_iter()
+                .collect();
+        assert!(Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none());
+        // file alias (routed to knobs, refused at resolution)
+        let cfg = Config::build(
+            FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_ROCKET_PORT=8445\n"))),
+            |_| None,
+        );
+        assert!(cfg.is_none());
+        // file's bare ROCKET_PORT
+        let cfg = Config::build(
+            FileConfig::load_from(Some(&env_dotenv("ROCKET_PORT=8446\n"))),
+            |_| None,
+        );
+        assert!(cfg.is_none());
+    }
+
+    /// Any other key outside the three namespaces in the dotenv file
+    /// refuses the boot, naming the keys (a typo or legacy spelling must
+    /// never be silently ignored).
+    #[test]
+    fn unrecognized_file_keys_refuse_the_boot() {
+        let cfg = Config::build(
+            FileConfig::load_from(Some(&env_dotenv(
+                "DATABASE_URL=sqlite:///data/db.sqlite3\nDOMAIN=https://x.example\n",
+            ))),
+            |_| None,
+        );
+        assert!(cfg.is_none());
+        // a VAULTWARDEN_ key stripping into the supervisor namespace too
+        let cfg = Config::build(
+            FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_TAILSCALE_AUTHKEY=x\n"))),
+            |_| None,
+        );
+        assert!(cfg.is_none());
     }
 
     /// The vault's DB URL follows the same env > file precedence the child
@@ -360,7 +427,7 @@ mod tests {
         let cfg = mk_with_file(
             &env,
             FileConfig::load_from(Some(&env_dotenv(
-                "DATABASE_URL=sqlite:///data/file.sqlite3\n",
+                "VAULTWARDEN_DATABASE_URL=sqlite:///data/file.sqlite3\n",
             ))),
         );
         assert_eq!(
@@ -368,7 +435,7 @@ mod tests {
             "/data/env.sqlite3"
         );
 
-        // file-only (either spelling) still resolves
+        // file-only still resolves
         let cfg = mk_with_file(
             s3,
             FileConfig::load_from(Some(&env_dotenv(
