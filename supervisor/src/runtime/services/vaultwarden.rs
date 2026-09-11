@@ -6,12 +6,12 @@ use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
 use crate::config::{VAULTWARDEN, is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
-use crate::runtime::{Pid, spawn};
+use crate::runtime::{Handle, spawn};
 
 /// vaultwarden in the foreground with a *granted* environment (see
 /// [`granted_env`]). Spawn failure returns `None`; the caller tears down
 /// and exits 1.
-pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Pid> {
+pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Handle> {
     let mut cmd = Command::new(VAULTWARDEN);
     cmd.env_clear();
     for (k, v) in granted_env(env::vars_os(), extra_env, vault_port) {

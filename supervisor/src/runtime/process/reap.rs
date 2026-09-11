@@ -1,46 +1,15 @@
-//! Namespace-wide reaping and wait-status decoding: as PID 1 every orphan
-//! re-parents to us, so the reaper drains strays as well as our own
-//! children.
+//! Wait-status decoding and the escalation wait for teardown. Reaping
+//! itself lives in the reaper hub ([`super::reaper`]) — the only waitpid
+//! caller in the process; this module just reads delivered statuses.
 
 use std::time::{Duration, Instant};
 
-use nix::errno::Errno;
 use nix::sys::signal::Signal;
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-// nix's typed pid wrapper; the crate's public `Pid` is a plain i32 alias,
-// so nix calls convert at the boundary.
-use nix::unistd::Pid as NixPid;
+use nix::sys::wait::WaitStatus;
 
-use super::child::{POLL, Pid, signal_group};
+use super::child::{KILL_GRACE, POLL, signal_group};
+use super::reaper::Handle;
 use crate::util::log;
-
-/// After SIGKILL (uncatchable), wait this long for the reap before giving
-/// up; a D-state process is the container runtime's problem, not ours.
-const KILL_GRACE: Duration = Duration::from_secs(5);
-
-/// Reap one pending zombie from anywhere in the namespace; `None` = nothing
-/// reapable right now. Never call from tests: this would also reap the test
-/// harness's children. A pid registered by a bounded run has its wait
-/// status preserved in the stolen-exit registry ([`super::stolen`]).
-/// Expected `waitpid` outcomes (no reaper match, interrupted) map to
-/// `None`; an unexpected error is logged once per occurrence instead of
-/// being silently swallowed.
-pub fn reap_any() -> Option<(Pid, WaitStatus)> {
-    match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-        Ok(status) => {
-            if let Some(pid) = status.pid() {
-                super::stolen::record(pid.as_raw(), status);
-            }
-            status.pid().map(|p| (p.as_raw(), status))
-        }
-        Err(Errno::ECHILD) => None,
-        Err(Errno::EINTR) => None,
-        Err(e) => {
-            log::err(&format!("reaper: unexpected waitpid failure: {e}"));
-            None
-        }
-    }
-}
 
 /// Container exit code: the child's own code, or 128+signal (a SIGTERM'd
 /// service reports 143 — same as tini / plain Docker).
@@ -64,40 +33,34 @@ pub fn exit_reason(status: WaitStatus) -> String {
 /// Outcome of waiting for a child to be reaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gone {
-    /// Reaped here; wait status.
+    /// Delivered by the reaper hub; wait status. (A second call finds the
+    /// same status: slots are not consumed.)
     Reaped(WaitStatus),
-    /// Already gone (e.g. reaped elsewhere as a stray).
-    Vanished,
     /// Still unreapable after SIGKILL + grace (uninterruptible D-state);
     /// gave up rather than hanging the container's exit.
     Stuck,
 }
 
-/// Wait until `pid` is reaped, draining stray zombies along the way.
+/// Wait until `pid`'s exit status is delivered by the reaper hub.
 /// Escalates SIGTERM→SIGKILL once `grace` passes, then gives up after
 /// [`KILL_GRACE`] more seconds rather than hanging the container's exit.
-pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
+pub fn reap_until_gone(child: &Handle, grace: Duration) -> Gone {
     let mut deadline = Instant::now() + grace;
     let mut killed = false;
     loop {
-        match waitpid(Some(NixPid::from_raw(pid)), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => {}
-            Ok(status) => return Gone::Reaped(status),
-            Err(Errno::ECHILD) => return Gone::Vanished,
-            Err(_) => {}
-        }
-        while let Some((p, status)) = reap_any() {
-            if p == pid {
-                return Gone::Reaped(status);
-            }
+        if let Some(status) = child.status() {
+            return Gone::Reaped(status);
         }
         let now = Instant::now();
         if now >= deadline {
             if killed {
-                log::err(&format!("pid {pid} unreapable; continuing shutdown"));
+                log::err(&format!(
+                    "pid {} unreapable; continuing shutdown",
+                    child.pid
+                ));
                 return Gone::Stuck;
             }
-            signal_group(pid, Signal::SIGKILL);
+            signal_group(child.pid, Signal::SIGKILL);
             killed = true;
             deadline = now + KILL_GRACE;
         }
@@ -108,6 +71,11 @@ pub fn reap_until_gone(pid: Pid, grace: Duration) -> Gone {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::time::Duration;
+
+    use nix::sys::signal::Signal;
+    use nix::sys::wait::WaitStatus;
+    use nix::unistd::Pid as NixPid;
 
     use super::super::child::spawn;
     use super::*;
@@ -143,20 +111,23 @@ mod tests {
     }
 
     #[test]
-    fn child_lifecycle_spawn_signal_reap_escalate() {
-        let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
-        assert!(signal_group(pid, Signal::SIGTERM));
-        match reap_until_gone(pid, Duration::from_secs(5)) {
+    fn reap_until_gone_terminates_and_escalates() {
+        // SIGTERM lands, the hub delivers 143, and a second call finds
+        // the same status (slots are read, not consumed).
+        let child = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
+        assert!(signal_group(child.pid, Signal::SIGTERM));
+        match reap_until_gone(&child, Duration::from_secs(5)) {
             Gone::Reaped(status) => assert_eq!(exit_code(status), 143),
             gone => panic!("expected reap after SIGTERM, got {gone:?}"),
         }
-        assert_eq!(
-            reap_until_gone(pid, Duration::from_millis(50)),
-            Gone::Vanished
-        );
+        match reap_until_gone(&child, Duration::from_millis(50)) {
+            Gone::Reaped(status) => assert_eq!(exit_code(status), 143),
+            gone => panic!("expected the delivered status again, got {gone:?}"),
+        }
 
-        let pid = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
-        match reap_until_gone(pid, Duration::from_millis(200)) {
+        // No clean exit: escalation to SIGKILL produces 137.
+        let child = spawn(Command::new("/bin/sh").args(["-c", "sleep 30"])).expect("spawn child");
+        match reap_until_gone(&child, Duration::from_millis(200)) {
             Gone::Reaped(status) => assert_eq!(exit_code(status), 137),
             gone => panic!("expected SIGKILL escalation, got {gone:?}"),
         }

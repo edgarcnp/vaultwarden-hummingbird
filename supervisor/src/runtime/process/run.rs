@@ -1,18 +1,16 @@
 //! Bounded child runs: run a CLI child to completion with a hard timeout,
 //! killing its whole process group on expiry so nothing it spawned
-//! outlives the budget. Each child registers with the stolen-exit
-//! registry ([`super::stolen`]; see there for the reaper race it closes).
+//! outlives the budget. Children are registered with the reaper hub
+//! ([`super::reaper`]) at spawn; verdicts come from the delivered status,
+//! never from a local wait.
 
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{Signal, killpg};
-use nix::sys::wait::WaitStatus;
-use nix::unistd::Pid as NixPid;
+use nix::sys::signal::Signal;
 
-use super::child::POLL;
-use super::stolen;
+use super::child::{KILL_GRACE, POLL, signal_group, spawn};
+use super::reap::exit_code;
 use crate::util::{StagedFile, log};
 
 /// Env keys external children may inherit: secret-free plumbing only.
@@ -82,21 +80,12 @@ pub fn apply_env(cmd: &mut Command, extra_env: &[(String, String)]) {
 /// this path (object names), so megabytes are already extraordinary.
 const CAPTURE_MAX: u64 = 16 * 1024 * 1024;
 
-/// Verdict from a reaper-stolen run: a recorded status, or `None`
-/// (stolen with the status lost — the safe direction is failure).
-/// Exit code 0 = success, decoded like the reaper does ([`exit_code`]).
-fn stolen_verdict(pid: i32) -> Option<bool> {
-    stolen::take(pid)
-        .flatten()
-        .map(|st: WaitStatus| super::reap::exit_code(st) == 0)
-}
-
-/// Core of both bounded runs: spawn, register, poll (verdict / abort /
-/// timeout / capture cap), then group-kill on failure and settle the
-/// stolen-exit entry. `capture` redirects stdout to a temp file and
-/// enforces the capture cap while the child runs; the file comes back so
-/// the capture wrapper can do its own capped final read. Returns
-/// `(success, captured stdout file)`; the file is `None` when not
+/// Core of both bounded runs: spawn (registered with the reaper hub),
+/// poll (verdict / abort / timeout / capture cap), then group-kill on
+/// failure and consume the reaped status. `capture` redirects stdout to a
+/// temp file and enforces the capture cap while the child runs; the file
+/// comes back so the capture wrapper can do its own capped final read.
+/// Returns `(success, captured stdout file)`; the file is `None` when not
 /// capturing or when the run never got far enough to matter.
 fn run_bounded_core(
     timeout: Duration,
@@ -115,7 +104,7 @@ fn run_bounded_core(
         None
     };
     let mut cmd = Command::new(prog);
-    cmd.args(args).process_group(0);
+    cmd.args(args);
     if let Some(cap) = &cap {
         use std::process::Stdio;
         match cap.file().try_clone() {
@@ -125,27 +114,16 @@ fn run_bounded_core(
         };
     }
     apply_env(&mut cmd, extra_env);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            log::err(&format!("{prog} spawn failed: {e}"));
-            return (false, None);
-        }
+    let Some(child) = spawn(&mut cmd) else {
+        return (false, None);
     };
-    let pid = child.id() as i32;
-    stolen::register(pid);
     let start = Instant::now();
     let success = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st.success(),
-            Ok(None) => {}
-            // ECHILD (or another wait error): the main reaper may have
-            // stolen the zombie; consult the registry before failing.
-            Err(_) => {
-                if let Some(v) = stolen_verdict(pid) {
-                    break v;
-                }
-            }
+        // Exit first: a delivered status beats abort/timeout — the real
+        // verdict of a child that finished in the same tick it was
+        // stopped for. The bounded wait doubles as the loop's sleep.
+        if let Some(st) = child.wait(POLL) {
+            break exit_code(st) == 0;
         }
         if abort() {
             log::info(&format!("stop requested; aborting {prog}"));
@@ -167,15 +145,16 @@ fn run_bounded_core(
             ));
             break false;
         }
-        std::thread::sleep(POLL);
     };
     if !success {
-        // Whole-group kill first, then the direct child, then reap.
-        let _ = killpg(NixPid::from_raw(pid), Signal::SIGKILL);
-        let _ = child.kill();
+        // Whole-group kill: the leader and anything it spawned. The hub
+        // reaps and delivers; consumed below so the kill has landed
+        // before callers proceed.
+        signal_group(child.pid, Signal::SIGKILL);
     }
-    let _ = child.wait();
-    let _ = stolen::take(pid); // drop the entry if it was never consulted
+    // Consume the reap on every path (bounded): a D-state child gives up
+    // here — the verdict is already decided, the zombie is the runtime's.
+    let _ = child.wait(KILL_GRACE);
     (success, cap)
 }
 
@@ -243,52 +222,26 @@ pub fn run_bounded_capture(
 mod tests {
     use super::*;
 
-    /// A zombie reaped out from under a bounded run (the main reaper's
-    /// `waitpid(-1)`) must not flip the verdict: the stolen-exit registry
-    /// hands the true status back. This is the regression for the
-    /// backup-thread race: std reports `ECHILD`, the registry reports
-    /// success. The child sleeps past registration, so whoever reaps the
-    /// zombie — this test or another test's namespace-wide reaper — finds
-    /// it registered and records the status.
+    /// A child that exits almost instantly still yields its true verdict:
+    /// spawn + registration are atomic against the reaper (registry lock
+    /// held across both), so the status is delivered, never lost to the
+    /// stray sweep. Repeated to shake the race window.
     #[test]
-    fn stolen_zombie_does_not_flip_the_verdict() {
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", "sleep 0.5; exit 0"]).process_group(0);
-        let mut child = cmd.spawn().expect("spawn");
-        let pid = child.id() as i32;
-        stolen::register(pid);
-        // wait out the child's exit (registration is long done)
-        std::thread::sleep(Duration::from_millis(1000));
-        // try to reap it ourselves; ECHILD = another reaper got there
-        // first and recorded the status (registration predates the exit)
-        if let Ok(status) = nix::sys::wait::waitpid(Some(NixPid::from_raw(pid)), None) {
-            stolen::record(pid, status);
+    fn instant_exits_deliver_their_true_verdict() {
+        for _ in 0..10 {
+            assert!(run_bounded(
+                Duration::from_secs(5),
+                "/bin/sh",
+                &["-c", "exit 0"],
+                || false
+            ));
+            assert!(!run_bounded(
+                Duration::from_secs(5),
+                "/bin/sh",
+                &["-c", "exit 7"],
+                || false
+            ));
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let verdict = loop {
-            if let Some(v) = stolen_verdict(pid) {
-                break v;
-            }
-            assert!(Instant::now() < deadline, "stolen status never recorded");
-            std::thread::sleep(POLL);
-        };
-        assert!(verdict, "a reaped-successful run must report success");
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-
-    /// A registry entry without a recorded status must fail closed, never
-    /// invent success. Uses a never-spawned pid: no process, no reaper.
-    #[test]
-    fn stolen_without_a_recorded_status_fails_closed() {
-        let pid = std::process::id()
-            .checked_add(100_000)
-            .expect("no overflow") as i32;
-        stolen::register(pid);
-        assert_eq!(stolen::take(pid), Some(None));
-        assert_eq!(stolen_verdict(pid), None, "no invented success");
-        // a double take is empty: the entry was consumed
-        assert_eq!(stolen::take(pid), None);
     }
 
     /// Captured stdout comes back verbatim on success; stderr stays out.
