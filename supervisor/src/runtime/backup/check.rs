@@ -5,7 +5,7 @@
 use crate::config::DbBackupConfig;
 
 /// Emptiness per [`super::sqlite::is_empty`]'s never-overwrite contract.
-pub(super) fn is_empty(cfg: &DbBackupConfig) -> Result<bool, String> {
+pub(super) fn is_empty(cfg: &DbBackupConfig) -> anyhow::Result<bool> {
     super::sqlite::is_empty(&cfg.db_path)
 }
 

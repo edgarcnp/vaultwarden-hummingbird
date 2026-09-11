@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use anyhow::bail;
+
 use crate::s3::RemoteSpec;
 
 /// S3-backed persistence for /data identity files (opt-in): the same
@@ -30,12 +32,11 @@ impl SyncConfig {
         key_secret: String,
         endpoint: String,
         interval: Duration,
-    ) -> Result<Self, String> {
+    ) -> anyhow::Result<Self> {
         if endpoint.is_empty() {
-            return Err(
+            bail!(
                 "SUPERVISOR_S3_ENDPOINT is required; every S3-compatible provider \
                  (AWS included) is configured by its endpoint"
-                    .into(),
             );
         }
         let target = parse_remote(&remote, key_id, key_secret, endpoint)?;
@@ -62,9 +63,9 @@ fn parse_remote(
     key_id: String,
     key_secret: String,
     endpoint: String,
-) -> Result<RemoteSpec, String> {
+) -> anyhow::Result<RemoteSpec> {
     let Some((_, path)) = remote.split_once(':') else {
-        return Err("must be remote:bucket[/prefix]".into());
+        bail!("must be remote:bucket[/prefix]");
     };
     let path = path.trim();
     let (bucket, prefix) = match path.split_once('/') {
@@ -76,7 +77,7 @@ fn parse_remote(
             .chars()
             .any(|c| c.is_whitespace() || c == ':' || c == '/')
     {
-        return Err("bucket must be non-empty and free of whitespace, ':' and '/'".into());
+        bail!("bucket must be non-empty and free of whitespace, ':' and '/'");
     }
     // Empty stays empty; anything else becomes a directory-style prefix.
     let prefix = prefix.trim_start_matches('/');

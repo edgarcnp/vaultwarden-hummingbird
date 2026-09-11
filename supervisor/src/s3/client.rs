@@ -11,6 +11,7 @@
 use std::io::Read;
 use std::time::Duration;
 
+use anyhow::{anyhow, bail};
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use url::Url;
 
@@ -66,25 +67,24 @@ impl Client {
     /// Connect to the remote. `Err` = unusable configuration (missing or
     /// bad endpoint URL) — callers treat it as a failed operation, per
     /// each caller's own failure semantics.
-    pub fn connect(spec: &RemoteSpec, timeout: Duration) -> Result<Self, String> {
+    pub fn connect(spec: &RemoteSpec, timeout: Duration) -> anyhow::Result<Self> {
         if spec.endpoint.is_empty() {
-            return Err(
+            bail!(
                 "SUPERVISOR_S3_ENDPOINT is required; every S3-compatible provider \
                  (AWS included) is configured by its endpoint"
-                    .into(),
             );
         }
         let endpoint: Url = spec
             .endpoint
             .parse()
-            .map_err(|e| format!("invalid S3 endpoint: {e}"))?;
+            .map_err(|e| anyhow!("invalid S3 endpoint: {e}"))?;
         let bucket = Bucket::new(
             endpoint.clone(),
             UrlStyle::Path,
             spec.bucket.clone(),
             region_for(&endpoint),
         )
-        .map_err(|e| format!("invalid S3 bucket configuration: {e}"))?;
+        .map_err(|e| anyhow!("invalid S3 bucket configuration: {e}"))?;
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .max_redirects(0) // a presigned URL must never be re-signed by a redirect
@@ -99,15 +99,15 @@ impl Client {
 
     /// Upload a file as `key`. Content-Length is set explicitly: S3
     /// rejects chunked PUT bodies.
-    pub fn put(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> Result<(), String> {
+    pub fn put(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
-            return Err("aborted".into());
+            bail!("aborted");
         }
         let file =
-            std::fs::File::open(path).map_err(|e| format!("cannot open {path} for upload: {e}"))?;
+            std::fs::File::open(path).map_err(|e| anyhow!("cannot open {path} for upload: {e}"))?;
         let size = file
             .metadata()
-            .map_err(|e| format!("cannot size {path}: {e}"))?
+            .map_err(|e| anyhow!("cannot size {path}: {e}"))?
             .len();
         let url = self
             .bucket
@@ -117,14 +117,14 @@ impl Client {
             .put(url.as_str())
             .header("Content-Length", size.to_string())
             .send(file)
-            .map_err(|e| format!("upload of {key} failed: {}", http_err(&e)))?;
+            .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
         Ok(())
     }
 
     /// Download `key` into a local file (created, truncated).
-    pub fn get(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> Result<(), String> {
+    pub fn get(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
-            return Err("aborted".into());
+            bail!("aborted");
         }
         let url = self
             .bucket
@@ -134,12 +134,12 @@ impl Client {
             .agent
             .get(url.as_str())
             .call()
-            .map_err(|e| format!("download of {key} failed: {}", http_err(&e)))?
+            .map_err(|e| anyhow!("download of {key} failed: {}", http_err(&e)))?
             .into_body()
             .into_reader();
         let mut out =
-            std::fs::File::create(path).map_err(|e| format!("cannot create {path}: {e}"))?;
-        std::io::copy(&mut reader, &mut out).map_err(|e| format!("download of {key}: {e}"))?;
+            std::fs::File::create(path).map_err(|e| anyhow!("cannot create {path}: {e}"))?;
+        std::io::copy(&mut reader, &mut out).map_err(|e| anyhow!("download of {key}: {e}"))?;
         Ok(())
     }
 
@@ -147,12 +147,12 @@ impl Client {
     /// creation order for timestamped names). Truncated pages are
     /// followed up to [`MAX_LIST_KEYS`]; beyond that the listing fails
     /// rather than growing unbounded.
-    pub fn list(&self, prefix: &str, abort: impl Fn() -> bool) -> Result<Vec<Listed>, String> {
+    pub fn list(&self, prefix: &str, abort: impl Fn() -> bool) -> anyhow::Result<Vec<Listed>> {
         let mut names: Vec<Listed> = Vec::new();
         let mut token: Option<String> = None;
         loop {
             if abort() {
-                return Err("aborted".into());
+                bail!("aborted");
             }
             let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
             action.with_prefix(prefix);
@@ -167,25 +167,25 @@ impl Client {
                 .agent
                 .get(url.as_str())
                 .call()
-                .map_err(|e| format!("listing {prefix:?} failed: {}", http_err(&e)))?
+                .map_err(|e| anyhow!("listing {prefix:?} failed: {}", http_err(&e)))?
                 .into_body()
                 .into_reader()
                 .take(LIST_BODY_CAP);
             let mut body = String::new();
             reader
                 .read_to_string(&mut body)
-                .map_err(|e| format!("listing {prefix:?}: {e}"))?;
+                .map_err(|e| anyhow!("listing {prefix:?}: {e}"))?;
             // The XML error type belongs to a transitive crate; the
             // message adds nothing — a listing that does not parse is
             // "unparseable".
             let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&body)
-                .map_err(|_| format!("listing {prefix:?}: unparseable response"))?;
+                .map_err(|_| anyhow!("listing {prefix:?}: unparseable response"))?;
             names.extend(parsed.contents.into_iter().map(|c| Listed {
                 key: c.key,
                 size: c.size,
             }));
             if names.len() > MAX_LIST_KEYS {
-                return Err(format!("listing {prefix:?}: exceeded {MAX_LIST_KEYS} keys"));
+                bail!("listing {prefix:?}: exceeded {MAX_LIST_KEYS} keys");
             }
             token = parsed.next_continuation_token;
             if token.is_none() {
@@ -198,9 +198,9 @@ impl Client {
 
     /// Delete one object. A missing object (404) is a failed delete: the
     /// only caller lists first, so an unexpected 404 is a real anomaly.
-    pub fn delete(&self, key: &str, abort: impl Fn() -> bool) -> Result<(), String> {
+    pub fn delete(&self, key: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
-            return Err("aborted".into());
+            bail!("aborted");
         }
         let url = self
             .bucket
@@ -209,7 +209,7 @@ impl Client {
         self.agent
             .delete(url.as_str())
             .call()
-            .map_err(|e| format!("delete of {key} failed: {}", http_err(&e)))?;
+            .map_err(|e| anyhow!("delete of {key} failed: {}", http_err(&e)))?;
         Ok(())
     }
 }
@@ -294,7 +294,10 @@ mod tests {
         std::fs::write(&file, b"payload").unwrap();
         let path = file.to_str().unwrap();
         let err = client.put("k", path, abort).expect_err("put fails");
-        assert!(!err.contains("http://127.0.0.1:1"), "no endpoint in errors");
+        assert!(
+            !err.to_string().contains("http://127.0.0.1:1"),
+            "no endpoint in errors"
+        );
         assert!(
             client
                 .get("k", "/tmp/vw-s3-should-not-exist", abort)
@@ -314,10 +317,19 @@ mod tests {
         )
         .expect("client");
         assert_eq!(
-            client.put("k", "/tmp/unused", || true).unwrap_err(),
+            client
+                .put("k", "/tmp/unused", || true)
+                .unwrap_err()
+                .to_string(),
             "aborted"
         );
-        assert_eq!(client.list("p/", || true).err().as_deref(), Some("aborted"));
-        assert_eq!(client.delete("k", || true).unwrap_err(), "aborted");
+        assert_eq!(
+            client.list("p/", || true).err().map(|e| e.to_string()),
+            Some("aborted".to_string())
+        );
+        assert_eq!(
+            client.delete("k", || true).unwrap_err().to_string(),
+            "aborted"
+        );
     }
 }

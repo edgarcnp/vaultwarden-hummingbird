@@ -13,13 +13,13 @@ use crate::util::make_private;
 /// or a readable SQLite database with zero user tables (a freshly created
 /// or truncated file). Corrupt or unreadable files are ambiguous (Err) —
 /// never silently treated as empty, never silently kept.
-pub(crate) fn is_empty(path: &str) -> Result<bool, String> {
+pub(crate) fn is_empty(path: &str) -> anyhow::Result<bool> {
     if !Path::new(path).exists() {
         return Ok(true);
     }
     let conn =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| format!("cannot open existing db: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("cannot open existing db: {e}"))?;
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master \
@@ -27,7 +27,7 @@ pub(crate) fn is_empty(path: &str) -> Result<bool, String> {
             [],
             |r| r.get(0),
         )
-        .map_err(|e| format!("cannot inspect existing db: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("cannot inspect existing db: {e}"))?;
     Ok(count == 0)
 }
 

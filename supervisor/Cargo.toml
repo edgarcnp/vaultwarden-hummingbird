@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
 dotenvy = { version = "0.15.7", default-features = false }
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 nix = { version = "0.31.3", default-features = false, features = ["signal"] }

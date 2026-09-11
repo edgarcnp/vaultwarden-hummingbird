@@ -86,7 +86,7 @@ fn newest_object(
     s3: &Client,
     cfg: &DbBackupConfig,
     abort: &impl Fn() -> bool,
-) -> Result<Option<String>, String> {
+) -> anyhow::Result<Option<String>> {
     let mut names = list_objects(s3, cfg, abort)?;
     Ok(names.pop().map(|name| format!("{}{name}", cfg.prefix())))
 }
@@ -103,7 +103,7 @@ pub fn adopt_lineage(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     if !cfg.restore || lineage::read(&cfg.db_path).is_some() {
         return;
     }
-    if is_empty(cfg) != Ok(false) {
+    if !matches!(is_empty(cfg), Ok(false)) {
         return;
     }
     let newest = client(cfg)

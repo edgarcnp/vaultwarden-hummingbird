@@ -7,7 +7,7 @@ pub(crate) use crate::s3::Client;
 
 /// One client for a backup run. `Err` = unusable configuration; callers
 /// log the cause and skip rather than guess.
-pub(crate) fn client(cfg: &DbBackupConfig) -> Result<Client, String> {
+pub(crate) fn client(cfg: &DbBackupConfig) -> anyhow::Result<Client> {
     Client::connect(&cfg.sync.target, SYNC_TIMEOUT)
 }
 
@@ -19,7 +19,7 @@ pub(crate) fn list_objects(
     client: &Client,
     cfg: &DbBackupConfig,
     abort: &impl Fn() -> bool,
-) -> Result<Vec<String>, String> {
+) -> anyhow::Result<Vec<String>> {
     let keys = client.list(&cfg.prefix(), abort)?;
     let bucket_prefix = cfg.prefix();
     let name_prefix = format!("{}-", cfg.db_label());
