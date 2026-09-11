@@ -8,7 +8,7 @@
 
 ARG VW_VERSION=1.37.2
 ARG WEB_VAULT_VERSION=v2026.7.0
-ARG TAILSCALE_VERSION=1.102.3
+ARG TAILSCALE_VERSION=1.102.4
 
 # UPSTREAM CHECKSUMS — sha256 digests of the release artifacts; Renovate has
 # no manager for these ARGs, so update each by hand alongside its version.
@@ -18,14 +18,14 @@ ARG VW_SHA256=d607cc00066f7ea62b27a3c198e0259955fd5591adabccb8d3414d1f3d91ecd7
 # web-vault tarball; bump with WEB_VAULT_VERSION.
 ARG WEB_VAULT_SHA256=002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c300570
 # per-arch tarballs; bump with TAILSCALE_VERSION.
-ARG TAILSCALE_SHA256_AMD64=36ddd9b51be57ffc2990cf76323cfa13643bfbb1b8a969f6183fa164741cdef5
-ARG TAILSCALE_SHA256_ARM64=a0fa1b154af8c61f862a2259f559f7396d96c0225f4a863eae2333e1546bbe25
+ARG TAILSCALE_SHA256_AMD64=50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9
+ARG TAILSCALE_SHA256_ARM64=9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c2895364f6c4c3f
 
 # BASE IMAGES — float on purpose: rebuilds pick up upstream CVE patches.
 # The runtime uses the -openssl variant (ships libssl/libcrypto, so the
 # runtime needs no hand-copied OpenSSL from the builder).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:1-builder
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder
 ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
