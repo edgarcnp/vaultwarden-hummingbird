@@ -156,9 +156,11 @@ COPY --from=fetch --chown=65532:0 /data /data
 # without the supervisor). WEB_VAULT_ENABLED is likewise re-derived by
 # the supervisor from the baked folder (ambient env is default-deny for
 # the vault child), so an API-only build stays API-only under the
-# supervisor too. Volatile storage is OPT-IN: vaultwarden refuses to boot
-# when it detects a non-persistent /data; users accept that explicitly
-# with VAULTWARDEN_I_REALLY_WANT_VOLATILE_STORAGE=true.
+# supervisor too. Volatile storage: pointing /data at tmpfs (or running
+# without a volume) loses everything on exit. vaultwarden's upstream
+# I_REALLY_WANT_VOLATILE_STORAGE gate did NOT trigger on 1.37.2 (verified:
+# a tmpfs /data boots clean, no refusal, no warning) — the safety net here
+# is the supervisor's state sync + DB backup, not the vault's own check.
 
 ENV DATA_FOLDER=/data \
     ORG_ATTACHMENT_LIMIT=0 \
