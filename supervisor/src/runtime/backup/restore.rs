@@ -51,10 +51,8 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> bool 
 
 /// The newest dump object (name order == time order).
 fn newest_object(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Option<String> {
-    let prefix = cfg.prefix();
-    let pattern = format!("{prefix}/{}-*", cfg.db_label());
-    let mut names = super::tools::list_objects(cfg, &pattern, abort)?;
-    names.pop().map(|name| format!("{prefix}/{name}"))
+    let mut names = super::tools::list_objects(cfg, abort)?;
+    names.pop().map(|name| format!("{}/{name}", cfg.prefix()))
 }
 
 /// Download the object into staging, verify integrity, import, clean up.

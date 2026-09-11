@@ -9,8 +9,7 @@ use crate::util::log;
 /// skips pruning entirely — never delete blind.
 pub(super) fn prune(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) {
     let prefix = cfg.prefix();
-    let pattern = format!("{prefix}/{}-*", cfg.db_label());
-    let Some(names) = list_objects(cfg, &pattern, abort) else {
+    let Some(names) = list_objects(cfg, abort) else {
         log::err("db backup: prune skipped (listing failed)");
         return;
     };

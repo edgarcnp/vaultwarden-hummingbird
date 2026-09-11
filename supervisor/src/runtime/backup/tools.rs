@@ -16,25 +16,25 @@ pub(crate) fn rclone(cfg: &DbBackupConfig, args: &[&str], abort: &impl Fn() -> b
     run_bounded_env(SYNC_TIMEOUT, RCLONE, &full, &cfg.sync.env, abort)
 }
 
-/// Names of the objects under `pattern` (`rclone lsf`), sorted so name
-/// order == creation order. None = listing failed — callers must never
-/// delete blind.
-pub(crate) fn list_objects(
-    cfg: &DbBackupConfig,
-    pattern: &str,
-    abort: &impl Fn() -> bool,
-) -> Option<Vec<String>> {
+/// The dump objects in the bucket (`<remote>/db/<label>-*.sqlite3`), sorted
+/// so name order == creation order. None = listing failed — callers must
+/// never delete blind. The directory is listed and filtered here: rclone
+/// does not expand globs in remote paths, so a `label-*` pattern would be
+/// sent to S3 as a literal prefix and silently match nothing.
+pub(crate) fn list_objects(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Option<Vec<String>> {
     let out = run_bounded_capture(
         SYNC_TIMEOUT,
         RCLONE,
-        &["lsf", pattern, "--files-only"],
+        &["lsf", &cfg.prefix(), "--files-only"],
         &cfg.sync.env,
         abort,
     )?;
+    let name_prefix = format!("{}-", cfg.db_label());
+    let name_suffix = format!(".{}", cfg.db_ext());
     let mut names: Vec<String> = out
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .filter(|l| l.starts_with(&name_prefix) && l.ends_with(&name_suffix))
         .map(String::from)
         .collect();
     names.sort();
