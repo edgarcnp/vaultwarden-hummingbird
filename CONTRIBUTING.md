@@ -32,7 +32,7 @@ curl -i http://127.0.0.1:8080/alive
 
 - `VAULTWARDEN_WEB_VAULT=false` builds an API-only image without the web UI.
 - The database is SQLite on the data volume — there is no DB backend knob.
-- The version pins are kept up to date by Renovate. Don't bump them by hand — the one exception is `VW_SHA256`, which Renovate can't see and must follow `VW_VERSION` manually.
+- Renovate bumps the version ARGs and runs `scripts/update-pins.sh` to refresh the checksum digests. Never hand-edit a digest: if you bump a version yourself, run the script. CI recomputes the pins on every Containerfile change (and weekly), so a missing or stale digest is a red build.
 
 ## Working on the supervisor
 
@@ -88,7 +88,7 @@ podman healthcheck run <container>   # exit 0 means healthy
 
 1. Fork and make a branch.
 2. Run the checks from the section above; build the image if you touched it.
-3. If you edited the version pins in the Containerfile, keep those `ARG` lines byte-for-byte as they were — Renovate finds them with regexes.
+3. If you edited the version pins in the Containerfile, keep those `ARG` lines byte-for-byte as they were — Renovate finds them with regexes — and run `scripts/update-pins.sh` so the digests match.
 4. Open the PR with a short description of what changed and why.
 
 ## Found a bug?

@@ -1,0 +1,35 @@
+# Upstream checksum pins: the Containerfile's digests must always match
+# its version ARGs. Renovate runs scripts/update-pins.sh after every
+# version bump; this workflow recomputes the pins and fails on drift -
+# so a version bumped without its digest, or an upstream artifact
+# replaced at the same tag (the weekly run catches that), is red here.
+name: Pins
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Containerfile
+  schedule:
+    - cron: "0 5 * * 1" # weekly, Monday 05:00 UTC
+
+# Superseded runs on the same branch don't need to finish.
+concurrency:
+  group: pins-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Recompute the pins
+        run: scripts/update-pins.sh
+
+      - name: Fail on drift
+        run: git diff --exit-code Containerfile

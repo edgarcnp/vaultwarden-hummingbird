@@ -16,6 +16,23 @@
         "enabled": false
     },
     "osvVulnerabilityAlerts": true,
+    "packageRules": [
+        {
+            "description": "Recompute the Containerfile checksum pins after version bumps",
+            "matchManagers": [
+                "custom.regex"
+            ],
+            "postUpgradeTasks": {
+                "commands": [
+                    "scripts/update-pins.sh"
+                ],
+                "fileFilters": [
+                    "Containerfile"
+                ],
+                "executionMode": "update"
+            }
+        }
+    ],
     "reviewers": [
         "edgarcnp"
     ],
