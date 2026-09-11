@@ -34,20 +34,33 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         }
         Err(e) => {
             log::err(&format!(
-                "db backup: cannot verify the database is non-empty ({e}); \
-                 skipping (fail-closed)"
+                "db backup: skipped: cannot verify the database is non-empty ({e}); \
+                 refusing to back up on a guess — the next tick retries"
             ));
             return;
         }
         Ok(false) => {}
     }
-    let Some(s3) = client(cfg) else {
-        log::err("db backup: skipped (S3 client unavailable)");
-        return;
+    let s3 = match client(cfg) {
+        Ok(s3) => s3,
+        Err(e) => {
+            log::err(&format!(
+                "db backup: skipped: unusable S3 configuration ({e}); \
+                 check the SUPERVISOR_S3_* settings and endpoint"
+            ));
+            return;
+        }
     };
-    let Some(mut names) = list_objects(&s3, cfg, &abort) else {
-        log::err("db backup: skipped (cannot list the bucket; refusing to guess lineage)");
-        return;
+    let mut names = match list_objects(&s3, cfg, &abort) {
+        Ok(names) => names,
+        Err(e) => {
+            log::err(&format!(
+                "db backup: skipped: cannot list the bucket ({e}); refusing to back up \
+                 without knowing the bucket's newest backup — check credentials and \
+                 network; the next tick retries"
+            ));
+            return;
+        }
     };
     let known = lineage::read(&cfg.db_path);
     if matches!(
@@ -69,7 +82,10 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         return;
     }
     if !super::sqlite::dump(&cfg.db_path, &staged) {
-        log::err("db backup: dump failed; continuing (bucket unchanged)");
+        log::err(
+            "db backup: dump failed; nothing was uploaded or deleted, the next tick \
+             retries (if it repeats, check free space on /data)",
+        );
         return;
     }
     // Owner-only before the staged dump leaves the volume.
@@ -92,7 +108,8 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     // unconditional PUTs to fresh keys.
     if let Err(e) = s3.put(&object, &staged, &abort) {
         log::err(&format!(
-            "db backup: push failed ({e}); continuing (previous backups intact)"
+            "db backup: push failed ({e}); previous backups are intact, the next tick \
+             retries (if it repeats, check the bucket credentials and network)"
         ));
         let _ = std::fs::remove_file(&staged);
         return;
@@ -157,7 +174,7 @@ mod tests {
                 remote.into(),
                 "id".into(),
                 "secret".into(),
-                String::new(),
+                "http://127.0.0.1:1".into(),
                 Duration::from_secs(60),
             )
             .expect("valid test remote");

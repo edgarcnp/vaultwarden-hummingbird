@@ -23,7 +23,10 @@ pub(super) fn prune(
         let key = format!("{prefix}{name}");
         match client.delete(&key, abort) {
             Ok(()) => log::info(&format!("db backup: pruned {key}")),
-            Err(e) => log::err(&format!("db backup: prune delete failed ({e}); continuing")),
+            Err(e) => log::err(&format!(
+                "db backup: prune delete failed ({e}); the bucket keeps one extra \
+                 backup (check that the access key may delete)"
+            )),
         }
     }
 }

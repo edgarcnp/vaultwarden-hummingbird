@@ -5,23 +5,22 @@
 use crate::config::{DbBackupConfig, SYNC_TIMEOUT};
 pub(crate) use crate::s3::Client;
 
-/// One client for a backup run. `None` = unusable configuration (the
-/// connect error is discarded here); callers log the skip and never
-/// guess.
-pub(crate) fn client(cfg: &DbBackupConfig) -> Option<Client> {
-    Client::connect(&cfg.sync.target, SYNC_TIMEOUT).ok()
+/// One client for a backup run. `Err` = unusable configuration; callers
+/// log the cause and skip rather than guess.
+pub(crate) fn client(cfg: &DbBackupConfig) -> Result<Client, String> {
+    Client::connect(&cfg.sync.target, SYNC_TIMEOUT)
 }
 
 /// The dump objects in the bucket under the backup prefix
 /// (`<prefix>/<label>-*.sqlite3`), as bare names sorted so name order ==
-/// creation order. None = listing failed — callers must never delete
-/// blind.
+/// creation order. Err = listing failed — callers must never delete
+/// blind, so they log the cause and skip.
 pub(crate) fn list_objects(
     client: &Client,
     cfg: &DbBackupConfig,
     abort: &impl Fn() -> bool,
-) -> Option<Vec<String>> {
-    let keys = client.list(&cfg.prefix(), abort).ok()?;
+) -> Result<Vec<String>, String> {
+    let keys = client.list(&cfg.prefix(), abort)?;
     let bucket_prefix = cfg.prefix();
     let name_prefix = format!("{}-", cfg.db_label());
     let name_suffix = format!(".{}", cfg.db_ext());
@@ -35,7 +34,7 @@ pub(crate) fn list_objects(
         })
         .collect();
     names.sort();
-    Some(names)
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -53,7 +52,7 @@ mod tests {
             "r2:vw-state".into(),
             "id".into(),
             "s".into(),
-            String::new(),
+            "http://127.0.0.1:1".into(),
             Duration::from_secs(60),
         )
         .unwrap();

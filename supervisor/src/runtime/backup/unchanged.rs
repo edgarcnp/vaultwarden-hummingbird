@@ -82,7 +82,8 @@ pub(super) fn retain(staged: &str, db_path: &str) {
         Err(e) => {
             let _ = std::fs::remove_file(staged);
             log::err(&format!(
-                "db backup: cannot remember the pushed dump {}: {e}",
+                "db backup: cannot remember the pushed dump {}: {e} — the next cycle \
+                 may re-upload it",
                 log::sanitize(&last)
             ));
         }
