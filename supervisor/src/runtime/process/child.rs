@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::sys::signal::{kill, killpg, Signal};
+use nix::sys::signal::{Signal, kill, killpg};
 // nix's typed pid wrapper; the crate's public `Pid` is a plain i32 alias,
 // so nix calls convert at the boundary.
 use nix::unistd::Pid as NixPid;

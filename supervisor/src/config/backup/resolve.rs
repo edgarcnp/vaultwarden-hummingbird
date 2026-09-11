@@ -200,7 +200,9 @@ mod tests {
         assert_eq!(cfg.keep, BACKUP_KEEP_DEFAULT as usize);
         // no VAULTWARDEN_DATABASE_URL -> default sqlite
         assert_eq!(cfg.db_path, "/data/db.sqlite3");
-        assert_eq!(cfg.prefix(), "r2:vw-state/db");
+        // prefix() is now bucket-relative: <sync prefix>db/
+        assert_eq!(cfg.prefix(), "db/");
+        assert_eq!(cfg.sync.prefix, "");
     }
 
     #[test]

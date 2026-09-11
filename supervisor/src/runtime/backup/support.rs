@@ -17,17 +17,10 @@ pub(super) fn next_staging() -> String {
     dir.to_string_lossy().into_owned()
 }
 
-/// A DbBackupConfig over a nonexistent sqlite source with a unique
-/// staging dir.
-pub(super) fn cfg() -> DbBackupConfig {
+/// A DbBackupConfig with a custom sync config and a unique staging dir.
+pub(super) fn cfg_with_sync(sync: SyncConfig) -> DbBackupConfig {
     DbBackupConfig {
-        sync: SyncConfig::new(
-            "r2:vw".into(),
-            "id".into(),
-            "secret".into(),
-            String::new(),
-            Duration::from_secs(60),
-        ),
+        sync,
         db_path: "/nonexistent/db.sqlite3".into(),
         periodic: true,
         interval: Duration::from_secs(43_200),
@@ -35,4 +28,19 @@ pub(super) fn cfg() -> DbBackupConfig {
         restore: false,
         staging: next_staging(),
     }
+}
+
+/// A DbBackupConfig over a nonexistent sqlite source with a unique
+/// staging dir.
+pub(super) fn cfg() -> DbBackupConfig {
+    cfg_with_sync(
+        SyncConfig::new(
+            "r2:vw".into(),
+            "id".into(),
+            "secret".into(),
+            String::new(),
+            Duration::from_secs(60),
+        )
+        .expect("valid test remote"),
+    )
 }

@@ -1,5 +1,5 @@
-//! rclone-backed S3 state sync: /data identity persistence across
-//! ephemeral redeploys.
+//! S3 state sync over the in-crate client ([`crate::s3`]): /data identity
+//! persistence across ephemeral redeploys.
 
 mod state;
 

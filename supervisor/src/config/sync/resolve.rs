@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::super::consts::SYNC_INTERVAL_DEFAULT;
 use super::super::env::parse_count;
-use super::spec::{SyncConfig, remote_env_name};
+use super::spec::SyncConfig;
 use crate::util::log;
 
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
@@ -21,36 +21,27 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
              SECRET_ACCESS_KEY; state sync disabled",
         );
         None
-    } else if let Some((name_raw, _)) = remote.split_once(':') {
-        let name = remote_env_name(name_raw);
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            log::err(&format!(
-                "config: invalid SUPERVISOR_S3_REMOTE '{}' (remote name must be \
-                 alphanumeric); state sync disabled",
-                log::sanitize(&remote)
-            ));
-            None
-        } else {
-            let secs = parse_count(
+    } else {
+        match SyncConfig::new(
+            remote.clone(),
+            key_id,
+            key_secret,
+            knob("SUPERVISOR_S3_ENDPOINT", ""),
+            Duration::from_secs(parse_count(
                 "SUPERVISOR_S3_SYNC_INTERVAL",
                 &knob("SUPERVISOR_S3_SYNC_INTERVAL", ""),
                 SYNC_INTERVAL_DEFAULT,
-            );
-            Some(SyncConfig::new(
-                remote,
-                key_id,
-                key_secret,
-                knob("SUPERVISOR_S3_ENDPOINT", ""),
-                Duration::from_secs(secs),
-            ))
+            )),
+        ) {
+            Ok(sync) => Some(sync),
+            Err(e) => {
+                log::err(&format!(
+                    "config: invalid SUPERVISOR_S3_REMOTE '{}' ({e}); state sync disabled",
+                    log::sanitize(&remote)
+                ));
+                None
+            }
         }
-    } else {
-        log::err(&format!(
-            "config: invalid SUPERVISOR_S3_REMOTE '{}' (must be remote:path); \
-             state sync disabled",
-            log::sanitize(&remote)
-        ));
-        None
     }
 }
 
@@ -103,12 +94,10 @@ mod tests {
         ])
         .expect("sync enabled");
         assert_eq!(sync.remote, "r2:vw-state");
+        assert_eq!(sync.bucket, "vw-state");
+        assert_eq!(sync.prefix, "");
+        assert_eq!(sync.endpoint, "https://acct.r2.cloudflarestorage.com");
         assert_eq!(sync.interval, Duration::from_secs(90));
-        // env construction is specced in super::spec's tests
-        assert!(sync.env.contains(&(
-            "RCLONE_CONFIG_R2_ENDPOINT".to_string(),
-            "https://acct.r2.cloudflarestorage.com".to_string()
-        )));
     }
 
     #[test]
@@ -121,14 +110,14 @@ mod tests {
         );
     }
 
-    /// A colon-less remote would make rclone write to a local path instead
-    /// of the bucket.
+    /// A colon-less remote would once have made rclone write to a local
+    /// path instead of the bucket; it is still rejected.
     #[test]
-    fn colon_less_remote_is_rejected() {
-        let mut vars: Vec<(&str, &str)> = BASE.to_vec();
-        *vars.first_mut().unwrap() = ("SUPERVISOR_S3_REMOTE", "mybucket");
-        assert!(resolved(&vars).is_none());
-        *vars.first_mut().unwrap() = ("SUPERVISOR_S3_REMOTE", "no-colon-here");
-        assert!(resolved(&vars).is_none());
+    fn malformed_remotes_are_rejected() {
+        for remote in ["mybucket", "no-colon-here", "r2:"] {
+            let mut vars: Vec<(&str, &str)> = BASE.to_vec();
+            *vars.first_mut().unwrap() = ("SUPERVISOR_S3_REMOTE", remote);
+            assert!(resolved(&vars).is_none(), "{remote} must be rejected");
+        }
     }
 }

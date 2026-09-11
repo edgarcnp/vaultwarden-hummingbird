@@ -9,7 +9,10 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
 signal-hook = { version = "0.4", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+url = "2"
 
 [profile.release]
 opt-level = 3

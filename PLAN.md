@@ -173,7 +173,7 @@ red).
 
 - 2026-09-11 — plan written; phases pending. Baseline: `main` @ 2f8e173,
   clean tree.
-- 2026-09-11 — **Phase 1 complete** (uncommitted on `main`):
+- 2026-09-11 — **Phase 1 complete** (commit e888022):
   `process/pidfd.rs` (new, ~120 lines incl. tests), `process/reaper.rs`
   (new, hub + Handle), `child.rs` spawn → `Option<Handle>` with registry
   lock held across spawn+insert, `reap.rs` slimmed to status decoding +
@@ -185,8 +185,26 @@ red).
   sweep is the correctness backstop. All waitpid call sites are
   WNOHANG. Verified: 106 tests × 8 runs, fmt, clippy -D warnings,
   `cargo check --release`.
+- 2026-09-11 — **Phase 2 complete** (uncommitted): rclone removed; new
+  `src/s3.rs` (rusty-s3 0.10 signing + ureq 3 sync HTTP/rustls, put/get/
+  list/delete; presigned URLs, Content-Length PUTs, 0 redirects, 10k-key
+  and 16 MiB listing caps, errors never contain the signed URL).
+  SyncConfig parsed into bucket+prefix (validation in `sync::spec`);
+  state sync enumerates the identity set (`tailscaled.state`,
+  `rsa_key*`, `certs/**`) locally and enforces it on pulls too (traversal
+  guard); pushes list once and upload only size-changed files. Backup
+  `tools.rs` fronts the client; dump/prune/restore rewired; prune keeps
+  single-object deletes (parity). Containerfile: rclone fetch/unzip/COPY
+  and its ARGs/checksums gone (`unzip` dropped from fetch). renovate.json:
+  rclone manager removed. Verified: 111 tests ×3, fmt, clippy -D
+  warnings, check --release, full image build, real-binary smoke test
+  (dead-endpoint S3 → non-fatal; fail-closed Tailscale refusal; clean
+  hub-driven teardown). Image: 321 MB (rclone ~55 MB layer gone;
+  supervisor grew by ureq/rustls).
 
 ## Status
 
-- Phase 1: **done** (uncommitted).
-- Phases 2–5: pending. Next action on resume: Phase 2 (rusty-s3 + ureq).
+- Phases 1–2: **done** (1 committed, 2 uncommitted).
+- Phases 3–5: pending. Next action on resume: Phase 3 (breaking config
+  simplification). UNKNOWN until a live run: real R2 round-trip
+  (put/list/get/delete + wrong-credentials fail-closed).

@@ -70,19 +70,6 @@
             "extractVersionTemplate": "^v(?<version>.*)$"
         },
         {
-            "customType": "regex",
-            "description": "rclone pin (ARG strips the upstream v prefix)",
-            "fileMatch": [
-                "^Containerfile$"
-            ],
-            "matchStrings": [
-                "ARG RCLONE_VERSION=(?<currentValue>\\S+)"
-            ],
-            "datasourceTemplate": "github-tags",
-            "depNameTemplate": "rclone/rclone",
-            "extractVersionTemplate": "^v(?<version>.*)$"
-        },
-        {
             "description": "Hummingbird base image tag pins",
             "fileMatch": [
                 "^Containerfile$"

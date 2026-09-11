@@ -7,7 +7,7 @@ use super::lineage;
 use super::prune::prune;
 use super::staging::{lock_down, sweep_staging};
 use super::timestamp::timestamp;
-use super::tools::{list_objects, rclone};
+use super::tools::{client, list_objects};
 use super::unchanged;
 
 /// One periodic backup cycle: sweep staging, dump, push, prune. Runs on
@@ -40,7 +40,11 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         }
         Ok(false) => {}
     }
-    let Some(mut names) = list_objects(cfg, &abort) else {
+    let Some(s3) = client(cfg) else {
+        log::err("db backup: skipped (S3 client unavailable)");
+        return;
+    };
+    let Some(mut names) = list_objects(&s3, cfg, &abort) else {
         log::err("db backup: skipped (cannot list the bucket; refusing to guess lineage)");
         return;
     };
@@ -81,16 +85,13 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         log::info("db backup: dump is identical to the newest backup; upload skipped");
         return;
     }
-    // --no-check-dest: the object name is timestamped and unique, so the
-    // destination can never exist and the pre-upload HEAD is a wasted call.
-    // Only sound where overwrite is impossible — never reuse this on a path
-    // that updates files in place.
-    if !rclone(
-        cfg,
-        &["copyto", "--no-check-dest", &staged, &object],
-        &abort,
-    ) {
-        log::err("db backup: push failed; continuing (previous backups intact)");
+    // The object name is timestamped and unique, so the destination can
+    // never exist and no existence check is wasted on it: uploads are
+    // unconditional PUTs to fresh keys.
+    if let Err(e) = s3.put(&object, &staged, &abort) {
+        log::err(&format!(
+            "db backup: push failed ({e}); continuing (previous backups intact)"
+        ));
         let _ = std::fs::remove_file(&staged);
         return;
     }
@@ -100,7 +101,7 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     log::info(&format!("db backup: pushed {object} ({size} bytes)"));
     // The listing predates the push: add the new object so keep-N counts it.
     names.push(object_name.to_string());
-    prune(cfg, names, &abort);
+    prune(&s3, cfg, names, &abort);
 }
 
 #[cfg(test)]

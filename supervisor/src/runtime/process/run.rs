@@ -19,9 +19,9 @@ use crate::util::{StagedFile, log};
 /// compromised or merely chatty must not become a secrets broadcast.
 /// The set is deliberately tiny:
 /// - `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`: egress-controlled deployments
-///   route rclone and Tailscale traffic through a proxy;
-/// - `SSL_CERT_FILE`/`SSL_CERT_DIR`: Go (rclone, tailscaled) and libpq
-///   trust custom roots this way;
+///   route Tailscale traffic through a proxy;
+/// - `SSL_CERT_FILE`/`SSL_CERT_DIR`: Go (tailscaled) trusts custom roots
+///   this way;
 /// - `TZ`: cosmetic timestamps in child logs.
 const BASELINE_ENV: &[&str] = &[
     "HTTP_PROXY",
@@ -46,8 +46,8 @@ pub(crate) fn allowlisted(vars: impl Iterator<Item = (String, String)>) -> Vec<(
 }
 
 /// Clear the child's environment and set only the allow-listed subset of
-/// `source` plus the explicit `extra_env` (connection config rides there —
-/// e.g. pg_env, RCLONE_CONFIG_*). Never place secrets here.
+/// `source` plus the explicit `extra_env` (connection config rides there
+/// — e.g. pg_env). Never place secrets here.
 fn apply_env_from(
     cmd: &mut Command,
     extra_env: &[(String, String)],
@@ -165,7 +165,7 @@ pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn(
     run_bounded_env(timeout, prog, args, &[], abort)
 }
 
-/// [`run_bounded`] with extra child env vars (e.g. rclone backend config).
+/// [`run_bounded`] with extra child env vars (e.g. connection plumbing).
 /// The child runs as its own process-group leader, so the expiry/abort kill
 /// reaches anything it spawned, not just the direct child. Its environment
 /// is allow-listed ([`apply_env`]) — the supervisor's env never leaks.

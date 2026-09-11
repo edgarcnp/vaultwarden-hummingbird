@@ -6,14 +6,6 @@ use std::time::Duration;
 pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
 pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
 pub const VAULTWARDEN: &str = "/vaultwarden";
-pub const RCLONE: &str = "/usr/local/bin/rclone";
-
-/// rclone's `--s3-no-check-bucket`, passed on every S3 upload: the bucket
-/// existence pre-check is a bucket-level op that least-privilege tokens
-/// (e.g. R2 object-scoped keys) deny with 403, and rclone then falls back
-/// to CreateBucket — denied for the same reason. The bucket must exist
-/// (SUPERVISOR_S3_REMOTE points at it); a missing bucket fails loudly.
-pub const RCLONE_NO_CHECK_BUCKET: &str = "--s3-no-check-bucket";
 
 // Hard timeouts: a hung child must never block the vault.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);

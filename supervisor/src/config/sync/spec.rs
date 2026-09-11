@@ -1,61 +1,81 @@
-//! S3 state-sync settings for rclone, reused by the DB backup.
+//! S3 connection settings shared by the state sync and the DB backup.
+//! The `remote` knob keeps its `name:bucket[/prefix]` shape, but it is
+//! parsed here into the parts the in-crate S3 client needs — no external
+//! tool consumes it anymore.
 
 use std::time::Duration;
-
-/// Uppercased rclone remote name: prefix of the RCLONE_CONFIG_* env vars.
-pub(super) fn remote_env_name(remote: &str) -> String {
-    remote.split(':').next().unwrap_or_default().to_uppercase()
-}
 
 /// S3-backed persistence for /data identity files (opt-in): the same
 /// tailnet node and vaultwarden RSA keys survive ephemeral redeploys.
 #[derive(Clone)]
 pub struct SyncConfig {
-    /// rclone destination `remote:path` (e.g. `r2:vw-state`)
+    /// the remote as configured (e.g. `r2:vw-state/sub`), for logs
     pub remote: String,
-    /// backend env for the rclone child (RCLONE_CONFIG_*; carries secrets)
-    pub env: Vec<(String, String)>,
+    /// S3 bucket name (between `:` and the first `/`)
+    pub bucket: String,
+    /// bucket-relative key prefix: empty, or ending in `/`
+    pub prefix: String,
+    pub key_id: String,
+    pub key_secret: String,
+    /// custom S3 endpoint (empty = AWS default)
+    pub endpoint: String,
     /// periodic push cadence (0 disables periodic pushes)
     pub interval: Duration,
 }
 
 impl SyncConfig {
     /// Build from raw knob values; empty `endpoint` = provider default.
-    /// Backend config rides env — never argv, which is world-readable
-    /// in /proc.
+    /// `Err` names the problem: callers degrade (state sync disabled /
+    /// backup skipped) rather than guess.
     pub fn new(
         remote: String,
         key_id: String,
         key_secret: String,
         endpoint: String,
         interval: Duration,
-    ) -> Self {
-        let name = remote_env_name(&remote);
-        let mut env = vec![
-            ("RCLONE_CONFIG".to_string(), "/dev/null".to_string()),
-            (format!("RCLONE_CONFIG_{name}_TYPE"), "s3".to_string()),
-            (format!("RCLONE_CONFIG_{name}_ACCESS_KEY_ID"), key_id),
-            (
-                format!("RCLONE_CONFIG_{name}_SECRET_ACCESS_KEY"),
-                key_secret,
-            ),
-        ];
-        if !endpoint.is_empty() {
-            env.push((format!("RCLONE_CONFIG_{name}_ENDPOINT"), endpoint));
-            // A custom endpoint means a non-AWS S3 flavor; "Other" is
-            // rclone's generic fallback (works for R2/Ceph/Minio) and
-            // silences the per-run "provider not known" NOTICE.
-            env.push((
-                format!("RCLONE_CONFIG_{name}_PROVIDER"),
-                "Other".to_string(),
-            ));
-        }
-        Self {
+    ) -> Result<Self, String> {
+        let (bucket, prefix) = parse_remote(&remote)?;
+        Ok(Self {
             remote,
-            env,
+            bucket,
+            prefix,
+            key_id,
+            key_secret,
+            endpoint,
             interval,
-        }
+        })
     }
+}
+
+/// Parse `name:bucket[/prefix]`. The name before the colon is rclone
+/// legacy and is accepted but ignored. Bucket sanity: non-empty, no
+/// `/`, `:`, or whitespace — provider-specific rules are the operator's
+/// business, exactly as they were with rclone. The prefix is normalized
+/// to end with `/` (or be empty).
+fn parse_remote(remote: &str) -> Result<(String, String), String> {
+    let Some((_, path)) = remote.split_once(':') else {
+        return Err("must be remote:bucket[/prefix]".into());
+    };
+    let path = path.trim();
+    let (bucket, prefix) = match path.split_once('/') {
+        Some((b, p)) => (b, p),
+        None => (path, ""),
+    };
+    if bucket.is_empty()
+        || bucket
+            .chars()
+            .any(|c| c.is_whitespace() || c == ':' || c == '/')
+    {
+        return Err("bucket must be non-empty and free of whitespace, ':' and '/'".into());
+    }
+    // Empty stays empty; anything else becomes a directory-style prefix.
+    let prefix = prefix.trim_start_matches('/');
+    let prefix = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    };
+    Ok((bucket.to_string(), prefix))
 }
 
 #[cfg(test)]
@@ -64,62 +84,52 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn endpoint_builds_provider_env() {
-        let sync = SyncConfig::new(
-            "r2:vw-state".to_string(),
-            "id".to_string(),
-            "secret".to_string(),
-            "https://acct.r2.cloudflarestorage.com".to_string(),
-            Duration::from_secs(90),
-        );
-        assert_eq!(sync.remote, "r2:vw-state");
-        assert_eq!(sync.interval, Duration::from_secs(90));
-        assert_eq!(
-            sync.env,
-            vec![
-                ("RCLONE_CONFIG".to_string(), "/dev/null".to_string()),
-                ("RCLONE_CONFIG_R2_TYPE".to_string(), "s3".to_string()),
-                (
-                    "RCLONE_CONFIG_R2_ACCESS_KEY_ID".to_string(),
-                    "id".to_string()
-                ),
-                (
-                    "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY".to_string(),
-                    "secret".to_string()
-                ),
-                (
-                    "RCLONE_CONFIG_R2_ENDPOINT".to_string(),
-                    "https://acct.r2.cloudflarestorage.com".to_string()
-                ),
-                ("RCLONE_CONFIG_R2_PROVIDER".to_string(), "Other".to_string()),
-            ]
-        );
+    fn ok(remote: &str) -> (String, String) {
+        let cfg = SyncConfig::new(
+            remote.into(),
+            "id".into(),
+            "secret".into(),
+            String::new(),
+            Duration::from_secs(60),
+        )
+        .expect("valid remote");
+        (cfg.bucket, cfg.prefix)
     }
 
     #[test]
-    fn no_endpoint_stays_aws_default() {
-        let sync = SyncConfig::new(
-            "r2:vw-state".to_string(),
-            "id".to_string(),
-            "secret".to_string(),
-            String::new(),
-            Duration::from_secs(60),
-        );
-        assert_eq!(
-            sync.env,
-            vec![
-                ("RCLONE_CONFIG".to_string(), "/dev/null".to_string()),
-                ("RCLONE_CONFIG_R2_TYPE".to_string(), "s3".to_string()),
-                (
-                    "RCLONE_CONFIG_R2_ACCESS_KEY_ID".to_string(),
-                    "id".to_string()
-                ),
-                (
-                    "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY".to_string(),
-                    "secret".to_string()
-                ),
-            ]
-        );
+    fn remotes_parse_into_bucket_and_prefix() {
+        assert_eq!(ok("r2:vw-state"), ("vw-state".into(), String::new()));
+        assert_eq!(ok("r2:vw-state/sub"), ("vw-state".into(), "sub/".into()));
+        // trailing slash on the bucket alone stays root
+        assert_eq!(ok("r2:vw-state/"), ("vw-state".into(), String::new()));
+        // nested prefix keeps its structure
+        assert_eq!(ok("s3:bucket/a/b"), ("bucket".into(), "a/b/".into()));
+        // leading slash in the path is normalized away
+        assert_eq!(ok("r2:vw-state//sub"), ("vw-state".into(), "sub/".into()));
+        // the legacy name is accepted verbatim, whatever it holds
+        assert_eq!(ok("my rem:vw-state"), ("vw-state".into(), String::new()));
+    }
+
+    #[test]
+    fn invalid_remotes_are_rejected() {
+        for remote in [
+            "no-colon-here", // would once have meant a local path
+            "r2:",           // empty bucket
+            "r2:/sub",       // empty bucket before the slash
+            "r2:my bucket",  // whitespace
+            "r2:vw:state",   // colon in the bucket
+        ] {
+            assert!(
+                SyncConfig::new(
+                    remote.into(),
+                    "id".into(),
+                    "secret".into(),
+                    String::new(),
+                    Duration::from_secs(60)
+                )
+                .is_err(),
+                "{remote} must be rejected"
+            );
+        }
     }
 }

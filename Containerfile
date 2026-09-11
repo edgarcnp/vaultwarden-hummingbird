@@ -9,7 +9,6 @@
 ARG VW_VERSION=1.37.2
 ARG WEB_VAULT_VERSION=v2026.7.0
 ARG TAILSCALE_VERSION=1.102.3
-ARG RCLONE_VERSION=1.75.1
 
 # UPSTREAM CHECKSUMS — sha256 digests of the release artifacts; Renovate has
 # no manager for these ARGs, so update each by hand alongside its version.
@@ -21,9 +20,6 @@ ARG WEB_VAULT_SHA256=002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c3
 # per-arch tarballs; bump with TAILSCALE_VERSION.
 ARG TAILSCALE_SHA256_AMD64=36ddd9b51be57ffc2990cf76323cfa13643bfbb1b8a969f6183fa164741cdef5
 ARG TAILSCALE_SHA256_ARM64=a0fa1b154af8c61f862a2259f559f7396d96c0225f4a863eae2333e1546bbe25
-# per-arch zips; bump with RCLONE_VERSION.
-ARG RCLONE_SHA256_AMD64=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
-ARG RCLONE_SHA256_ARM64=03f2504174034b6d004152ed7369251c9a9ec1f7e0836eda420f5c7a5ec0dff9
 
 # BASE IMAGES — float on purpose: rebuilds pick up upstream CVE patches.
 # The runtime uses the -openssl variant (ships libssl/libcrypto, so the
@@ -55,24 +51,18 @@ ARG VAULTWARDEN_WEB_VAULT
 ARG TAILSCALE_VERSION
 ARG TAILSCALE_SHA256_AMD64
 ARG TAILSCALE_SHA256_ARM64
-ARG RCLONE_VERSION
-ARG RCLONE_SHA256_AMD64
-ARG RCLONE_SHA256_ARM64
-RUN dnf -y install tar gzip unzip && dnf clean all
+RUN dnf -y install tar gzip && dnf clean all
 WORKDIR /fetch
 RUN mkdir -p /out /out/web-vault /data
 RUN ARCH="${TARGETARCH:-$(uname -m)}" \
  && case "${ARCH}" in \
-        amd64|x86_64) TAILSCALE_ARCH=amd64; RC_ARCH=linux-amd64; TS_SHA="${TAILSCALE_SHA256_AMD64}"; RC_SHA="${RCLONE_SHA256_AMD64}" ;; \
-        arm64|aarch64) TAILSCALE_ARCH=arm64; RC_ARCH=linux-arm64; TS_SHA="${TAILSCALE_SHA256_ARM64}"; RC_SHA="${RCLONE_SHA256_ARM64}" ;; \
+        amd64|x86_64) TAILSCALE_ARCH=amd64; TS_SHA="${TAILSCALE_SHA256_AMD64}" ;; \
+        arm64|aarch64) TAILSCALE_ARCH=arm64; TS_SHA="${TAILSCALE_SHA256_ARM64}" ;; \
         *) echo "unsupported arch: ${ARCH}" && exit 1 ;; \
     esac \
  && curl -fsSL -o vw.tar.gz \
         "https://github.com/dani-garcia/vaultwarden/archive/refs/tags/${VW_VERSION}.tar.gz" \
  && echo "${VW_SHA256}  vw.tar.gz" | sha256sum -c - \
- && curl -fsSL -o "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
-        "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
- && echo "${RC_SHA}  rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" | sha256sum -c - \
  && if [ "${VAULTWARDEN_WEB_VAULT}" = "true" ]; then \
         curl -fsSL -o "bw_web_${WEB_VAULT_VERSION}.tar.gz" \
             "https://github.com/dani-garcia/bw_web_builds/releases/download/${WEB_VAULT_VERSION}/bw_web_${WEB_VAULT_VERSION}.tar.gz" \
@@ -84,9 +74,7 @@ RUN ARCH="${TARGETARCH:-$(uname -m)}" \
         "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TAILSCALE_ARCH}.tgz" \
  && echo "${TS_SHA}  ts.tgz" | sha256sum -c - \
  && tar -xzf ts.tgz -C /out --strip-components=1 \
- && unzip -j "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" "*/rclone" -d /out \
- && rm "rclone-v${RCLONE_VERSION}-${RC_ARCH}.zip" \
- && test -x /out/tailscale && test -x /out/tailscaled && test -x /out/rclone
+ && test -x /out/tailscale && test -x /out/tailscaled
 
 # STAGE 2 — SUPERVISOR: Rust PID 1 (glibc lockstep with the runtime)
 
@@ -143,7 +131,6 @@ COPY --from=vw-build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=supervisor /out-supervisor /entrypoint
 COPY --from=fetch /out/tailscale /usr/local/bin/tailscale
 COPY --from=fetch /out/tailscaled /usr/local/bin/tailscaled
-COPY --from=fetch /out/rclone /usr/local/bin/rclone
 COPY --from=vw-build /out-vaultwarden /vaultwarden
 # web-vault dir always exists (may be empty) so COPY succeeds
 COPY --from=fetch /out/web-vault /web-vault

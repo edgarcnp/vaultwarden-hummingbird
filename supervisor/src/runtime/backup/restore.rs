@@ -9,7 +9,7 @@ use crate::util::log;
 use super::check::is_empty;
 use super::lineage;
 use super::staging::sweep_staging;
-use super::tools::{list_objects, rclone};
+use super::tools::{Client, client, list_objects};
 
 /// Boot-time restore (opt-in via SUPERVISOR_DB_BACKUP_RESTORE): runs
 /// before vaultwarden spawns. Acts ONLY on an unambiguously empty DB;
@@ -28,7 +28,11 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> bool 
         Ok(false) => log::info("db restore: database is not empty; skipped"),
         Ok(true) => {
             log::info("db restore: database is empty; looking for the newest backup");
-            let Some(object) = newest_object(cfg, &abort) else {
+            let Some(s3) = client(cfg) else {
+                log::err("db restore: S3 client unavailable; skipped (a fresh DB will boot)");
+                return true;
+            };
+            let Some(object) = newest_object(&s3, cfg, &abort) else {
                 log::err("db restore: empty DB but no backup found in the bucket");
                 return true;
             };
@@ -36,7 +40,7 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> bool 
                 return true;
             }
             log::info(&format!("db restore: importing {object}"));
-            if restore_object(cfg, &object, &abort) {
+            if restore_object(&s3, cfg, &object, &abort) {
                 log::info("db restore: done");
             } else {
                 log::err(
@@ -50,10 +54,10 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> bool 
     true
 }
 
-/// The newest dump object (name order == time order).
-fn newest_object(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Option<String> {
-    let mut names = super::tools::list_objects(cfg, abort)?;
-    names.pop().map(|name| format!("{}/{name}", cfg.prefix()))
+/// The newest dump object's full key (name order == time order).
+fn newest_object(s3: &Client, cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Option<String> {
+    let mut names = list_objects(s3, cfg, abort)?;
+    names.pop().map(|name| format!("{}{name}", cfg.prefix()))
 }
 
 /// Boot-time lineage adoption (SUPERVISOR_DB_BACKUP_RESTORE=true): the
@@ -71,7 +75,10 @@ pub fn adopt_lineage(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     if is_empty(cfg) != Ok(false) {
         return;
     }
-    let Some(newest) = list_objects(cfg, &abort).and_then(|mut n| n.pop()) else {
+    let Some(newest) = client(cfg)
+        .and_then(|s3| list_objects(&s3, cfg, &abort))
+        .and_then(|mut n| n.pop())
+    else {
         return;
     };
     lineage::write(&cfg.db_path, &newest);
@@ -83,13 +90,18 @@ pub fn adopt_lineage(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
 /// Download the object into staging, verify integrity, import, clean up.
 /// A successful import adopts the dump's lineage: the sidecar records it,
 /// so the restored database may push without refusing.
-fn restore_object(cfg: &DbBackupConfig, object: &str, abort: &impl Fn() -> bool) -> bool {
+fn restore_object(
+    s3: &Client,
+    cfg: &DbBackupConfig,
+    object: &str,
+    abort: &impl Fn() -> bool,
+) -> bool {
     if !sweep_staging(&cfg.staging) {
         return false;
     }
     let staged = format!("{}/restore-{}", cfg.staging, cfg.db_label());
-    if !rclone(cfg, &["copyto", object, &staged], abort) {
-        log::err("db restore: download failed");
+    if let Err(e) = s3.get(object, &staged, abort) {
+        log::err(&format!("db restore: download failed ({e})"));
         let _ = std::fs::remove_file(&staged);
         return false;
     }

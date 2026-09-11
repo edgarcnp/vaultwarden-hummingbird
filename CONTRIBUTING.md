@@ -68,7 +68,7 @@ These shape most decisions in the codebase, so worth knowing before you start:
 
 - **When in doubt, refuse.** If Tailscale can't start, the container doesn't run the vault. Restore only into a database we're sure is empty. If a process's exit status is lost, treat it as a failure. Being down beats being quietly compromised or corrupted.
 - **Secrets stay out of sight.** No credentials on command lines or in log lines. Keys go into 0600 files or environment variables that are cleaned up afterwards.
-- **Nothing hangs.** Every external call — Tailscale, rclone, database — has a timeout.
+- **Nothing hangs.** Every external call — Tailscale, S3, database — has a timeout.
 - **Tests share one process.** Don't touch the process environment in tests and make temp paths unique; existing test helpers show the pattern.
 
 ## Testing the whole image

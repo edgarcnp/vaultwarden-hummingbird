@@ -13,6 +13,7 @@
 
 mod config;
 mod runtime;
+mod s3;
 mod util;
 
 use config::Config;

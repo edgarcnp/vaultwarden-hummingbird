@@ -16,6 +16,6 @@ mod watch;
 pub use child::{POLL, TERM_GRACE, signal_group, spawn};
 pub use reap::{Gone, exit_code, reap_until_gone};
 pub use reaper::Handle;
-pub use run::{apply_env, run_bounded, run_bounded_capture, run_bounded_env};
+pub use run::{apply_env, run_bounded, run_bounded_capture};
 pub use signals::{install_signal_handlers, stopping, take_stop};
 pub use watch::{shutdown, start_vw};
