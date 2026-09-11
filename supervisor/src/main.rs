@@ -17,8 +17,9 @@ mod util;
 
 use config::Config;
 use runtime::{
-    gate_healthcheck, install_signal_handlers, restore_if_empty, restore_state, shutdown,
-    spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
+    adopt_lineage, gate_healthcheck, install_signal_handlers, restore_if_empty, restore_state,
+    shutdown, spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve, tailscale_up,
+    take_stop,
 };
 use util::{log, net};
 
@@ -55,10 +56,14 @@ fn main() {
     // DB restore first: only an empty DB is touched, and vaultwarden must
     // not start on top of a half-done import — a failed restore refuses
     // to boot (exit 1) so the orchestrator retries with the DB still empty.
-    if let Some(backup) = &cfg.backup
-        && !restore_if_empty(backup, stopping)
-    {
-        std::process::exit(1);
+    if let Some(backup) = &cfg.backup {
+        if !restore_if_empty(backup, stopping) {
+            std::process::exit(1);
+        }
+        // Then lineage adoption: restore=true declares the bucket
+        // authoritative, which lets an upgraded (non-empty, unproven) DB
+        // continue pushing instead of being refused at the first tick.
+        adopt_lineage(backup, stopping);
     }
 
     if let Some(sync) = &cfg.sync {

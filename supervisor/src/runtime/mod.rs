@@ -11,7 +11,7 @@ mod process;
 mod services;
 mod sync;
 
-pub use backup::{restore_if_empty, tick as backup_tick};
+pub use backup::{adopt_lineage, restore_if_empty, tick as backup_tick};
 pub use gate::{
     bind as gate_bind, describe as gate_describe, healthcheck as gate_healthcheck,
     serve as gate_serve,

@@ -7,8 +7,9 @@ use crate::config::DbBackupConfig;
 use crate::util::log;
 
 use super::check::is_empty;
+use super::lineage;
 use super::staging::sweep_staging;
-use super::tools::rclone;
+use super::tools::{list_objects, rclone};
 
 /// Boot-time restore (opt-in via SUPERVISOR_DB_BACKUP_RESTORE): runs
 /// before vaultwarden spawns. Acts ONLY on an unambiguously empty DB;
@@ -55,7 +56,33 @@ fn newest_object(cfg: &DbBackupConfig, abort: &impl Fn() -> bool) -> Option<Stri
     names.pop().map(|name| format!("{}/{name}", cfg.prefix()))
 }
 
+/// Boot-time lineage adoption (SUPERVISOR_DB_BACKUP_RESTORE=true): the
+/// flag declares the bucket authoritative for this data volume, so a
+/// non-empty database with no recorded lineage — an upgrade from before
+/// the guard existed, or a volume the operator knows matches the bucket —
+/// adopts the bucket's newest dump as its lineage and periodic pushes
+/// continue. Without the flag the tick refuses, loudly, and nothing is
+/// guessed. An empty DB needs nothing here (the import path records
+/// lineage); a listing failure needs nothing here (the tick skips loudly).
+pub fn adopt_lineage(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
+    if !cfg.restore || lineage::read(&cfg.db_path).is_some() {
+        return;
+    }
+    if is_empty(cfg) != Ok(false) {
+        return;
+    }
+    let Some(newest) = list_objects(cfg, &abort).and_then(|mut n| n.pop()) else {
+        return;
+    };
+    lineage::write(&cfg.db_path, &newest);
+    log::info(&format!(
+        "db backup: adopted {newest} as this database's lineage"
+    ));
+}
+
 /// Download the object into staging, verify integrity, import, clean up.
+/// A successful import adopts the dump's lineage: the sidecar records it,
+/// so the restored database may push without refusing.
 fn restore_object(cfg: &DbBackupConfig, object: &str, abort: &impl Fn() -> bool) -> bool {
     if !sweep_staging(&cfg.staging) {
         return false;
@@ -68,6 +95,9 @@ fn restore_object(cfg: &DbBackupConfig, object: &str, abort: &impl Fn() -> bool)
     }
     let ok = super::sqlite::import(&staged, &cfg.db_path);
     let _ = std::fs::remove_file(&staged);
+    if ok {
+        super::lineage::write(&cfg.db_path, object.rsplit('/').next().unwrap_or(object));
+    }
     ok
 }
 
@@ -88,5 +118,26 @@ mod tests {
         let mut cfg = support::cfg();
         cfg.restore = true;
         assert!(restore_if_empty(&cfg, || false));
+    }
+
+    /// Adoption with a non-empty, unproven DB and an unreachable bucket
+    /// records nothing (no lineage is guessed) and never panics — the
+    /// first tick will refuse loudly instead.
+    #[test]
+    fn adoption_needs_a_listable_bucket() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-adpt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("db.sqlite3").to_string_lossy().into_owned();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
+        drop(conn);
+        let mut cfg = support::cfg();
+        cfg.restore = true;
+        cfg.db_path = db_path;
+        adopt_lineage(&cfg, || false);
+        assert!(lineage::read(&cfg.db_path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
