@@ -5,7 +5,9 @@
 //! The orchestrators `dump` (sweep -> dump -> push -> prune) and `restore`
 //! (boot-time) drive the in-process sqlite paths (`sqlite/`); `check`
 //! dispatches the emptiness gate; `tools` runs the bounded external rclone
-//! commands, `staging` owns the staging dir, `timestamp` the object names.
+//! commands, `staging` owns the staging dir, `timestamp` the object names,
+//! `unchanged` suppresses re-uploading a dump identical to the newest
+//! backup.
 //!
 //! Consistency: sqlite via `VACUUM INTO` (consistent copy under WAL).
 //! Every phase is bounded and non-fatal: a failed backup logs and
@@ -33,6 +35,7 @@ mod staging;
 mod support;
 mod timestamp;
 mod tools;
+mod unchanged;
 
 pub use dump::tick;
 pub use restore::{adopt_lineage, restore_if_empty};

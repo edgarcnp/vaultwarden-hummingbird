@@ -25,7 +25,7 @@ pub const BACKUP_FIRST_DELAY: Duration = Duration::from_secs(300);
 
 // Default cadences/counts; seconds where applicable.
 pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;
-pub const BACKUP_INTERVAL_DEFAULT: u64 = 43200;
+pub const BACKUP_INTERVAL_DEFAULT: u64 = 21600;
 pub const BACKUP_KEEP_DEFAULT: u64 = 3;
 
 /// Local staging directory (on the data volume) for in-flight dumps and

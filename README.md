@@ -68,14 +68,14 @@ SUPERVISOR_S3_REMOTE=r2:vw-state
 SUPERVISOR_S3_ACCESS_KEY_ID=...
 SUPERVISOR_S3_SECRET_ACCESS_KEY=...
 SUPERVISOR_DB_BACKUP=true
-# SUPERVISOR_DB_BACKUP_INTERVAL=43200   # seconds; default is 12h
+# SUPERVISOR_DB_BACKUP_INTERVAL=21600   # seconds; default is 6h
 # SUPERVISOR_DB_BACKUP_KEEP=3           # how many backups to keep
 ```
 
 A few things worth knowing:
 
 - Backups are taken without pausing the vault or locking anything: SQLite copies itself cleanly (`VACUUM INTO`), even while the vault is writing.
-- Backups are uploaded under `db/` with a timestamp in the name, then the oldest ones are deleted to respect `KEEP`. If the container dies mid-backup you lose one backup, never gain a broken one.
+- Backups are uploaded under `db/` with a timestamp in the name, then the oldest ones are deleted to respect `KEEP`. If the database hasn't changed since the newest backup, the upload is skipped entirely. If the container dies mid-backup you lose one backup, never gain a broken one.
 - Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and, at boot, the container will load the newest backup into the database — but only if it can prove the database is empty. If it can't tell, it does nothing rather than guess. It never overwrites existing data.
 - To restore by hand: stop the vault and replace `/data/db.sqlite3` with the dump file.
 
