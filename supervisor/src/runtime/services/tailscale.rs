@@ -29,42 +29,45 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Pi
 
 /// `tailscale up` with hard timeout; a failure makes the caller refuse to
 /// boot the vault (Tailscale is the sole inbound path).
-/// The authkey is staged to a 0600 file and passed as `--auth-key=file:`
-/// (never argv — /proc cmdline is world-readable) and removed afterwards.
+/// The authkey, when provided, is staged to a 0600 file and passed as
+/// `--auth-key=file:` (never argv — /proc cmdline is world-readable) and
+/// removed afterwards. With restored identity state the key is omitted
+/// entirely: tailscale only attempts a login when the state is missing or
+/// stale, so a valid `tailscaled.state` rejoins the tailnet keyless.
 /// `socket` is the CLI's `--socket`: tailscaled runs on a non-default
 /// LocalAPI path.
 pub fn tailscale_up(
-    authkey: &str,
+    authkey: Option<&str>,
     hostname: &str,
     socket: &str,
     timeout: Duration,
     abort: impl Fn() -> bool,
 ) -> bool {
-    let mut key_file = match StagedFile::create("ts-authkey") {
-        Ok(f) => f,
-        Err(_) => {
-            log::err("tailscale up: cannot stage authkey file; skipping authentication");
-            return false;
+    let key_file = match authkey {
+        Some(key) => {
+            let mut file = match StagedFile::create("ts-authkey") {
+                Ok(f) => f,
+                Err(_) => {
+                    log::err("tailscale up: cannot stage authkey file; skipping authentication");
+                    return false;
+                }
+            };
+            if file.write_all(key.as_bytes()).is_err() {
+                log::err("tailscale up: cannot write authkey file; skipping authentication");
+                return false;
+            }
+            Some(file)
         }
+        None => None,
     };
-    if key_file.write_all(authkey.as_bytes()).is_err() {
-        log::err("tailscale up: cannot write authkey file; skipping authentication");
-        return false;
+    let mut args: Vec<&str> = vec!["--socket", socket, "up"];
+    let auth_flag;
+    if let Some(file) = &key_file {
+        auth_flag = format!("--auth-key=file:{}", file.path());
+        args.push(&auth_flag);
     }
-    let ok = run_bounded(
-        timeout,
-        TAILSCALE,
-        &[
-            "--socket",
-            socket,
-            "up",
-            &format!("--auth-key=file:{}", key_file.path()),
-            "--hostname",
-            hostname,
-            "--accept-dns=false",
-        ],
-        abort,
-    );
+    args.extend(["--hostname", hostname, "--accept-dns=false"]);
+    let ok = run_bounded(timeout, TAILSCALE, &args, abort);
     drop(key_file); // unlink the authkey (0600 staging contract)
     ok
 }

@@ -86,7 +86,7 @@ fn main() {
 
     log::info("authenticating tailscale node...");
     if tailscale_up(
-        &cfg.authkey,
+        cfg.authkey.as_deref(),
         &cfg.hostname,
         &cfg.socket,
         config::AUTH_TIMEOUT,

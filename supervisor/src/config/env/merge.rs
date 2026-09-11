@@ -26,8 +26,10 @@ pub struct Config {
     /// node name announced to the tailnet (`TAILSCALE_HOSTNAME`)
     pub hostname: String,
     /// Tailscale auth key or OAuth client secret (`TAILSCALE_AUTHKEY`;
-    /// required — boot fails closed without it)
-    pub authkey: String,
+    /// optional when S3 state sync is configured — the bucket then
+    /// supplies the node identity — required otherwise: boot fails closed
+    /// without one of the two)
+    pub authkey: Option<String>,
     /// configure `tailscale serve` after a successful up
     pub serve: bool,
     /// advertise this node as a host of `svc:<name>` via `tailscale serve
@@ -99,9 +101,16 @@ impl Config {
 
         let flag = |key: &str, default: bool| parse_flag(key, &knob(key, ""), default);
 
-        let authkey = knob("TAILSCALE_AUTHKEY", "");
-        if authkey.is_empty() {
-            log::err("config: TAILSCALE_AUTHKEY is required; refusing to start");
+        // The node joins the tailnet with EITHER an authkey OR a restored
+        // identity: with S3 state sync configured, the pulled
+        // tailscaled.state is the machine and the key is never consumed —
+        // so the key is only required when sync cannot supply the identity.
+        let authkey = non_empty(Some(knob("TAILSCALE_AUTHKEY", "")));
+        if authkey.is_none() && sync.is_none() {
+            log::err(
+                "config: TAILSCALE_AUTHKEY is required unless SUPERVISOR_S3_* state sync \
+                 is configured to restore the node identity; refusing to start",
+            );
             return None;
         }
 
@@ -154,25 +163,67 @@ mod tests {
             None if k == "TAILSCALE_AUTHKEY" && !file_has_key => Some("test-key".to_string()),
             None => None,
         })
-        .expect("test config always has an authkey")
+        .expect("test config always resolves")
     }
 
     #[test]
-    fn authkey_is_required() {
-        // no authkey from env or file: fail closed
+    fn authkey_required_unless_sync_can_restore_the_identity() {
+        // no authkey from env or file, no state sync: fail closed
         let map: BTreeMap<String, String> = BTreeMap::new();
         assert!(
             Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
-            "missing TAILSCALE_AUTHKEY must refuse to start"
+            "missing TAILSCALE_AUTHKEY without state sync must refuse to start"
         );
-        // file layer satisfies the requirement too
-        let file = FileConfig::load_from(Some(&env_dotenv("TAILSCALE_AUTHKEY=file-key\n")));
-        assert!(Config::build(file, |_| None).is_some());
         // empty is as good as missing
         let map: BTreeMap<String, String> = [("TAILSCALE_AUTHKEY".to_string(), String::new())]
             .into_iter()
             .collect();
         assert!(Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none());
+        // file layer satisfies the requirement too
+        let file = FileConfig::load_from(Some(&env_dotenv("TAILSCALE_AUTHKEY=file-key\n")));
+        let cfg = Config::build(file, |_| None).expect("file key satisfies the gate");
+        assert_eq!(cfg.authkey.as_deref(), Some("file-key"));
+        // no authkey, but state sync configured: the bucket supplies the
+        // node identity, so the key is optional
+        let map: BTreeMap<String, String> = [
+            ("SUPERVISOR_S3_REMOTE".to_string(), "r2:vw".to_string()),
+            ("SUPERVISOR_S3_ACCESS_KEY_ID".to_string(), "id".to_string()),
+            (
+                "SUPERVISOR_S3_SECRET_ACCESS_KEY".to_string(),
+                "sec".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let cfg = Config::build(FileConfig::default(), move |k| map.get(k).cloned())
+            .expect("state sync replaces the authkey requirement");
+        assert_eq!(cfg.authkey, None);
+        assert!(cfg.sync.is_some());
+        // an explicit empty key with sync configured passes the same way
+        let map: BTreeMap<String, String> = [
+            ("TAILSCALE_AUTHKEY".to_string(), String::new()),
+            ("SUPERVISOR_S3_REMOTE".to_string(), "r2:vw".to_string()),
+            ("SUPERVISOR_S3_ACCESS_KEY_ID".to_string(), "id".to_string()),
+            (
+                "SUPERVISOR_S3_SECRET_ACCESS_KEY".to_string(),
+                "sec".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let cfg = Config::build(FileConfig::default(), move |k| map.get(k).cloned())
+            .expect("empty key with sync configured is fine");
+        assert_eq!(cfg.authkey, None);
+        // sync knobs WITHOUT the credentials are not state sync: still
+        // fail closed
+        let map: BTreeMap<String, String> =
+            [("SUPERVISOR_S3_REMOTE".to_string(), "r2:vw".to_string())]
+                .into_iter()
+                .collect();
+        assert!(
+            Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
+            "a remote without credentials is not an identity source"
+        );
     }
 
     #[test]
@@ -183,7 +234,7 @@ mod tests {
         assert_eq!(cfg.socket, "/tmp/tailscaled.sock");
         assert_eq!(cfg.state, "/data/tailscaled.state");
         assert_eq!(cfg.hostname, "vaultwarden-hummingbird");
-        assert_eq!(cfg.authkey, "test-key");
+        assert_eq!(cfg.authkey.as_deref(), Some("test-key"));
         assert!(cfg.serve && cfg.userspace);
         assert_eq!(cfg.service, None);
         assert!(cfg.vw_env.is_empty());
@@ -214,7 +265,7 @@ mod tests {
         let cfg = mk_with_file(&[], FileConfig::load_from(Some(path_str)));
         assert_eq!(cfg.port, "2222");
         assert_eq!(cfg.hostname, "file-host");
-        assert_eq!(cfg.authkey, "file-key");
+        assert_eq!(cfg.authkey.as_deref(), Some("file-key"));
         assert!(!cfg.serve);
         assert!(cfg.userspace);
         assert_eq!(

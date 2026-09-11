@@ -9,7 +9,7 @@ This container image bundles [Vaultwarden](https://github.com/dani-garcia/vaultw
 - The vault listens only inside the container. It is never exposed to the network you publish the port on.
 - Your published port (8080 by default) answers exactly one request: a health check at `/alive`. It returns 200 when the vault is up and 503 when it isn't. Everything else gets a 403.
 - Tailscale makes the vault reachable at `https://<hostname>.<tailnet>.ts.net`, only inside your tailnet. No TUN device or special privileges needed.
-- Because Tailscale is the only way in, the container refuses to start without `TAILSCALE_AUTHKEY`, and it shuts down if Tailscale dies. A vault nobody can reach is worse than a brief outage — your orchestrator will restart it.
+- Because Tailscale is the only way in, the container refuses to start without either `TAILSCALE_AUTHKEY` or S3 state sync (`SUPERVISOR_S3_*`) — a restored `tailscaled.state` is the machine's identity, so with sync configured the key is never needed or consumed on redeploys — and it shuts down if Tailscale dies. A vault nobody can reach is worse than a brief outage — your orchestrator will restart it.
 
 ## Quick start
 
