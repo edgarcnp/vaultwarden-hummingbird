@@ -1,28 +1,26 @@
 //! PID 1 supervisor: tailscaled (userspace) + tailscale up/serve +
-//! loopback-only vaultwarden. Tailscale is the sole inbound path, so it is
-//! required: a missing TAILSCALE_AUTHKEY or any boot-time Tailscale failure
-//! refuses to start (exit 1), and a mid-run tailscaled death tears the
-//! vault down. Optional dotenv layer (SUPERVISOR_ENV_FILE), S3 state sync
-//! (SUPERVISOR_S3_*), and DB backup/restore (SUPERVISOR_DB_BACKUP*).
-//! The authkey is staged to a 0600 file (never argv) and removed after
-//! `up`.
+//! loopback-only vaultwarden. Tailscale is the sole inbound path, so it
+//! is required: a missing TAILSCALE_AUTHKEY or any boot-time Tailscale
+//! failure refuses to start (exit 1), and a mid-run tailscaled death
+//! tears the vault down. Optional dotenv layer (SUPERVISOR_ENV_FILE), S3
+//! state sync (SUPERVISOR_S3_*), and DB backup/restore (SUPERVISOR_DB_
+//! BACKUP*). The authkey is staged to a 0600 file (never argv) and
+//! removed after `up`.
 //!
-//! Shutdown model: children run in their own process groups; a stop request
+//! Boot runs through the explicit phase machine ([`boot`]); the shutdown
+//! model is documented where it lives ([`runtime::process::watch`]):
+//! children run in their own process groups; a stop request
 //! (SIGTERM/SIGINT/SIGHUP/SIGQUIT) is observed by the main thread, which
-//! drives TERM -> KILL escalation and namespace-wide reaping.
+//! drives TERM -> KILL escalation.
 
+mod boot;
 mod config;
 mod runtime;
 mod s3;
 mod util;
 
 use config::Config;
-use runtime::{
-    adopt_lineage, gate_healthcheck, install_signal_handlers, restore_if_empty, restore_state,
-    shutdown, spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve, tailscale_up,
-    take_stop,
-};
-use util::{log, net};
+use runtime::gate_healthcheck;
 
 /// One-shot `--healthcheck` mode: exit 0 iff the gate chain answers 2xx.
 /// Runs before any boot side effect; config resolution is a pure read, so
@@ -34,9 +32,6 @@ fn healthcheck() -> ! {
     }
 }
 
-/// Boot: arm signals, load config (Tailscale required — fail closed), then
-/// restore S3 state, bring up Tailscale, and block in [`start_vw`] for the
-/// container's lifetime.
 fn main() {
     if std::env::args_os()
         .nth(1)
@@ -45,93 +40,5 @@ fn main() {
         healthcheck();
     }
 
-    if !install_signal_handlers() {
-        log::err("cannot register stop signals; refusing to run without graceful shutdown");
-        std::process::exit(1);
-    }
-    let cfg = match Config::from_env() {
-        Some(cfg) => cfg,
-        None => std::process::exit(1),
-    };
-
-    // DB restore first: only an empty DB is touched, and vaultwarden must
-    // not start on top of a half-done import — a failed restore refuses
-    // to boot (exit 1) so the orchestrator retries with the DB still empty.
-    if let Some(backup) = &cfg.backup {
-        if !restore_if_empty(backup, stopping) {
-            std::process::exit(1);
-        }
-        // Then lineage adoption: restore=true declares the bucket
-        // authoritative, which lets an upgraded (non-empty, unproven) DB
-        // continue pushing instead of being refused at the first tick.
-        adopt_lineage(backup, stopping);
-    }
-
-    if let Some(sync) = &cfg.sync {
-        restore_state(sync, stopping);
-    }
-
-    let Some(tsd) = spawn_tailscaled(&cfg.state, &cfg.socket, cfg.userspace) else {
-        log::err("tailscaled failed to start; refusing to run the vault without Tailscale");
-        std::process::exit(1)
-    };
-    log::info("tailscaled started (userspace networking)");
-
-    if !net::wait_daemon(&cfg.socket, config::DAEMON_WAIT, stopping) {
-        if take_stop() {
-            shutdown(Some(tsd), None, 0, None);
-        }
-        log::err("tailscaled socket never appeared; refusing to run the vault without Tailscale");
-        shutdown(Some(tsd), None, 1, None)
-    }
-
-    log::info("authenticating tailscale node...");
-    if tailscale_up(
-        cfg.authkey.as_deref(),
-        &cfg.hostname,
-        &cfg.socket,
-        config::AUTH_TIMEOUT,
-        stopping,
-    ) {
-        log::info("tailscale up: connected");
-        if let Some(sync) = &cfg.sync {
-            sync_state(sync, stopping);
-        }
-        if cfg.serve {
-            let Some(vault_port) = &cfg.vault_port else {
-                log::err("no room for the internal vault port; refusing to start");
-                shutdown(Some(tsd), None, 1, None)
-            };
-            if !tailscale_serve(
-                vault_port,
-                cfg.service.as_deref(),
-                &cfg.socket,
-                config::SERVE_TIMEOUT,
-                &stopping,
-            ) {
-                // Tailscale is the sole inbound path: serve failure means a
-                // vault nobody can reach (typically MagicDNS/HTTPS certs
-                // disabled). Same fail-closed contract as `up` above: exit
-                // and let the orchestrator retry.
-                shutdown(Some(tsd), None, 1, None)
-            }
-            let msg = match &cfg.service {
-                Some(svc) => format!(
-                    "tailscale serve: advertised {svc} (needs console definition + approval)"
-                ),
-                None => "tailscale serve: configured -> https://<hostname>.<tailnet>.ts.net".into(),
-            };
-            log::info(&msg);
-        }
-    } else {
-        if take_stop() {
-            shutdown(Some(tsd), None, 0, None);
-        }
-        log::err(
-            "tailscale up failed or timed out - check TAILSCALE_AUTHKEY; refusing to run the vault without Tailscale",
-        );
-        shutdown(Some(tsd), None, 1, None)
-    }
-
-    start_vw(&cfg, tsd)
+    boot::run()
 }

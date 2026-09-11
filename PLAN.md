@@ -220,10 +220,25 @@ red).
   and alias env refuse with the specific message; strict prefix-only
   file proceeds past config to the Tailscale gate.
 
+- 2026-09-11 — **Phase 4 complete** (uncommitted): boot is an explicit
+  phase machine (`src/boot.rs`; main.rs slims to arg dispatch + module
+  declarations). The seven phases — RestoreDb, AdoptLineage,
+  RestoreState, Tailscaled, DaemonWait, TailscaleUp, Serve — run as a
+  fold over a const table; `Vault` (the watch loop) is the fold's tail
+  and never returns. The per-phase stop/failure policy lives in one
+  table in the module header. No behavior change: log messages,
+  exit codes, teardown shapes (shutdown(tsd, None, code, None) for
+  boot-phase exits, no final state push before the vault runs), and
+  stop-consumption points are byte-for-byte the old main.rs semantics.
+  Verified: 114 tests ×3, fmt, clippy -D warnings, check --release,
+  image build, and real-binary smoke runs: healthcheck one-shot exit 1
+  (config refusal), healthcheck with config but no gate exit 1,
+  invalid-authkey boot fails at TailscaleUp with the refusal and exit 1.
+
 ## Status
 
-- Phases 1–2: **done** (committed: e888022, 03b06dd). Phase 3: done,
-  uncommitted.
-- Phases 4–5: pending. Next action on resume: Phase 4 (boot state
-  machine). UNKNOWN until a live run: real R2 round-trip (put/list/
-  get/delete + wrong-credentials fail-closed).
+- Phases 1–3: **done** (committed: e888022, 03b06dd, 7d76d25).
+  Phase 4: done, uncommitted.
+- Phase 5 pending: checksum pin automation (update script + Renovate
+  postUpgradeTasks + CI drift check). UNKNOWN until a live run: real R2
+  round-trip (put/list/get/delete + wrong-credentials fail-closed).
