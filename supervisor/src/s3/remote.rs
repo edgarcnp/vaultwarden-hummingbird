@@ -13,6 +13,6 @@ pub struct RemoteSpec {
     pub prefix: String,
     pub key_id: String,
     pub key_secret: String,
-    /// custom S3 endpoint (empty = AWS default)
+    /// S3-compatible endpoint; required, no provider is a default
     pub endpoint: String,
 }

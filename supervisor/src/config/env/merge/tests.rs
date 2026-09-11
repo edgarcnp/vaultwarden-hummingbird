@@ -53,6 +53,10 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
             "SUPERVISOR_S3_SECRET_ACCESS_KEY".to_string(),
             "sec".to_string(),
         ),
+        (
+            "SUPERVISOR_S3_ENDPOINT".to_string(),
+            "https://s3.example.invalid".to_string(),
+        ),
     ]
     .into_iter()
     .collect();
@@ -68,6 +72,10 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
         (
             "SUPERVISOR_S3_SECRET_ACCESS_KEY".to_string(),
             "sec".to_string(),
+        ),
+        (
+            "SUPERVISOR_S3_ENDPOINT".to_string(),
+            "https://s3.example.invalid".to_string(),
         ),
     ]
     .into_iter()
@@ -240,6 +248,7 @@ fn db_url_env_wins_over_file() {
         ("SUPERVISOR_S3_REMOTE", "r2:vw"),
         ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
         ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
+        ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
         ("SUPERVISOR_DB_BACKUP", "true"),
     ];
     let mut env: Vec<(&str, &str)> = s3.to_vec();

@@ -30,13 +30,22 @@ const MAX_LIST_KEYS: usize = 10_000;
 /// memory grows.
 const LIST_BODY_CAP: u64 = 16 * 1024 * 1024;
 
-/// AWS default when the remote's endpoint is empty (rclone's old default
-/// region too).
-const AWS_ENDPOINT: &str = "https://s3.us-east-1.amazonaws.com";
-const AWS_REGION: &str = "us-east-1";
-/// Custom endpoints (R2 et al) accept/ignore the region; "auto" is R2's
-/// conventional value.
-const CUSTOM_REGION: &str = "auto";
+/// SigV4 signing region: derived from the endpoint for AWS S3 (its
+/// signature is region-checked), `auto` for everything else — S3-
+/// compatible providers (R2, B2, MinIO, ...) accept or ignore it.
+const AUTO_REGION: &str = "auto";
+
+/// The signing region for an endpoint: the region embedded in AWS S3's
+/// regional hostnames, `auto` for every other S3-compatible provider.
+fn region_for(endpoint: &Url) -> String {
+    match endpoint.host_str() {
+        Some("s3.amazonaws.com") => "us-east-1".into(),
+        Some(host) if host.starts_with("s3.") && host.ends_with(".amazonaws.com") => {
+            host["s3.".len()..host.len() - ".amazonaws.com".len()].to_string()
+        }
+        _ => AUTO_REGION.to_string(),
+    }
+}
 
 /// One listed object: its full key and size. The size feeds the state
 /// sync's unchanged-skip; backup consumers only need the key.
@@ -54,27 +63,26 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to the remote. `Err` = unusable configuration (bad
-    /// endpoint URL) — callers treat it as a failed operation, per each
-    /// caller's own failure semantics.
+    /// Connect to the remote. `Err` = unusable configuration (missing or
+    /// bad endpoint URL) — callers treat it as a failed operation, per
+    /// each caller's own failure semantics.
     pub fn connect(spec: &RemoteSpec, timeout: Duration) -> Result<Self, String> {
-        let endpoint: Url = if spec.endpoint.is_empty() {
-            AWS_ENDPOINT
-        } else {
-            &spec.endpoint
+        if spec.endpoint.is_empty() {
+            return Err(
+                "SUPERVISOR_S3_ENDPOINT is required; every S3-compatible provider \
+                 (AWS included) is configured by its endpoint"
+                    .into(),
+            );
         }
-        .parse()
-        .map_err(|e| format!("invalid S3 endpoint: {e}"))?;
-        let region = if spec.endpoint.is_empty() {
-            AWS_REGION
-        } else {
-            CUSTOM_REGION
-        };
+        let endpoint: Url = spec
+            .endpoint
+            .parse()
+            .map_err(|e| format!("invalid S3 endpoint: {e}"))?;
         let bucket = Bucket::new(
-            endpoint,
+            endpoint.clone(),
             UrlStyle::Path,
             spec.bucket.clone(),
-            region.to_string(),
+            region_for(&endpoint),
         )
         .map_err(|e| format!("invalid S3 bucket configuration: {e}"))?;
         let agent = ureq::Agent::config_builder()
@@ -221,6 +229,22 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// The signing region comes from the endpoint: AWS regional hosts
+    /// embed it (the signature is region-checked there), every other
+    /// S3-compatible provider gets `auto`.
+    #[test]
+    fn region_follows_the_endpoint() {
+        let region = |url: &str| region_for(&url.parse().expect("test url"));
+        assert_eq!(
+            region("https://s3.eu-central-1.amazonaws.com"),
+            "eu-central-1"
+        );
+        assert_eq!(region("https://s3.amazonaws.com"), "us-east-1");
+        assert_eq!(region("https://s3.us-east-1.amazonaws.com"), "us-east-1");
+        assert_eq!(region("https://acct.r2.cloudflarestorage.com"), AUTO_REGION);
+        assert_eq!(region("http://127.0.0.1:9000"), AUTO_REGION);
+    }
+
     fn spec(endpoint: &str) -> RemoteSpec {
         RemoteSpec {
             bucket: "vw-state".into(),
@@ -231,9 +255,18 @@ mod tests {
         }
     }
 
+    /// No endpoint is a construction error (no provider is a default);
+    /// every spelled-out endpoint — AWS or S3-compatible — builds.
     #[test]
-    fn client_builds_for_aws_default_and_custom_endpoints() {
-        assert!(Client::connect(&spec(""), Duration::from_secs(60)).is_ok());
+    fn client_builds_only_with_an_endpoint() {
+        assert!(Client::connect(&spec(""), Duration::from_secs(60)).is_err());
+        assert!(
+            Client::connect(
+                &spec("https://s3.eu-central-1.amazonaws.com"),
+                Duration::from_secs(60)
+            )
+            .is_ok()
+        );
         assert!(
             Client::connect(
                 &spec("https://acct.r2.cloudflarestorage.com"),

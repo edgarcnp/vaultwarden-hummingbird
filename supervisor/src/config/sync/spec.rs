@@ -20,7 +20,8 @@ pub struct SyncConfig {
 }
 
 impl SyncConfig {
-    /// Build from raw knob values; empty `endpoint` = provider default.
+    /// Build from raw knob values. The endpoint is required: every
+    /// provider — AWS included — is spelled out, none is a default.
     /// `Err` names the problem: callers degrade (state sync disabled /
     /// backup skipped) rather than guess.
     pub fn new(
@@ -30,6 +31,13 @@ impl SyncConfig {
         endpoint: String,
         interval: Duration,
     ) -> Result<Self, String> {
+        if endpoint.is_empty() {
+            return Err(
+                "SUPERVISOR_S3_ENDPOINT is required; every S3-compatible provider \
+                 (AWS included) is configured by its endpoint"
+                    .into(),
+            );
+        }
         let target = parse_remote(&remote, key_id, key_secret, endpoint)?;
         Ok(Self {
             remote,
@@ -97,7 +105,7 @@ mod tests {
             remote.into(),
             "id".into(),
             "secret".into(),
-            String::new(),
+            "https://s3.example.invalid".into(),
             Duration::from_secs(60),
         )
         .expect("valid remote");
@@ -132,12 +140,27 @@ mod tests {
                     remote.into(),
                     "id".into(),
                     "secret".into(),
-                    String::new(),
+                    "https://s3.example.invalid".into(),
                     Duration::from_secs(60)
                 )
                 .is_err(),
                 "{remote} must be rejected"
             );
         }
+    }
+
+    /// No provider is a default: the endpoint is required, AWS included.
+    #[test]
+    fn empty_endpoint_is_rejected() {
+        assert!(
+            SyncConfig::new(
+                "r2:vw-state".into(),
+                "id".into(),
+                "secret".into(),
+                String::new(),
+                Duration::from_secs(60)
+            )
+            .is_err()
+        );
     }
 }

@@ -38,7 +38,8 @@ pub(super) fn cfg() -> DbBackupConfig {
             "r2:vw".into(),
             "id".into(),
             "secret".into(),
-            String::new(),
+            // dead local port: connect must succeed, no request is valid
+            "http://127.0.0.1:1".into(),
             Duration::from_secs(60),
         )
         .expect("valid test remote"),

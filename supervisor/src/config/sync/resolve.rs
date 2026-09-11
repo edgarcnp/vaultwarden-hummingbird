@@ -36,8 +36,7 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
             Ok(sync) => Some(sync),
             Err(e) => {
                 log::err(&format!(
-                    "config: invalid SUPERVISOR_S3_REMOTE '{}' ({e}); state sync disabled",
-                    log::sanitize(&remote)
+                    "config: invalid SUPERVISOR_S3_* configuration ({e}); state sync disabled"
                 ));
                 None
             }
@@ -70,6 +69,7 @@ mod tests {
         ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
         ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
         ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
+        ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
     ];
 
     #[test]

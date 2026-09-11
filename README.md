@@ -58,7 +58,7 @@ If a key is set both in the file and on the container, the container wins. An em
 
 ## Surviving redeploys
 
-On platforms without persistent volumes, the container's `/data` is wiped on every redeploy. Since that's where Tailscale keeps the machine's identity, every redeploy means a brand-new tailnet node and every device logged out. If that's your situation, let the container save those identity files to an S3-compatible bucket (Cloudflare R2 works well):
+On platforms without persistent volumes, the container's `/data` is wiped on every redeploy. Since that's where Tailscale keeps the machine's identity, every redeploy means a brand-new tailnet node and every device logged out. If that's your situation, let the container save those identity files to an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Each provider is configured by its endpoint; none is a built-in default:
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -74,7 +74,7 @@ Rather stay fully ephemeral? Set `TAILSCALE_STATE_FILE=mem:` and use an `ephemer
 
 ## Backing up your vault
 
-The vault's database is a single SQLite file on the data volume (`/data/db.sqlite3`). It's always awake, and there's no external database to set up. With an S3-compatible bucket (Cloudflare R2 works well), the container can back it up on a schedule:
+The vault's database is a single SQLite file on the data volume (`/data/db.sqlite3`). It's always awake, and there's no external database to set up. With an S3-compatible bucket, the container can back it up on a schedule:
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state

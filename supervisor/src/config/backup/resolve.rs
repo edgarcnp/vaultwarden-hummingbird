@@ -108,6 +108,7 @@ mod tests {
         ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
         ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
         ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
+        ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
     ];
 
     /// resolve_backup over an explicit knob map (no process env touched).
@@ -212,6 +213,7 @@ mod tests {
                 S3_KNOBS[0],
                 S3_KNOBS[1],
                 S3_KNOBS[2],
+                S3_KNOBS[3],
                 ("SUPERVISOR_DB_BACKUP_RESTORE", "true"),
             ],
             "sqlite:///data/vault.sqlite3",
