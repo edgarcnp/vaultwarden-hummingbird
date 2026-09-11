@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-dotenvy = { version = "0.15", default-features = false }
-jiff = { version = "0.2", default-features = false, features = ["std"] }
-nix = { version = "0.31", default-features = false, features = ["signal"] }
-percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
-rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
-signal-hook = { version = "0.4", default-features = false }
-ureq = { version = "3", default-features = false, features = ["rustls"] }
-url = "2"
+dotenvy = { version = "0.15.7", default-features = false }
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }
+percent-encoding = { version = "2.3.2", default-features = false, features = ["alloc"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+rusty-s3 = { version = "0.10.2", default-features = false, features = ["rustcrypto", "xml"] }
+signal-hook = { version = "0.4.4", default-features = false }
+ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
+url = "2.5.8"
 
 [profile.release]
 opt-level = 3
