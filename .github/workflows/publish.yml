@@ -105,6 +105,11 @@ jobs:
       id-token: write
       packages: write
     steps:
+      # push-to-registry reads credentials from the Docker config, which
+      # podman login does not populate.
+      - name: Docker login to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
       - name: Generate build provenance for the released tag
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
