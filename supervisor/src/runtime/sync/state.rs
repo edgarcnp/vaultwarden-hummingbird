@@ -1,17 +1,19 @@
-//! /data state sync (opt-in via SUPERVISOR_S3_*): pulls /data identity
-//! files at boot, pushes after `up`, on a cadence, and at shutdown — so
-//! node identity and vaultwarden signing keys survive ephemeral redeploys
-//! (also keeps distance from Let's Encrypt's 5-certs-per-week limit).
-//! The bucket holds secrets: keep it private, one container per
-//! bucket/path. Every failure is non-fatal; worst case is a fresh node
-//! registration, one client re-login, or one cert re-issuance.
+//! /data state sync (opt-in via SUPERVISOR_S3_*): pulls /data durable
+//! files at boot, pushes shortly after the vault starts, on a cadence, and
+//! at shutdown — so node identity, vaultwarden signing keys, and user
+//! content survive ephemeral redeploys (also keeps distance from Let's
+//! Encrypt's 5-certs-per-week limit). The bucket holds secrets: keep it
+//! private, one container per bucket/path. Every failure is non-fatal;
+//! worst case is a fresh node registration, one client re-login, or one
+//! cert re-issuance.
 //!
-//! The scope is the identity set ([`super::identity`], `tailscaled.state`,
-//! `rsa_key*`, `certs/**`) — enforced on BOTH directions: pushes upload
-//! exactly that set, pulls refuse any key outside it (a bucket anyone can
-//! write to must not be able to plant arbitrary files on the data volume).
-//! Pushes upload only files whose size differs from the bucket's, so a
-//! quiet node costs one listing, not a re-upload of everything.
+//! The scope is the durable set ([`super::synced`], `tailscaled.state`,
+//! `rsa_key*`, `certs/**`, `attachments/**`, `sends/**`) — enforced on BOTH
+//! directions: pushes upload exactly that set, pulls refuse any key outside
+//! it (a bucket anyone can write to must not be able to plant arbitrary
+//! files on the data volume). Pushes upload only files whose size differs
+//! from the bucket's, so a quiet node costs one listing, not a re-upload of
+//! everything.
 
 use std::path::Path;
 
@@ -19,7 +21,7 @@ use crate::config::{SYNC_TIMEOUT, SyncConfig};
 use crate::s3::{Client, Listed};
 use crate::util::log;
 
-use super::identity::{is_identity_file, local_identity_files};
+use super::synced::{is_synced_file, local_synced_files};
 
 /// Build the client for one sync run; a construction failure is a
 /// failed run (logged, non-fatal).
@@ -33,9 +35,9 @@ fn build(cfg: &SyncConfig) -> Option<Client> {
     }
 }
 
-/// Pull identity files from the bucket into /data. Called at boot, before
+/// Pull synced files from the bucket into /data. Called at boot, before
 /// tailscaled is spawned, so a restored state file wins over nothing.
-/// Only keys inside the identity set are written.
+/// Only keys inside the synced set are written.
 pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;
@@ -52,9 +54,9 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
         let Some(rel) = key.strip_prefix(cfg.prefix()) else {
             continue;
         };
-        if !is_identity_file(rel) {
+        if !is_synced_file(rel) {
             log::err(&format!(
-                "state sync: pull ignored {} (outside the identity set)",
+                "state sync: pull ignored {} (outside the synced set)",
                 log::sanitize(key)
             ));
             continue;
@@ -84,16 +86,18 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     ok
 }
 
-/// Push identity files from /data to the bucket. Called after `up` (fresh
-/// state), on the periodic cadence, and at shutdown. Uploads only files
-/// missing from — or of a different size than — the bucket.
+/// Push synced files from /data to the bucket. Called after `up` (fresh
+/// state), shortly after the vault starts (the RSA key only exists once
+/// vaultwarden has run), on the periodic cadence, and at shutdown.
+/// Uploads only files missing from — or of a different size than — the
+/// bucket.
 pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;
     };
-    let files = local_identity_files();
+    let files = local_synced_files();
     if files.is_empty() {
-        log::info("state sync: no identity files to push yet");
+        log::info("state sync: no synced files to push yet");
         return true;
     }
     let listed = match client.list(cfg.prefix(), &abort) {

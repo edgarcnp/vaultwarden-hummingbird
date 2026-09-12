@@ -9,8 +9,9 @@ use anyhow::bail;
 
 use crate::s3::RemoteSpec;
 
-/// S3-backed persistence for /data identity files (opt-in): the same
-/// tailnet node and vaultwarden RSA keys survive ephemeral redeploys.
+/// S3-backed persistence for the durable /data set (opt-in): the same
+/// tailnet node, vaultwarden RSA keys, and user content survive ephemeral
+/// redeploys.
 #[derive(Clone)]
 pub struct SyncConfig {
     /// the remote as configured (e.g. `r2:vw-state/sub`), for logs

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
 
-use crate::config::{BACKUP_FIRST_DELAY, Config, SyncConfig};
+use crate::config::{BACKUP_FIRST_DELAY, Config, SYNC_FIRST_DELAY, SyncConfig};
 use crate::runtime::{
     Gone, Handle, POLL, TERM_GRACE, backup_tick, exit_code, gate_bind, gate_describe, gate_serve,
     reap_until_gone, run_vaultwarden, signal_group, stopping, sync_state, take_stop,
@@ -93,7 +93,11 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         });
     }
     if let Some(sync) = cfg.sync.clone().filter(|s| !s.interval.is_zero()) {
-        spawn_periodic(sync.interval, sync.interval, move || {
+        // First push on a short delay, not a full interval: vaultwarden only
+        // creates /data/rsa_key.pem once it has started, and the boot push
+        // ran before it existed. This is the push that preserves the vault's
+        // signing key across a redeploy.
+        spawn_periodic(SYNC_FIRST_DELAY, sync.interval, move || {
             sync_state(&sync, stopping);
         });
     }

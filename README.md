@@ -58,7 +58,7 @@ If a key is set both in the file and on the container, the container wins. An em
 
 ## Surviving redeploys
 
-On platforms without persistent volumes, the container's `/data` is wiped on every redeploy. Since that's where Tailscale keeps the machine's identity, every redeploy means a brand-new tailnet node and every device logged out. If that's your situation, let the container save those identity files to an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Each provider is configured by its endpoint; none is a built-in default:
+On platforms without persistent volumes, the container's `/data` is wiped on every redeploy. Since that's where Tailscale keeps the machine's identity, every redeploy means a brand-new tailnet node and every device logged out. If that's your situation, let the container save its durable `/data` files to an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Each provider is configured by its endpoint; none is a built-in default:
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -68,7 +68,7 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 # SUPERVISOR_S3_SYNC_INTERVAL=3600
 ```
 
-The container loads them at startup and saves them periodically and on shutdown. Only files that actually changed get uploaded, so a quiet node costs one bucket listing, not a round of uploads. Already mounting a real volume at `/data`? Skip this entirely. Either way, keep the bucket private (it holds secrets) and run just one container against it.
+The container restores those files at boot (the bucket wins over whatever is on the volume), then saves them again after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The set is the tailnet identity, the vault's RSA signing key, its TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The RSA signing key is the one that matters most: lose it and every existing session becomes invalid. Only files that actually changed get uploaded, so a quiet node costs one bucket listing, not a round of uploads. Already mounting a real volume at `/data`? Skip this entirely, or the boot restore will overwrite newer local files with the bucket's copy. Either way, keep the bucket private (it holds secrets and your attachments) and run just one container against it.
 
 Rather stay fully ephemeral? Set `TAILSCALE_STATE_FILE=mem:` and use an `ephemeral=true` auth key. The container then registers as a fresh node on every boot and devices re-login. Vaultwarden refuses to boot on a non-persistent `/data` as well; `VAULTWARDEN_I_REALLY_WANT_VOLATILE_STORAGE=true` tells it you know.
 
@@ -91,6 +91,7 @@ Worth knowing:
 - Each backup lands under `db/` with a timestamp in its name, and the oldest ones get deleted to respect `KEEP`. If the database hasn't changed since the newest backup, the upload is skipped entirely. If the container dies mid-backup, you lose one backup; you never gain a broken one.
 - Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and the container loads the newest backup at boot, but only into a database it can prove is empty. If it can't tell, it does nothing rather than guess. It never overwrites existing data.
 - Prefer to restore by hand? Stop the vault and replace `/data/db.sqlite3` with the dump file.
+- For a seamless redeploy rather than a recovery-grade backup, lower `SUPERVISOR_DB_BACKUP_INTERVAL` (e.g. `900`). Devices and refresh tokens live in the database too, and a boot restore is only ever as fresh as the newest dump.
 
 ### Hardening the bucket
 
