@@ -13,7 +13,9 @@
 //! it (a bucket anyone can write to must not be able to plant arbitrary
 //! files on the data volume). Pushes upload only files whose size differs
 //! from the bucket's, so a quiet node costs one listing, not a re-upload of
-//! everything.
+//! everything. Pulls only fill gaps: a key whose local file already exists
+//! is skipped, so a persistent data volume stays authoritative and the
+//! bucket never clobbers newer local files.
 
 use std::path::Path;
 
@@ -37,7 +39,12 @@ fn build(cfg: &SyncConfig) -> Option<Client> {
 
 /// Pull synced files from the bucket into /data. Called at boot, before
 /// tailscaled is spawned, so a restored state file wins over nothing.
-/// Only keys inside the synced set are written.
+///
+/// The pull only fills gaps: a bucket key whose local file already exists
+/// is left untouched. On an ephemeral volume nothing is there, so the whole
+/// set is restored; on a persistent volume the volume stays authoritative
+/// and the bucket acts as a fill/DR source rather than clobbering newer
+/// local files. Only keys inside the synced set are written.
 pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;
@@ -50,6 +57,8 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
         }
     };
     let mut ok = true;
+    let mut pulled = 0usize;
+    let mut kept = 0usize;
     for Listed { key, .. } in &listed {
         let Some(rel) = key.strip_prefix(cfg.prefix()) else {
             continue;
@@ -62,6 +71,10 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
             continue;
         }
         let target = format!("/data/{rel}");
+        if !should_pull(Path::new(&target)) {
+            kept += 1;
+            continue;
+        }
         if let Some(parent) = Path::new(&target).parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
@@ -73,7 +86,10 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
             continue;
         }
         match client.get(key, &target, &abort) {
-            Ok(()) => log::info(&format!("state sync: pulled {key}")),
+            Ok(()) => {
+                pulled += 1;
+                log::info(&format!("state sync: pulled {key}"));
+            }
             Err(e) => {
                 log::err(&format!("state sync: pull failed ({e}); continuing"));
                 ok = false;
@@ -81,9 +97,18 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
         }
     }
     if ok && !listed.is_empty() {
-        log::info(&format!("state sync: pull ok ({})", cfg.remote));
+        log::info(&format!(
+            "state sync: pull ok ({}, {pulled} new, {kept} kept)",
+            cfg.remote
+        ));
     }
     ok
+}
+
+/// Whether a bucket key should be written locally: only when nothing is
+/// there yet, so an existing local file is never overwritten by the bucket.
+fn should_pull(target: &Path) -> bool {
+    !target.exists()
 }
 
 /// Push synced files from /data to the bucket. Called after `up` (fresh
@@ -142,4 +167,26 @@ pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
         ));
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pull is fill-only: an existing local file is never overwritten,
+    /// so a persistent data volume stays authoritative over the bucket.
+    #[test]
+    fn pull_only_fills_missing_files() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-fill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("rsa_key.pem");
+        std::fs::write(&present, b"local").unwrap();
+        assert!(!should_pull(&present), "an existing file must be kept");
+        assert!(
+            should_pull(&dir.join("rsa_key.pub.pem")),
+            "a missing file must be pulled"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
