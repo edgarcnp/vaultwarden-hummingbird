@@ -70,7 +70,7 @@ impl Boot {
     /// Tear down what exists and exit. No final state push: nothing
     /// durable has changed during boot (see the module table).
     fn exit(&self, code: i32) -> ! {
-        shutdown(self.tsd.clone(), None, code, None)
+        shutdown(self.tsd.clone(), None, code, None, None)
     }
 
     fn run(&mut self, phase: Phase) -> Outcome {

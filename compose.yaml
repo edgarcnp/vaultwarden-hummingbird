@@ -18,8 +18,8 @@ services:
         VAULTWARDEN_WEB_VAULT: "${VAULTWARDEN_WEB_VAULT:-true}"
     image: vaultwarden-hummingbird:local
     restart: unless-stopped
-    # Covers the supervisor's TERM grace period plus the final S3 state push
-    # (identity + attachments/sends; only changed files upload).
+    # Covers the supervisor's TERM grace period plus the final S3 persists
+    # (DB dump, then identity + attachments/sends).
     stop_grace_period: 180s
     # Explicit (not just inherited from the image): podman's default OCI
     # image format drops HEALTHCHECK; a compose-level definition works with

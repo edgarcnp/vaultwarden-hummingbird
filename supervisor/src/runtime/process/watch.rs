@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
 
-use crate::config::{BACKUP_FIRST_DELAY, Config, SYNC_FIRST_DELAY, SyncConfig};
+use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SYNC_FIRST_DELAY, SyncConfig};
 use crate::runtime::{
     Gone, Handle, POLL, TERM_GRACE, backup_tick, exit_code, gate_bind, gate_describe, gate_serve,
     reap_until_gone, run_vaultwarden, signal_group, stopping, sync_state, take_stop,
@@ -56,7 +56,7 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
     // fail closed on a missing internal port: co-binding would expose the vault
     let Some(vault_port) = &cfg.vault_port else {
         log::err("no room for the internal vault port above the exposed port; refusing to start");
-        shutdown(Some(tsd), None, 1, None)
+        shutdown(Some(tsd), None, 1, None, None)
     };
     let gate = match gate_bind(&cfg.port) {
         Ok(g) => g,
@@ -65,7 +65,7 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
                 "gatekeeper bind failed on 0.0.0.0:{}: {e}",
                 log::sanitize(&cfg.port)
             ));
-            shutdown(Some(tsd), None, 1, None)
+            shutdown(Some(tsd), None, 1, None, None)
         }
     };
     gate_describe(&cfg.port, vault_port);
@@ -74,7 +74,7 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
     else {
         log::err("internal vault port is not a valid port; refusing to start");
-        shutdown(Some(tsd), None, 1, None)
+        shutdown(Some(tsd), None, 1, None, None)
     };
     drop(std::thread::spawn(move || {
         gate_serve(gate, Some(vault_addr))
@@ -82,7 +82,7 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
 
     log::info("starting vaultwarden");
     let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
-        shutdown(Some(tsd), None, 1, None)
+        shutdown(Some(tsd), None, 1, None, None)
     };
     // Periodic maintenance runs off the watch loop: a bounded sync push or
     // backup must never delay reaping or stop observation by up to its
@@ -130,17 +130,24 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         std::thread::sleep(POLL);
     };
 
-    shutdown(Some(tsd), Some(vw), code, cfg.sync.as_ref())
+    shutdown(
+        Some(tsd),
+        Some(vw),
+        code,
+        cfg.backup.as_ref(),
+        cfg.sync.as_ref(),
+    )
 }
 
 /// Bring every child down and exit the container: TERM each child group,
 /// escalate to KILL after `TERM_GRACE`, wait for one clean reaper pass,
-/// make a final best-effort state push, then exit with `code`. Safe for
-/// children that are already dead (group kill + wait are no-ops).
+/// make a final best-effort DB dump and state push, then exit with `code`.
+/// Safe for children that are already dead (group kill + wait are no-ops).
 pub fn shutdown(
     tsd: Option<Handle>,
     vw: Option<Handle>,
     code: i32,
+    backup: Option<&DbBackupConfig>,
     sync: Option<&SyncConfig>,
 ) -> ! {
     log::info("shutting down");
@@ -155,13 +162,19 @@ pub fn shutdown(
     {
         log::err(&format!("vaultwarden (pid {}) did not exit cleanly", v.pid));
     }
-    // One clean reaper pass before the final push: strays reaped, nothing
-    // pending. The hub is the only reaper, so teardown waits on it rather
-    // than reaping anything itself.
+    // One clean reaper pass before the final persists: strays reaped,
+    // nothing pending. The hub is the only reaper, so teardown waits on it
+    // rather than reaping anything itself.
     if !super::reaper::quiesce(Duration::from_secs(2)) {
         log::err("reaper did not quiesce; continuing shutdown");
     }
-    // final push AFTER children are gone; must not abort on the stop flag
+    // Final persists AFTER children are gone; must not abort on the stop
+    // flag. The DB goes first: it carries session and device state and is
+    // the smaller push, so it should win any remaining drain budget over a
+    // potentially large attachments upload.
+    if let Some(backup) = backup.filter(|b| b.periodic) {
+        backup_tick(backup, || false);
+    }
     if let Some(sync) = sync {
         sync_state(sync, || false);
     }

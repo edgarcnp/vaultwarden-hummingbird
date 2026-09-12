@@ -12,8 +12,10 @@ pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
 pub const SERVE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
-/// Delay before the first periodic backup after the vault starts.
-pub const BACKUP_FIRST_DELAY: Duration = Duration::from_secs(300);
+/// Delay before the first periodic backup after the vault starts. Short so
+/// an ephemeral container that is redeployed early still has a recent dump
+/// to restore.
+pub const BACKUP_FIRST_DELAY: Duration = Duration::from_secs(60);
 /// Delay before the first periodic state push, also measured from the vault
 /// starting: vaultwarden creates `/data/rsa_key.pem` during startup, so a
 /// push a little later is the first that can carry it. Without this the next

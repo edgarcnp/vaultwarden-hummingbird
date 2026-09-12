@@ -89,6 +89,7 @@ Worth knowing:
 
 - Backups never pause the vault or lock anything. SQLite copies itself cleanly (`VACUUM INTO`), even while the vault is writing.
 - Each backup lands under `db/` with a timestamp in its name, and the oldest ones get deleted to respect `KEEP`. If the database hasn't changed since the newest backup, the upload is skipped entirely. If the container dies mid-backup, you lose one backup; you never gain a broken one.
+- On a graceful stop, the container dumps the database once more after the vault has shut down, so a normal redeploy captures the latest sessions and devices even if the interval hasn't elapsed. Give the orchestrator enough time to drain (Railway's SIGTERM drain, compose's `stop_grace_period`).
 - Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and the container loads the newest backup at boot, but only into a database it can prove is empty. If it can't tell, it does nothing rather than guess. It never overwrites existing data.
 - Prefer to restore by hand? Stop the vault and replace `/data/db.sqlite3` with the dump file.
 - For a seamless redeploy rather than a recovery-grade backup, lower `SUPERVISOR_DB_BACKUP_INTERVAL` (e.g. `900`). Devices and refresh tokens live in the database too, and a boot restore is only ever as fresh as the newest dump.
