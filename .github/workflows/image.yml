@@ -1,8 +1,9 @@
-# The container image: build the real Containerfile, smoke the
-# entrypoint, and keep the expensive full multi-arch build in publish.
-# Path-filtered to the build context, so ordinary Rust changes stay in
-# supervisor.yml; the Containerfile itself (and Renovate's base-image and
-# version PRs, which touch it) first builds here instead of at tag time.
+# The container image: build the real Containerfile, run the fail-closed
+# smoke suite (scripts/smoke-image.sh), and keep the expensive full
+# multi-arch build in publish. Path-filtered to the build context, so
+# ordinary Rust changes stay in supervisor.yml; the Containerfile itself
+# (and Renovate's base-image and version PRs, which touch it) first builds
+# here instead of at tag time.
 name: Image
 
 on:
@@ -48,15 +49,8 @@ jobs:
             --tag pr-check:ci \
             .
 
-      - name: Verify the healthcheck survived the build
-        run: |
-          test "$(podman inspect pr-check:ci \
-            --format '{{json .HealthCheck.Test}}')" != "null"
-
-      # Smoke: the supervisor must run inside the runtime image (dynamic
-      # linking and baked paths intact) and fail fast with no gate to
-      # probe — exit 1, not a crash.
-      - name: Smoke test the entrypoint
-        run: |
-          podman run --rm --network none --entrypoint /entrypoint pr-check:ci --healthcheck \
-            && exit 1 || test $? -eq 1
+      # The full fail-closed smoke suite: entrypoint execution in the
+      # runtime image, strict-dotenv refusals, and the Tailscale
+      # fail-closed chain. The same script contributors run locally.
+      - name: Smoke test the image
+        run: scripts/smoke-image.sh pr-check:ci

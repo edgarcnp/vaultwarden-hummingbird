@@ -105,21 +105,13 @@ podman run --rm -it -p 127.0.0.1:8080:8080 \
 podman healthcheck run <container>   # exit 0 means healthy
 ```
 
-You can exercise the fail-closed paths without any credentials, and it's worth doing whenever you touch boot or config:
+The fail-closed paths need no credentials, and they're worth exercising whenever you touch boot or config. They are all one command, together with the image-shape checks:
 
 ```sh
-# no authkey, no S3: must refuse to boot, naming what's missing
-podman run --rm vaultwarden-hummingbird:local
-
-# strict dotenv: a bare upstream key must refuse, naming the key
-printf 'DATABASE_URL=x\n' | podman run --rm -i \
-  -e SUPERVISOR_ENV_FILE=/dev/stdin vaultwarden-hummingbird:local
-
-# healthcheck one-shot: exit 0 only if the vault answers through the gate.
-# A bare run exits non-zero at config resolution (no auth key), before the
-# probe ever runs, so exercise it inside a configured container instead:
-podman exec <container> /entrypoint --healthcheck
+scripts/smoke-image.sh                    # defaults to vaultwarden-hummingbird:local
 ```
+
+It runs the image networkless and asserts: non-root user with an exec healthcheck, the one-shot `--healthcheck` refusal, the missing-authkey refusal, a bare upstream key in the dotenv file, an unknown supervisor key, a relative `TAILSCALE_STATE_FILE`, and the Tailscale fail-closed chain (tailscaled starts, the CLI fails, no vault runs). The Image workflow runs the same script on every build-context change.
 
 ## Releases
 
