@@ -672,9 +672,28 @@ Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document)
   workflows themselves need GitHub runners and were not executed here — their shapes follow the previously working
   image-smoke workflow this repository used.
 
-Deliberately not yet done: F13 (sync manifest/journal: hash-based change detection, healing equal-size remote
-corruption), F14's multipart/resume half, F16 (AWS region/path endpoint handling), the typed `SecretString`
-wrappers, and per-arch tag cleanup after a publish.
+### Phase 7 — the remaining findings
+
+- **F13 (content, not size):** the sync path now writes a bucket-side manifest (`<prefix>manifest`) mapping every
+  synced file to its size and SHA-256. Pushes hash changed files — a local cache keyed by (size, mtime) avoids
+  re-hashing unchanged ones — and upload only when the content differs; pulls verify the hash, not just the size,
+  before a file is published. A missing manifest is the legacy layout (size-checked listings); an unreadable one is
+  rebuilt from local content, loudly.
+- **F14b (large objects):** uploads at or above 16 MiB go multipart in 8 MiB parts, each part with the full body
+  budget; any failure aborts the upload so no orphaned parts linger (and the 10k-part ceiling is enforced). This was
+  the missing half of "large objects can never sync on a slow link".
+- **F16 (endpoints):** the signing region is derived for AWS's regional, dualstack, and FIPS spellings
+  (`s3-<region>`, `s3.dualstack.<region>`, `s3-fips[.dualstack].<region>`, legacy `s3`/`s3-external-1`), and a
+  path-prefixed endpoint keeps its prefix instead of being silently dropped by the bucket join.
+- **Dependency:** `sha2` is promoted from a transitive (already compiled for rusty-s3) to a direct dependency; no
+  new package enters the tree.
+- Tests: 168 total — known SHA-256 vectors, manifest/cache round-trips and rejects, hash-mismatch download refusal,
+  multipart part flow and abort-on-failure, region/path cases.
+- Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
+  `cargo test --locked` → **168 passed, 0 failed**, 6 consecutive runs.
+
+Deliberately not done: typed `SecretString` wrappers (the no-`Debug` + sanitized-log invariant already holds and no
+defect depends on it) and per-arch tag cleanup after publish (cosmetic; the tags are harmless).
 
 ## Appendix A — evidence commands
 
