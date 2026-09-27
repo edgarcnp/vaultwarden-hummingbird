@@ -2,7 +2,7 @@
 
 Your own password vault, private and reachable only from your devices.
 
-This image bundles [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (a lightweight, Bitwarden-compatible server) with [Tailscale](https://tailscale.com), on top of Red Hat's minimal [Hummingbird](https://images.redhat.com/) images. Everything inside comes from an official source and is checked against a checksum before it runs. The container runs as a non-root user, with no shell and no package manager. If someone breaks in, there's almost nothing for them to work with.
+This image bundles [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (a lightweight, Bitwarden-compatible server) with [Tailscale](https://tailscale.com), on top of Red Hat's minimal [Hummingbird](https://images.redhat.com/) images. The release artifacts inside come from official sources and are verified against pinned checksums before they run; the base images track Red Hat's latest Hummingbird tags so rebuilds pick up CVE patches. The container runs as a non-root user, with no shell and no package manager. If someone breaks in, there's almost nothing for them to work with.
 
 ## How it works
 
@@ -45,7 +45,7 @@ The keys come in three groups:
 - `SUPERVISOR_*` — the optional extras below: state sync, backups.
 - `VAULTWARDEN_*` — vaultwarden's own settings, just with a prefix. `VAULTWARDEN_DATABASE_URL` becomes `DATABASE_URL` inside. Vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template) lists everything it understands.
 
-The file is strict on purpose. Only those three prefixes are accepted, and anything else (a typo, or a bare name like `DATABASE_URL`) stops the boot and names the offending keys. A misconfigured vault should never start quietly. Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and rename `VAULTWARDEN_ROCKET_PORT`/`ROCKET_PORT` to `VAULTWARDEN_PORT`. The port has one spelling now.
+The file is strict on purpose. Only those three prefixes are accepted, and anything else (a typo, or a bare name like `DATABASE_URL`) stops the boot and names the offending keys. A misconfigured vault should never start quietly. A key outside the namespaces is always fatal; a typo *inside* one can't be told apart from a key that is merely unused, so it isn't: unknown `SUPERVISOR_*`/`TAILSCALE_*` keys are ignored, and unknown `VAULTWARDEN_*` keys are handed to the vault, which ignores them. Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and rename `VAULTWARDEN_ROCKET_PORT`/`ROCKET_PORT` to `VAULTWARDEN_PORT`. The port has one spelling now.
 
 If a key is set both in the file and on the container, the container wins. An empty value counts as unset. And the vault's environment is default-deny: on the container env, only `VAULTWARDEN_`-prefixed keys reach the vault.
 
@@ -70,7 +70,7 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 
 The container restores those files at boot — filling in only what is missing locally, so it never overwrites newer data on a volume — then saves them again after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The set is the tailnet identity, the vault's RSA signing key, its TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The RSA signing key is the one that matters most: lose it and every existing session becomes invalid. Only files that actually changed get uploaded, so a quiet node costs one bucket listing, not a round of uploads. Already mounting a real volume at `/data`? The boot pull only fills in missing files, so it won't clobber newer local data and you can keep it on as an offsite copy — just remember the DB backup needs the same `SUPERVISOR_S3_*` settings. Either way, keep the bucket private (it holds secrets and your attachments) and run just one container against it.
 
-Rather stay fully ephemeral? Set `TAILSCALE_STATE_FILE=mem:` and use an `ephemeral=true` auth key. The container then registers as a fresh node on every boot and devices re-login. Vaultwarden refuses to boot on a non-persistent `/data` as well; `VAULTWARDEN_I_REALLY_WANT_VOLATILE_STORAGE=true` tells it you know.
+Rather stay fully ephemeral? Set `TAILSCALE_STATE_FILE=mem:` and use an `ephemeral=true` auth key. The container then registers as a fresh node on every boot and devices re-login. Upstream vaultwarden also tries to detect a non-persistent `/data` and refuses to boot unless `VAULTWARDEN_I_REALLY_WANT_VOLATILE_STORAGE=true`; how well that detection works depends on how the runtime mounts the folder, so don't rely on it — treat `/data` as gone unless it's a real volume or S3 sync is on.
 
 ## Backing up your vault
 
@@ -90,7 +90,7 @@ Worth knowing:
 - Backups never pause the vault or lock anything. SQLite copies itself cleanly (`VACUUM INTO`), even while the vault is writing.
 - Each backup lands under `db/` with a timestamp in its name, and the oldest ones get deleted to respect `KEEP`. If the database hasn't changed since the newest backup, the upload is skipped entirely. If the container dies mid-backup, you lose one backup; you never gain a broken one.
 - On a graceful stop, the container dumps the database once more after the vault has shut down, so a normal redeploy captures the latest sessions and devices even if the interval hasn't elapsed. Give the orchestrator enough time to drain (Railway's SIGTERM drain, compose's `stop_grace_period`).
-- Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and the container loads the newest backup at boot, but only into a database it can prove is empty. If it can't tell, it does nothing rather than guess. It never overwrites existing data.
+- Set `SUPERVISOR_DB_BACKUP_RESTORE=true` and the container loads the newest backup at boot, but only into a database it can prove is empty. If it can't tell — an unreadable database, or a bucket it can't list — it refuses to start rather than guess. It never overwrites existing data.
 - Prefer to restore by hand? Stop the vault and replace `/data/db.sqlite3` with the dump file.
 - For a seamless redeploy rather than a recovery-grade backup, lower `SUPERVISOR_DB_BACKUP_INTERVAL` (e.g. `900`). Devices and refresh tokens live in the database too, and a boot restore is only ever as fresh as the newest dump.
 
@@ -106,7 +106,7 @@ The container checks that a downloaded backup is a parseable database dump, but 
 ## What's on by default
 
 - Sign-ups are open. Set `VAULTWARDEN_SIGNUPS_ALLOWED=false` once your accounts exist.
-- Attachment uploads are off. Sends are on (`VAULTWARDEN_SENDS_ALLOWED=false` turns them off).
+- Attachment uploads are off (`VAULTWARDEN_ORG_ATTACHMENT_LIMIT` / `VAULTWARDEN_USER_ATTACHMENT_LIMIT` change that). Sends are on (`VAULTWARDEN_SENDS_ALLOWED=false` turns them off).
 - The web vault is included and enabled. Build with `VAULTWARDEN_WEB_VAULT=false` if you only want the API, or set `VAULTWARDEN_WEB_VAULT_ENABLED=false` at runtime to hide it without rebuilding.
 - The admin panel is off, and stays off unless you set an admin token.
 - Mobile push notifications are optional: grab free credentials at https://bitwarden.com/host, then set `VAULTWARDEN_PUSH_ENABLED=true` plus the ID and key.

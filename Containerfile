@@ -137,14 +137,16 @@ COPY --from=fetch /out/web-vault /web-vault
 COPY --from=fetch --chown=65532:0 /data /data
 
 # RUNTIME DEFAULTS — plain upstream names: the image-default layer, not
-# user config (that flows via the dotenv file). ROCKET_ADDRESS is also
-# hard-pinned to 127.0.0.1 by the supervisor at spawn (defense in depth:
-# the image default must not reintroduce a 0.0.0.0 API listener if run
-# without the supervisor). WEB_VAULT_ENABLED is likewise re-derived by
-# the supervisor from the baked folder (ambient env is default-deny for
-# the vault child), so an API-only build stays API-only under the
-# supervisor too. Volatile storage: pointing /data at tmpfs (or running
-# without a volume) loses everything on exit. vaultwarden's upstream
+# user config (that flows via the dotenv file). The child environment is
+# default-deny, so the supervisor re-applies these to vaultwarden at spawn
+# (IMAGE_DEFAULTS in supervisor/src/runtime/services/vaultwarden.rs); keep
+# the two lists in sync. ROCKET_ADDRESS is also hard-pinned to 127.0.0.1 by
+# the supervisor at spawn (defense in depth: the image default must not
+# reintroduce a 0.0.0.0 API listener if run without the supervisor).
+# WEB_VAULT_ENABLED is likewise re-derived by the supervisor from the baked
+# folder, so an API-only build stays API-only under the supervisor too.
+# Volatile storage: pointing /data at tmpfs (or running without a volume)
+# loses everything on exit. vaultwarden's upstream
 # I_REALLY_WANT_VOLATILE_STORAGE gate did NOT trigger on 1.37.2 (verified:
 # a tmpfs /data boots clean, no refusal, no warning) — the safety net here
 # is the supervisor's state sync + DB backup, not the vault's own check.

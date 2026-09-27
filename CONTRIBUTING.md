@@ -35,7 +35,7 @@ Don't skip `--format docker`. The image declares a native HEALTHCHECK, and podma
 To run what you built:
 
 ```sh
-cp .env.example .env    # fill in the auth key, database URL, and domain
+cp .env.example .env    # fill in the auth key and domain
 podman compose up -d    # or docker compose
 curl -i http://127.0.0.1:8080/alive
 ```
@@ -107,14 +107,16 @@ You can exercise the fail-closed paths without any credentials, and it's worth d
 
 ```sh
 # no authkey, no S3: must refuse to boot, naming what's missing
-podman run --rm localhost/vaultwarden-hummingbird:local
+podman run --rm vaultwarden-hummingbird:local
 
 # strict dotenv: a bare upstream key must refuse, naming the key
 printf 'DATABASE_URL=x\n' | podman run --rm -i \
-  -e SUPERVISOR_ENV_FILE=/dev/stdin localhost/vaultwarden-hummingbird:local
+  -e SUPERVISOR_ENV_FILE=/dev/stdin vaultwarden-hummingbird:local
 
-# healthcheck one-shot with nothing listening: must exit non-zero
-podman run --rm --entrypoint /entrypoint localhost/vaultwarden-hummingbird:local --healthcheck
+# healthcheck one-shot: exit 0 only if the vault answers through the gate.
+# A bare run exits non-zero at config resolution (no auth key), before the
+# probe ever runs, so exercise it inside a configured container instead:
+podman exec <container> /entrypoint --healthcheck
 ```
 
 ## Releases
