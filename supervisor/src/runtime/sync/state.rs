@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use crate::config::{SYNC_TIMEOUT, SyncConfig};
-use crate::s3::{Client, Listed};
+use crate::s3::{Client, Listed, MAX_SYNC_OBJECT_BYTES};
 use crate::util::log;
 
 use super::synced::{is_synced_file, local_synced_files};
@@ -44,7 +44,9 @@ fn build(cfg: &SyncConfig) -> Option<Client> {
 /// is left untouched. On an ephemeral volume nothing is there, so the whole
 /// set is restored; on a persistent volume the volume stays authoritative
 /// and the bucket acts as a fill/DR source rather than clobbering newer
-/// local files. Only keys inside the synced set are written.
+/// local files. Only keys inside the synced set are written. Each pull is
+/// atomic and size-verified: it lands complete or not at all, so a
+/// truncated object can never become the volume's authoritative copy.
 pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;
@@ -59,7 +61,7 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let mut ok = true;
     let mut pulled = 0usize;
     let mut kept = 0usize;
-    for Listed { key, .. } in &listed {
+    for Listed { key, size } in &listed {
         let Some(rel) = key.strip_prefix(cfg.prefix()) else {
             continue;
         };
@@ -85,7 +87,7 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
             ok = false;
             continue;
         }
-        match client.get(key, &target, &abort) {
+        match client.get(key, &target, Some(*size), MAX_SYNC_OBJECT_BYTES, &abort) {
             Ok(()) => {
                 pulled += 1;
                 log::info(&format!("state sync: pulled {key}"));

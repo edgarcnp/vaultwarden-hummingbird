@@ -9,5 +9,5 @@
 mod client;
 mod remote;
 
-pub use client::{Client, Listed};
+pub use client::{Client, Listed, MAX_DB_OBJECT_BYTES, MAX_SYNC_OBJECT_BYTES};
 pub use remote::RemoteSpec;

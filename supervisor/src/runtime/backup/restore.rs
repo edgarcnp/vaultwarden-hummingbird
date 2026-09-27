@@ -4,6 +4,7 @@
 //! truth — the container exits and the orchestrator retries instead.
 
 use crate::config::DbBackupConfig;
+use crate::s3::MAX_DB_OBJECT_BYTES;
 use crate::util::log;
 
 use super::check::is_empty;
@@ -132,7 +133,7 @@ fn restore_object(
         return false;
     }
     let staged = format!("{}/restore-{}", cfg.staging, cfg.db_label());
-    if let Err(e) = s3.get(object, &staged, abort) {
+    if let Err(e) = s3.get(object, &staged, None, MAX_DB_OBJECT_BYTES, abort) {
         log::err(&format!("db restore: download failed ({e})"));
         let _ = std::fs::remove_file(&staged);
         return false;

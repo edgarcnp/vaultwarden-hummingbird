@@ -3,12 +3,14 @@
 //! URLs); ureq speaks HTTPS (rustls, webpki roots). Secrets ride the signed
 //! request only: never argv, never env, never logs.
 //!
-//! Every request is bounded by the caller's timeout; `abort` is checked
-//! before each request and between listing pages, so a stop request is
-//! honored at object granularity. Errors never carry the presigned URL
-//! (its signature is a credential).
+//! Every request is bounded: control phases by the caller's timeout, and
+//! transfer bodies by a larger fixed budget so large objects can sync.
+//! `abort` is checked before each request and per download chunk, so a stop
+//! request is honored promptly. Errors never carry the presigned URL (its
+//! signature is a credential).
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
@@ -20,6 +22,21 @@ use super::remote::RemoteSpec;
 /// Presigned-URL lifetime; must comfortably exceed the per-request
 /// timeout (the request is issued immediately after signing).
 const SIGN_EXPIRE: Duration = Duration::from_secs(900);
+
+/// Total body budget for one transfer (upload or download body). A single
+/// end-to-end request timeout made large objects unsyncable whenever the
+/// bucket was slow; per-phase budgets bound every hang while still giving
+/// a body this whole window to make progress.
+const BODY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Absolute download cap for one synced object. Upstream clients cap
+/// Bitwarden attachments at 100 MB by default; 1 GiB leaves generous
+/// headroom while a rogue bucket still cannot fill the data volume.
+pub const MAX_SYNC_OBJECT_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Absolute download cap for one DB dump. The import's integrity check
+/// still decides validity; this only bounds a rogue endpoint.
+pub const MAX_DB_OBJECT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Listing bound: far beyond any real backup/state prefix, mirroring the
 /// old capture cap's intent — a listing this size is treated as failure,
@@ -64,9 +81,11 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to the remote. `Err` = unusable configuration (missing or
-    /// bad endpoint URL) — callers treat it as a failed operation, per
-    /// each caller's own failure semantics.
+    /// Connect to the remote. `timeout` bounds each control phase (DNS,
+    /// connect, request, response headers); transfer bodies get
+    /// [`BODY_TIMEOUT`]. `Err` = unusable configuration (missing or bad
+    /// endpoint URL) — callers treat it as a failed operation, per each
+    /// caller's own failure semantics.
     pub fn connect(spec: &RemoteSpec, timeout: Duration) -> anyhow::Result<Self> {
         if spec.endpoint.is_empty() {
             bail!(
@@ -86,8 +105,18 @@ impl Client {
         )
         .map_err(|e| anyhow!("invalid S3 bucket configuration: {e}"))?;
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .max_redirects(0) // a presigned URL must never be re-signed by a redirect
+            // Per-phase budgets instead of one end-to-end timeout: control
+            // phases stay tight while a transfer body gets BODY_TIMEOUT.
+            .timeout_resolve(Some(timeout))
+            .timeout_connect(Some(timeout))
+            .timeout_send_request(Some(timeout))
+            .timeout_send_body(Some(BODY_TIMEOUT))
+            .timeout_recv_response(Some(timeout))
+            .timeout_recv_body(Some(BODY_TIMEOUT))
+            .timeout_global(None)
+            // A presigned URL must never be re-signed by a redirect; a 3xx
+            // is then not an error, so every call site checks the status.
+            .max_redirects(0)
             .build()
             .new_agent();
         Ok(Self {
@@ -113,16 +142,30 @@ impl Client {
             .bucket
             .put_object(Some(&self.credentials), key)
             .sign(SIGN_EXPIRE);
-        self.agent
+        let response = self
+            .agent
             .put(url.as_str())
             .header("Content-Length", size.to_string())
             .send(file)
             .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
+        checked("upload", key, response)?;
         Ok(())
     }
 
-    /// Download `key` into a local file (created, truncated).
-    pub fn get(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
+    /// Download `key` into `path` atomically. Bytes land in a sibling temp
+    /// file (same filesystem) bounded by `max_bytes` and, when the listing
+    /// provided one, checked against `expected_size`; only a complete
+    /// transfer is renamed into place, so a failed or truncated download
+    /// leaves `path` untouched and removes the temp. The published file is
+    /// 0600: everything here is a secret (identity, keys, attachments).
+    pub fn get(
+        &self,
+        key: &str,
+        path: &str,
+        expected_size: Option<u64>,
+        max_bytes: u64,
+        abort: impl Fn() -> bool,
+    ) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");
         }
@@ -130,17 +173,66 @@ impl Client {
             .bucket
             .get_object(Some(&self.credentials), key)
             .sign(SIGN_EXPIRE);
-        let mut reader = self
-            .agent
-            .get(url.as_str())
-            .call()
-            .map_err(|e| anyhow!("download of {key} failed: {}", http_err(&e)))?
-            .into_body()
-            .into_reader();
-        let mut out =
-            std::fs::File::create(path).map_err(|e| anyhow!("cannot create {path}: {e}"))?;
-        std::io::copy(&mut reader, &mut out).map_err(|e| anyhow!("download of {key}: {e}"))?;
-        Ok(())
+        let response = checked(
+            "download",
+            key,
+            self.agent
+                .get(url.as_str())
+                .call()
+                .map_err(|e| anyhow!("download of {key} failed: {}", http_err(&e)))?,
+        )?;
+        let mut reader = response.into_body().into_reader();
+        // The temp lives beside the target so the publish is one atomic
+        // same-filesystem rename; a crash leaves the target untouched.
+        let tmp = format!("{path}.part");
+        let staged = (|| -> anyhow::Result<u64> {
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .map_err(|e| anyhow!("cannot create {tmp}: {e}"))?;
+            let mut buf = [0u8; 64 * 1024];
+            let mut total: u64 = 0;
+            loop {
+                if abort() {
+                    bail!("aborted");
+                }
+                let n = reader
+                    .read(&mut buf)
+                    .map_err(|e| anyhow!("download of {key}: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+                if total > max_bytes {
+                    bail!("download of {key}: exceeds the {max_bytes}-byte cap");
+                }
+                if let Some(expected) = expected_size
+                    && total > expected
+                {
+                    bail!("download of {key}: larger than the {expected} bytes listed");
+                }
+                out.write_all(&buf[..n])
+                    .map_err(|e| anyhow!("download of {key}: {e}"))?;
+            }
+            out.sync_all()
+                .map_err(|e| anyhow!("download of {key}: {e}"))?;
+            Ok(total)
+        })();
+        let result = staged.and_then(|total| {
+            if let Some(expected) = expected_size
+                && total != expected
+            {
+                bail!("download of {key}: got {total} bytes, expected {expected}");
+            }
+            std::fs::rename(&tmp, path).map_err(|e| anyhow!("cannot publish {path}: {e}"))
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// All objects under `prefix`, sorted by key (name order ==
@@ -163,11 +255,12 @@ impl Client {
             let url = action.sign(SIGN_EXPIRE);
             // The listing body is capped: an endpoint gone rogue cannot
             // exhaust memory within the request timeout.
-            let mut reader = self
+            let response = self
                 .agent
                 .get(url.as_str())
                 .call()
-                .map_err(|e| anyhow!("listing {prefix:?} failed: {}", http_err(&e)))?
+                .map_err(|e| anyhow!("listing {prefix:?} failed: {}", http_err(&e)))?;
+            let mut reader = checked("listing", &format!("{prefix:?}"), response)?
                 .into_body()
                 .into_reader()
                 .take(LIST_BODY_CAP);
@@ -206,11 +299,30 @@ impl Client {
             .bucket
             .delete_object(Some(&self.credentials), key)
             .sign(SIGN_EXPIRE);
-        self.agent
+        let response = self
+            .agent
             .delete(url.as_str())
             .call()
             .map_err(|e| anyhow!("delete of {key} failed: {}", http_err(&e)))?;
+        checked("delete", key, response)?;
         Ok(())
+    }
+}
+
+/// Reject a non-2xx response that ureq did not already turn into an error.
+/// With redirects disabled a 3xx arrives as a "successful" response;
+/// treating it as one would make uploads silent no-ops and downloads
+/// foreign bodies.
+fn checked(
+    action: &str,
+    subject: &str,
+    response: ureq::http::Response<ureq::Body>,
+) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    let status = response.status();
+    if status.is_success() {
+        Ok(response)
+    } else {
+        bail!("{action} of {subject} failed: HTTP {}", status.as_u16())
     }
 }
 
@@ -300,7 +412,7 @@ mod tests {
         );
         assert!(
             client
-                .get("k", "/tmp/vw-s3-should-not-exist", abort)
+                .get("k", "/tmp/vw-s3-should-not-exist", None, 1024, abort)
                 .is_err()
         );
         assert!(client.list("prefix/", abort).is_err());
@@ -331,5 +443,172 @@ mod tests {
             client.delete("k", || true).unwrap_err().to_string(),
             "aborted"
         );
+    }
+
+    /// A canned HTTP endpoint serving every connection until the test
+    /// process exits: reads the request head (plus a declared body, so a
+    /// PUT can finish), then answers with the given status, extra headers,
+    /// and body. The presigned query string is ignored, as it would be by
+    /// any real endpoint.
+    fn fake_server(
+        status: &'static str,
+        extra_headers: &'static str,
+        body: &'static [u8],
+    ) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => head.push(byte[0]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_lowercase();
+                if let Some(len) = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                {
+                    let mut rest = vec![0u8; len];
+                    let _ = stream.read_exact(&mut rest);
+                }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        addr
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vw-s3-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn local_client(addr: std::net::SocketAddr) -> Client {
+        Client::connect(&spec(&format!("http://{addr}")), Duration::from_secs(5))
+            .expect("local endpoint")
+    }
+
+    /// A complete download lands atomically with owner-only permissions
+    /// and leaves no temp file behind.
+    #[test]
+    fn get_publishes_complete_downloads_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let client = local_client(fake_server("200 OK", "", b"hello"));
+        let dir = scratch("get-ok");
+        let target = dir.join("rsa_key.pem");
+        client
+            .get(
+                "state/rsa_key.pem",
+                target.to_str().unwrap(),
+                Some(5),
+                1024,
+                || false,
+            )
+            .expect("complete body publishes");
+        assert_eq!(std::fs::read(&target).unwrap(), b"hello");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "pulled secrets must be owner-only");
+        assert!(
+            !dir.join("rsa_key.pem.part").exists(),
+            "temp file must not linger"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A body shorter than the listing promised fails and leaves any
+    /// existing file untouched: a truncated pull can never become the
+    /// volume's authoritative copy (the F1 data-loss path).
+    #[test]
+    fn get_refuses_a_truncated_body_without_touching_the_target() {
+        let client = local_client(fake_server("200 OK", "", b"hell"));
+        let dir = scratch("get-short");
+        let target = dir.join("rsa_key.pem");
+        std::fs::write(&target, b"old").unwrap();
+        let err = client
+            .get(
+                "state/rsa_key.pem",
+                target.to_str().unwrap(),
+                Some(5),
+                1024,
+                || false,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("expected 5"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old", "target untouched");
+        assert!(!dir.join("rsa_key.pem.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An object over the size cap is refused before it can fill the data
+    /// volume, even when no listing size is available.
+    #[test]
+    fn get_refuses_an_object_over_the_cap() {
+        let client = local_client(fake_server("200 OK", "", b"hello"));
+        let dir = scratch("get-cap");
+        let target = dir.join("db.sqlite3");
+        let err = client
+            .get("db/dump.sqlite3", target.to_str().unwrap(), None, 4, || {
+                false
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("cap"), "{err}");
+        assert!(!target.exists(), "nothing published");
+        assert!(!dir.join("db.sqlite3.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A redirect is never a success: with re-signing disabled a 3xx means
+    /// the request did not reach the object, so uploads must fail loudly
+    /// instead of silently no-oping and downloads must not publish the
+    /// redirect body.
+    #[test]
+    fn redirects_are_rejected_not_treated_as_success() {
+        let client = local_client(fake_server(
+            "302 Found",
+            "Location: http://elsewhere.invalid/\r\n",
+            b"<html>",
+        ));
+        let dir = scratch("get-redirect");
+        let target = dir.join("rsa_key.pem");
+        let err = client
+            .get(
+                "state/rsa_key.pem",
+                target.to_str().unwrap(),
+                None,
+                1024,
+                || false,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 302"), "{err}");
+        assert!(!target.exists(), "the redirect body must not be published");
+
+        let file = dir.join("payload");
+        std::fs::write(&file, b"x").unwrap();
+        let err = client
+            .put("state/rsa_key.pem", file.to_str().unwrap(), || false)
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 302"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
