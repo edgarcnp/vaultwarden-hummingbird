@@ -13,7 +13,7 @@
 //! |              |                                    | reachable vault             |
 //! | DaemonWait   | exit 0 (clean boot abort)          | exit 1                      |
 //! | TailscaleUp  | exit 0 (observed first)            | exit 1                      |
-//! | Serve        | aborts the bounded ops → exit 1    | exit 1                      |
+//! | Serve        | exit 0 (observed first)            | exit 1                      |
 //! | Vault        | the watch loop owns the container  | exits with the vault's code |
 //! |              | from here (see `process::watch`)   |                             |
 //!
@@ -163,7 +163,9 @@ impl Boot {
                 };
                 // Tailscale is the sole inbound path: serve failure means
                 // a vault nobody can reach (typically MagicDNS/HTTPS
-                // certs disabled). Same fail-closed contract as `up`.
+                // certs disabled). Same fail-closed contract as `up` — but
+                // a stop observed during the bounded serve run is a clean
+                // boot abort, not a failure (mirrors DaemonWait/Up).
                 if !tailscale_serve(
                     vault_port,
                     self.cfg.service.as_deref(),
@@ -171,6 +173,9 @@ impl Boot {
                     SERVE_TIMEOUT,
                     &stopping,
                 ) {
+                    if take_stop() {
+                        return Outcome::Exit(0);
+                    }
                     return Outcome::Exit(1);
                 }
                 let msg = match &self.cfg.service {

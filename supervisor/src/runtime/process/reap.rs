@@ -7,7 +7,7 @@ use std::time::Duration;
 use nix::sys::signal::Signal;
 use nix::sys::wait::WaitStatus;
 
-use super::child::{KILL_GRACE, POLL, signal_group};
+use super::child::{KILL_GRACE, POLL, signal_child};
 use super::reaper::Handle;
 use crate::util::log;
 use crate::util::wait_until;
@@ -50,7 +50,7 @@ pub fn reap_until_gone(child: &Handle, grace: Duration) -> Gone {
     if let Some(status) = wait_until(reaped, grace, || false, POLL) {
         return Gone::Reaped(status);
     }
-    signal_group(child.pid, Signal::SIGKILL);
+    signal_child(child, Signal::SIGKILL);
     match wait_until(reaped, KILL_GRACE, || false, POLL) {
         Some(status) => Gone::Reaped(status),
         None => {
@@ -72,7 +72,7 @@ mod tests {
     use nix::sys::wait::WaitStatus;
     use nix::unistd::Pid as NixPid;
 
-    use super::super::child::spawn;
+    use super::super::child::{signal_group, spawn};
     use super::*;
 
     #[test]
@@ -103,6 +103,41 @@ mod tests {
         assert!(!signal_group(0, Signal::SIGTERM));
         assert!(!signal_group(1, Signal::SIGTERM));
         assert!(!signal_group(-5, Signal::SIGTERM));
+    }
+
+    /// A reaped child must never be signaled again: the pid may have been
+    /// recycled. The delivered status makes the handle refuse.
+    #[test]
+    fn signal_child_refuses_reaped_children() {
+        let child = spawn(Command::new("/bin/sh").args(["-c", "exit 0"])).expect("spawn child");
+        assert!(
+            child.wait(Duration::from_secs(5)).is_some(),
+            "instant exit must deliver a status"
+        );
+        assert!(
+            !signal_child(&child, Signal::SIGTERM),
+            "a reaped pid must never be signaled"
+        );
+    }
+
+    /// Spawn and instant exit interleave with the reaper's stray sweep.
+    /// The sweep holds the registry lock across its waitpid calls and
+    /// spawn holds the same lock across spawn + registration, so a child
+    /// is never reaped before it is registered — which would misreport a
+    /// successful child as a failed spawn.
+    #[test]
+    fn instant_exit_burst_is_never_misreported_as_a_spawn_failure() {
+        for i in 0..50 {
+            let child = spawn(Command::new("/bin/sh").args(["-c", "exit 0"]))
+                .unwrap_or_else(|| panic!("spawn {i} must not race the sweep"));
+            assert!(
+                matches!(
+                    child.wait(Duration::from_secs(5)),
+                    Some(WaitStatus::Exited(_, 0))
+                ),
+                "iteration {i}: instant exit must deliver status 0"
+            );
+        }
     }
 
     #[test]

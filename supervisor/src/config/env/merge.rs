@@ -165,8 +165,8 @@ impl Config {
             authkey,
             serve: flag("TAILSCALE_SERVE", true),
             service: resolve_service(
-                lookup("TAILSCALE_SERVICE")
-                    .or_else(|| file.knobs.get("TAILSCALE_SERVICE").cloned()),
+                non_empty(lookup("TAILSCALE_SERVICE"))
+                    .or_else(|| non_empty(file.knobs.get("TAILSCALE_SERVICE").cloned())),
             ),
             userspace: flag("TAILSCALE_USERSPACE", true),
             sync,

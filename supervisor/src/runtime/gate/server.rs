@@ -13,7 +13,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::limiter::Limiter;
 use super::liveness::Liveness;
@@ -96,10 +96,19 @@ fn reject(mut s: TcpStream) {
 /// One request, one response, connection closed. Only the first request
 /// line is inspected; malformed, truncated, or oversized requests are just
 /// another denied request — the probe (and thus vaultwarden) is never
-/// touched by non-`/alive` traffic. A read error closes the connection
-/// without a response — there is nothing to answer.
-pub(super) fn handle(mut stream: TcpStream, live: &Liveness) {
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+/// touched by non-`/alive` traffic. A dead socket closes without a
+/// response — there is nothing to answer; a head that times out is denied
+/// like any other non-request.
+pub(super) fn handle(stream: TcpStream, live: &Liveness) {
+    handle_with(stream, live, READ_TIMEOUT)
+}
+
+/// [`handle`] with an explicit budget for the whole request head (tests
+/// shrink it). The budget covers the WHOLE head, not each read: a peer
+/// drip-feeding bytes can never hold an admission slot past it (a
+/// slowloris would otherwise occupy one for hours).
+pub(super) fn handle_with(mut stream: TcpStream, live: &Liveness, budget: Duration) {
+    let deadline = Instant::now() + budget;
     let mut buf = [0u8; REQ_CAP];
     let mut used = 0;
     let line = loop {
@@ -109,9 +118,27 @@ pub(super) fn handle(mut stream: TcpStream, live: &Liveness) {
         if used == buf.len() {
             break String::new();
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // The head did not arrive inside the budget: deny and free
+            // the slot rather than waiting on more bytes.
+            break String::new();
+        }
+        if stream.set_read_timeout(Some(remaining)).is_err() {
+            return;
+        }
         match stream.read(&mut buf[used..]) {
             Ok(0) => break line_of(&buf[..used]),
             Ok(n) => used += n,
+            // A timed-out head is a denied request, not a dead socket:
+            // answer it so the peer learns the verdict (and the budget
+            // stays observable end to end).
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break String::new();
+            }
             Err(_) => return,
         }
     };

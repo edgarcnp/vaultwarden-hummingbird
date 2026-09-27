@@ -277,6 +277,31 @@ fn db_url_env_wins_over_file() {
     );
 }
 
+/// An empty ambient DB URL is unset, not an override: the file value
+/// still wins (the same rule the child env applies).
+#[test]
+fn empty_env_db_url_falls_back_to_the_file() {
+    let s3: &[(&str, &str)] = &[
+        ("SUPERVISOR_S3_REMOTE", "r2:vw"),
+        ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
+        ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
+        ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
+        ("SUPERVISOR_DB_BACKUP", "true"),
+    ];
+    let mut env: Vec<(&str, &str)> = s3.to_vec();
+    env.push(("VAULTWARDEN_DATABASE_URL", ""));
+    let cfg = mk_with_file(
+        &env,
+        FileConfig::load_from(Some(&env_dotenv(
+            "VAULTWARDEN_DATABASE_URL=sqlite:///data/file.sqlite3\n",
+        ))),
+    );
+    assert_eq!(
+        cfg.backup.as_ref().expect("backup enabled").db_path,
+        "/data/file.sqlite3"
+    );
+}
+
 #[test]
 fn service_knob_merges_over_the_file() {
     let cfg = mk_with_file(
@@ -290,6 +315,18 @@ fn service_knob_merges_over_the_file() {
         FileConfig::load_from(Some(&env_dotenv("TAILSCALE_SERVICE=file-svc\n"))),
     );
     assert_eq!(cfg.service.as_deref(), Some("svc:env-svc"));
+}
+
+/// Empty = unset for the service knob too: an empty environment value
+/// must fall back to the file instead of silently disabling the
+/// advertisement.
+#[test]
+fn empty_env_service_falls_back_to_the_file() {
+    let cfg = mk_with_file(
+        &[("TAILSCALE_SERVICE", "")],
+        FileConfig::load_from(Some(&env_dotenv("TAILSCALE_SERVICE=file-svc\n"))),
+    );
+    assert_eq!(cfg.service.as_deref(), Some("svc:file-svc"));
 }
 
 /// One-key dotenv file for the merge tests above. Unique per call:

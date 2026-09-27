@@ -14,9 +14,10 @@
 //! child with a targeted waitpid. A `waitpid(-1, WNOHANG)` sweep follows
 //! every tick to reap strays (orphaned namespace children re-parented to
 //! PID 1, no pidfd) — and as a correctness backstop for anything the poll
-//! path missed. Deliveries take the registry lock, so a child that exits
-//! between spawn and registration is delivered, never mistaken for a
-//! stray.
+//! path missed. The sweep holds the registry lock across each waitpid, and
+//! spawn holds the same lock across spawn + pidfd open + registration, so
+//! the sweep can never reap a child out from under its own spawn (which
+//! would turn a successful child into a reported spawn failure).
 
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
@@ -159,15 +160,20 @@ fn tick() {
         }
     }
     // Strays (orphans with no pidfd) and the poll backstop. The registry
-    // lookup happens after the reap; child::spawn holds the lock across
-    // spawn+insert, so a delivery can never miss its registration.
+    // lock is held across each waitpid: spawn holds the same lock across
+    // spawn + registration, so the sweep cannot reap a child before its
+    // pidfd is registered (which would misreport a successful child as a
+    // failed spawn).
     loop {
+        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
         match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
             // Nothing reapable right now (children exist, none exited).
             Ok(WaitStatus::StillAlive) => break,
             Ok(status) => {
                 let pid = status.pid().map(NixPid::as_raw).unwrap_or(0);
-                deliver_reaped(pid, status);
+                let waiter = reg.remove(&pid).map(|e| e.waiter);
+                drop(reg);
+                deliver_waiter(pid, status, waiter);
             }
             Err(Errno::ECHILD) | Err(Errno::EINTR) => break,
             Err(e) => {
@@ -187,6 +193,12 @@ fn deliver_reaped(pid: Pid, status: WaitStatus) {
         .unwrap_or_else(|e| e.into_inner())
         .remove(&pid)
         .map(|e| e.waiter);
+    deliver_waiter(pid, status, waiter);
+}
+
+/// Shared tail of both delivery paths; the registry entry is already
+/// consumed by the caller.
+fn deliver_waiter(pid: Pid, status: WaitStatus, waiter: Option<Weak<Waiter>>) {
     match waiter.as_ref().and_then(Weak::upgrade) {
         Some(w) => w.deliver(status),
         None => log::info(&format!(
@@ -201,6 +213,18 @@ fn run() {
         set_idle(false);
         tick();
         set_idle(true);
+        // No registered children means no pidfd to poll and an immediate
+        // WNOHANG sweep: without a pause the loop would spin at 100% CPU
+        // (notably through the shutdown persist phase, after both
+        // long-running children were reaped). The sleep delays reaping of
+        // a child registered meanwhile by at most one POLL slice.
+        if registry()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            std::thread::sleep(POLL);
+        }
     }
 }
 

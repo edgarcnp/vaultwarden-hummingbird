@@ -12,7 +12,7 @@ use nix::sys::signal::Signal;
 use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SYNC_FIRST_DELAY, SyncConfig};
 use crate::runtime::{
     Gone, Handle, POLL, TERM_GRACE, backup_tick, exit_code, gate_bind, gate_describe, gate_serve,
-    reap_until_gone, run_vaultwarden, signal_group, stopping, sync_state, take_stop,
+    reap_until_gone, run_vaultwarden, signal_child, stopping, sync_state, take_stop,
 };
 use crate::util::log;
 
@@ -115,13 +115,13 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
             log::err(
                 "tailscaled exited unexpectedly; shutting down (restart to restore Tailscale)",
             );
-            signal_group(vw.pid, Signal::SIGTERM);
+            signal_child(&vw, Signal::SIGTERM);
             break 'watch 1;
         }
         if take_stop() {
             log::info("stop requested; terminating children");
-            signal_group(tsd.pid, Signal::SIGTERM);
-            signal_group(vw.pid, Signal::SIGTERM);
+            signal_child(&tsd, Signal::SIGTERM);
+            signal_child(&vw, Signal::SIGTERM);
             break 'watch match reap_until_gone(&vw, TERM_GRACE) {
                 Gone::Reaped(raw) => exit_code(raw),
                 _ => 1,
@@ -152,7 +152,7 @@ pub fn shutdown(
 ) -> ! {
     log::info("shutting down");
     if let Some(t) = &tsd {
-        signal_group(t.pid, Signal::SIGTERM);
+        signal_child(t, Signal::SIGTERM);
         if matches!(reap_until_gone(t, TERM_GRACE), Gone::Stuck) {
             log::err(&format!("tailscaled (pid {}) did not exit cleanly", t.pid));
         }

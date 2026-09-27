@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
 
-use super::child::{KILL_GRACE, POLL, signal_group, spawn};
+use super::child::{KILL_GRACE, POLL, signal_child, spawn};
 use super::env::EnvGrant;
 use super::reap::exit_code;
 use crate::util::{StagedFile, log};
@@ -139,8 +139,9 @@ fn run_bounded_core(
     if !success {
         // Whole-group kill: the leader and anything it spawned. The hub
         // reaps and delivers; consumed below so the kill has landed
-        // before callers proceed.
-        signal_group(child.pid, Signal::SIGKILL);
+        // before callers proceed. A child that already exited is not
+        // signaled: its pid could otherwise be recycled.
+        signal_child(&child, Signal::SIGKILL);
     }
     // Consume the reap on every path (bounded): a D-state child gives up
     // here — the verdict is already decided, the zombie is the runtime's.

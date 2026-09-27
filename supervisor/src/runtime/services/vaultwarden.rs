@@ -30,28 +30,62 @@ fn web_vault_flag(index: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Image defaults declared by the Containerfile's plain-name ENV block.
+/// They are re-applied here as the grant's weakest layer: the child env
+/// is cleared and default-deny, so without this the bare image values
+/// would never reach vaultwarden. User config (dotenv file, then ambient
+/// `VAULTWARDEN_*`) overrides every one of them. Keep in sync with the
+/// Containerfile's RUNTIME DEFAULTS block.
+const IMAGE_DEFAULTS: &[(&str, &str)] = &[
+    // uploads off by default; 0 is vaultwarden's "disabled" spelling
+    ("ORG_ATTACHMENT_LIMIT", "0"),
+    ("USER_ATTACHMENT_LIMIT", "0"),
+    // behaviorally the upstream default (blank == all), kept explicit
+    ("ORG_CREATION_USERS", "all"),
+    // upstream default true, kept explicit
+    ("SIGNUPS_ALLOWED", "true"),
+    // the base image has no localtime; pin the documented default
+    ("TZ", "UTC"),
+];
+
 /// The vaultwarden child's granted environment, in precedence order: the
-/// dotenv-file child map first (pre-routed at load: only stripped
-/// `VAULTWARDEN_*` keys are in it — the file refused everything else),
-/// then the ambient container env (default-deny: ONLY `VAULTWARDEN_*`
-/// keys, stripped to the plain upstream name) — so a direct container
-/// value wins over the file, matching the supervisor's own env > file
-/// resolution (backup/restore must reach the same DB the vault uses).
-/// Finally the hard pins: ROCKET_PORT (internal vault port),
-/// ROCKET_ADDRESS (loopback-only: the API is reachable solely via
-/// `tailscale serve`), DATA_FOLDER, WEB_VAULT_FOLDER (the re-derived
-/// WEB_VAULT_ENABLED checks this same path, so a child override would
-/// desync the pair), and WEB_VAULT_ENABLED re-derived from what the
-/// image actually baked (an API-only build must not boot with
-/// vaultwarden's compiled default). Non-UTF-8 keys are dropped.
+/// image defaults ([`IMAGE_DEFAULTS`]; the Containerfile's bare ENV names
+/// cannot reach the default-deny child on their own), then the dotenv-file
+/// child map (pre-routed at load: only stripped `VAULTWARDEN_*` keys are
+/// in it — the file refused everything else), then the ambient container
+/// env (default-deny: ONLY `VAULTWARDEN_*` keys, stripped to the plain
+/// upstream name) — so a direct container value wins over the file,
+/// matching the supervisor's own env > file resolution (backup/restore
+/// must reach the same DB the vault uses). An empty value counts as unset
+/// on every layer: it never shadows a lower layer. Finally the hard pins:
+/// ROCKET_PORT (internal vault port), ROCKET_ADDRESS (loopback-only: the
+/// API is reachable solely via `tailscale serve`), DATA_FOLDER,
+/// WEB_VAULT_FOLDER (the re-derived WEB_VAULT_ENABLED checks this same
+/// path, so a child override would desync the pair), and WEB_VAULT_ENABLED
+/// re-derived from what the image actually baked (an API-only build must
+/// not boot with vaultwarden's compiled default). Non-UTF-8 keys are
+/// dropped.
 fn granted_env(
     ambient: impl Iterator<Item = (OsString, OsString)>,
     file: &[(String, String)],
     vault_port: &str,
 ) -> EnvGrant {
     let grant = EnvGrant::new()
-        .layer(file.iter().map(|(k, v)| (k.clone(), v.clone().into())))
-        .layer(ambient.filter_map(|(k, v)| ambient_key(&k).map(|key| (key, v))));
+        .layer(
+            IMAGE_DEFAULTS
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).into())),
+        )
+        .layer(
+            file.iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone().into())),
+        )
+        .layer(ambient.filter_map(|(k, v)| {
+            ambient_key(&k)
+                .filter(|_| !v.is_empty())
+                .map(|key| (key, v))
+        }));
     // A populated folder leaves the knob unset; an API-only build (empty
     // /web-vault) must not boot with vaultwarden's compiled default
     // (enabled) — the vault exits 1 on the missing index.html.
@@ -140,13 +174,13 @@ mod tests {
         assert_eq!(ambient_key(OsStr::new("VAULTWARDEN_ROCKET_PORT")), None);
     }
 
-    /// The granted child env: file keys first (they arrive pre-routed:
-    /// stripped `VAULTWARDEN_*` names only — the dotenv load refused
-    /// everything else), ambient keys override (the documented "direct
-    /// value wins" — the supervisor's own resolution uses the same
-    /// order), and the hard pins close it out. Only ROCKET_ADDRESS/
-    /// ROCKET_PORT/DATA_FOLDER/WEB_VAULT_FOLDER and the re-derived
-    /// web-vault flag may not be overridden.
+    /// The granted child env, in precedence order: image defaults, then
+    /// file keys (they arrive pre-routed: stripped `VAULTWARDEN_*` names
+    /// only — the dotenv load refused everything else), then ambient keys
+    /// (the documented "direct value wins" — the supervisor's own
+    /// resolution uses the same order), and the hard pins close it out.
+    /// Only ROCKET_ADDRESS/ROCKET_PORT/DATA_FOLDER/WEB_VAULT_FOLDER and
+    /// the re-derived web-vault flag may not be overridden.
     #[test]
     fn granted_env_file_first_ambient_wins_pins_last() {
         let ambient: Vec<(OsString, OsString)> = [
@@ -209,6 +243,85 @@ mod tests {
             Some("/web-vault"),
             "the baked folder is pinned: the re-derived WEB_VAULT_ENABLED \
              checks the same path"
+        );
+    }
+
+    /// Name -> value view of a grant, for assertions.
+    fn child_env(grant: EnvGrant) -> std::collections::BTreeMap<String, String> {
+        grant
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string_lossy().into_owned()))
+            .collect()
+    }
+
+    /// The image's declared defaults reach the child (the bare
+    /// Containerfile ENV names never would through the default-deny
+    /// routing) and stay overridable by both user layers.
+    #[test]
+    fn image_defaults_apply_and_user_config_wins() {
+        let env = child_env(granted_env(std::iter::empty(), &[], "8081"));
+        assert_eq!(
+            env.get("ORG_ATTACHMENT_LIMIT").map(String::as_str),
+            Some("0"),
+            "image default: org uploads off"
+        );
+        assert_eq!(
+            env.get("USER_ATTACHMENT_LIMIT").map(String::as_str),
+            Some("0"),
+            "image default: user uploads off"
+        );
+        assert_eq!(env.get("SIGNUPS_ALLOWED").map(String::as_str), Some("true"));
+
+        let file = [("ORG_ATTACHMENT_LIMIT".to_string(), "1024".to_string())];
+        let env = child_env(granted_env(std::iter::empty(), &file, "8081"));
+        assert_eq!(
+            env.get("ORG_ATTACHMENT_LIMIT").map(String::as_str),
+            Some("1024"),
+            "the dotenv file overrides an image default"
+        );
+
+        let ambient = [(
+            OsString::from("VAULTWARDEN_ORG_ATTACHMENT_LIMIT"),
+            OsString::from("2048"),
+        )];
+        let env = child_env(granted_env(ambient.into_iter(), &file, "8081"));
+        assert_eq!(
+            env.get("ORG_ATTACHMENT_LIMIT").map(String::as_str),
+            Some("2048"),
+            "ambient env overrides the file"
+        );
+    }
+
+    /// Empty = unset on every layer (the documented contract): an empty
+    /// ambient or file value must not shadow a lower layer, or the
+    /// supervisor's own resolution (which applies the same rule) and the
+    /// child env would disagree about what the vault actually uses.
+    #[test]
+    fn empty_values_never_shadow_a_lower_layer() {
+        let file = [
+            (
+                "DATABASE_URL".to_string(),
+                "sqlite:///data/file.sqlite3".to_string(),
+            ),
+            ("ORG_ATTACHMENT_LIMIT".to_string(), String::new()),
+        ];
+        let ambient = [
+            (OsString::from("VAULTWARDEN_DATABASE_URL"), OsString::new()),
+            (
+                OsString::from("VAULTWARDEN_ORG_ATTACHMENT_LIMIT"),
+                OsString::new(),
+            ),
+        ];
+        let env = child_env(granted_env(ambient.into_iter(), &file, "8081"));
+        assert_eq!(
+            env.get("DATABASE_URL").map(String::as_str),
+            Some("sqlite:///data/file.sqlite3"),
+            "an empty ambient value must not shadow the file"
+        );
+        assert_eq!(
+            env.get("ORG_ATTACHMENT_LIMIT").map(String::as_str),
+            Some("0"),
+            "an empty file value must not shadow the image default"
         );
     }
 

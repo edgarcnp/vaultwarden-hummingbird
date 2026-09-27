@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::liveness::Liveness;
 use super::probe::fake_vault;
-use super::server::{bind, handle, serve_with};
+use super::server::{bind, handle, handle_with, serve_with};
 
 /// A vaultwarden stand-in that answers 200 forever and counts requests
 /// (the TTL-window and admission tests need to observe probe fan-out).
@@ -180,6 +180,48 @@ fn silent_connections_are_bounded_by_read_timeout() {
     });
     let _c = std::net::TcpStream::connect(addr).unwrap();
     assert!(t.join().unwrap(), "handle() did not return within 30s");
+}
+
+/// A peer that keeps sending bytes without ever completing the request
+/// head must not hold a slot past the whole-head budget. Regression for
+/// the slowloris hole: with a per-read timeout, dripping one byte per
+/// window held a slot for minutes (and 32 such peers starved the gate).
+#[test]
+fn a_trickling_request_cannot_extend_the_head_budget() {
+    let listener = bind("0").expect("ephemeral bind");
+    let addr = listener.local_addr().unwrap();
+    let t = std::thread::spawn(move || {
+        let s = listener.incoming().next().unwrap().unwrap();
+        let start = Instant::now();
+        handle_with(s, &Liveness::new(None), Duration::from_millis(500));
+        start.elapsed()
+    });
+    let mut c = std::net::TcpStream::connect(addr).unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    // Drip one byte per 100 ms — always inside the (old) per-read
+    // timeout, never completing the line — then stop writing and read
+    // the verdict. The drip stops well before the budget, so no write
+    // can land after the gate closes (a late write could RST away the
+    // response).
+    for _ in 0..2 {
+        if std::io::Write::write_all(&mut c, b"G").is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut resp = String::new();
+    let _ = std::io::Read::read_to_string(&mut c, &mut resp);
+    let elapsed = t.join().unwrap();
+    assert!(
+        resp.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+        "a trickled head must be denied: {resp:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "handle must end at the head budget, took {elapsed:?}"
+    );
 }
 
 /// The gate must not double-bind a port already in use.

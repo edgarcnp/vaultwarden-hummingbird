@@ -18,7 +18,7 @@ pub use gate::{
 };
 pub use process::{
     EnvGrant, Gone, Handle, POLL, TERM_GRACE, apply_env, exit_code, install_signal_handlers,
-    reap_until_gone, run_bounded, run_bounded_capture, shutdown, signal_group, spawn, start_vw,
+    reap_until_gone, run_bounded, run_bounded_capture, shutdown, signal_child, spawn, start_vw,
     stopping, take_stop,
 };
 pub use services::{run_vaultwarden, spawn_tailscaled, tailscale_serve, tailscale_up};

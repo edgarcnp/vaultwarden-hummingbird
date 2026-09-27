@@ -14,7 +14,7 @@ mod run;
 mod signals;
 mod watch;
 
-pub use child::{POLL, TERM_GRACE, signal_group, spawn};
+pub use child::{POLL, TERM_GRACE, signal_child, spawn};
 pub use env::EnvGrant;
 pub use reap::{Gone, exit_code, reap_until_gone};
 pub use reaper::Handle;

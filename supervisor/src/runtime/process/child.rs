@@ -87,3 +87,14 @@ pub fn signal_group(pid: Pid, sig: Signal) -> bool {
     }
     killpg(NixPid::from_raw(pid), sig).is_ok() || kill(NixPid::from_raw(pid), sig).is_ok()
 }
+
+/// Signal a still-running child through its handle: once the reaper has
+/// delivered a status the pid may have been recycled, so signaling it
+/// could hit an unrelated process. Returns false for a reaped child (and
+/// for the [`signal_group`] refusals), true when a signal was delivered.
+pub fn signal_child(child: &Handle, sig: Signal) -> bool {
+    if child.status().is_some() {
+        return false;
+    }
+    signal_group(child.pid, sig)
+}
