@@ -1,62 +1,34 @@
 //! The vault watch loop and container teardown: the ordered shutdown that
-//! brings every child down before exiting, and detached periodic-
-//! maintenance threads (state sync, DB backup). Reaping itself lives in
-//! the reaper hub ([`super::reaper`]); this loop only reads the
-//! long-running children's delivered statuses.
+//! brings every child down before exiting, and the maintenance reactor that
+//! drives periodic state sync and DB backup. Reaping itself lives in the
+//! reaper hub ([`super::reaper`]); this loop only reads the long-running
+//! children's delivered statuses.
 
 use std::process::exit;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nix::sys::signal::Signal;
 
-use crate::config::{BACKUP_FIRST_DELAY, Config, DbBackupConfig, SYNC_FIRST_DELAY, SyncConfig};
+use crate::config::{Config, PERSIST_BUDGET, PERSIST_FORCED_BUDGET};
 use crate::runtime::{
-    Gone, Handle, POLL, TERM_GRACE, backup_tick, exit_code, gate_bind, gate_describe, gate_serve,
-    reap_until_gone, run_vaultwarden, signal_child, stopping, sync_state, take_stop,
+    Gone, Handle, POLL, Reactor, TERM_GRACE, Task, exit_code, gate_bind, gate_describe, gate_serve,
+    reap_until_gone, run_vaultwarden, signal_child, take_stop,
 };
 use crate::util::log;
 
-/// Sleep slice for the maintenance threads' cadence: coarse enough not to
-/// churn, fine enough that a stop request is honored promptly.
-const SLEEP: Duration = Duration::from_secs(1);
-
-/// Run `task` on its own detached thread: first after `first_delay`, then
-/// once per `interval`, returning promptly on a stop request. Detached —
-/// bounded phases self-abort on stop, and exit() reaps everything else.
-/// The task must only ever wait on children it spawned itself (the
-/// reaper hub stays the single owner of reaping).
-fn spawn_periodic(first_delay: Duration, interval: Duration, task: impl Fn() + Send + 'static) {
-    std::thread::spawn(move || {
-        let mut due = Instant::now() + first_delay;
-        loop {
-            while Instant::now() < due {
-                if stopping() {
-                    return;
-                }
-                std::thread::sleep(SLEEP.min(due.saturating_duration_since(Instant::now())));
-            }
-            if stopping() {
-                return;
-            }
-            task();
-            due = Instant::now() + interval;
-        }
-    });
-}
-
 /// Hand off to vaultwarden and supervise it: bind the exposed-port
 /// gatekeeper (the only `0.0.0.0` listener), start the loopback-only vault,
-/// then watch — observing vaultwarden's exit or a stop request while
-/// detached threads drive periodic state sync and DB backup — then tearing
-/// down tailscaled and exiting with vaultwarden's code. Tailscale is the
-/// sole inbound path: if tailscaled dies mid-run the vault is torn down
-/// too (exit 1) so the orchestrator restarts the whole container — a vault
-/// nobody can reach is worse than a short outage.
+/// then watch — observing vaultwarden's exit or a stop request while the
+/// maintenance reactor drives periodic state sync and DB backup — then
+/// tearing down tailscaled and exiting with vaultwarden's code. Tailscale
+/// is the sole inbound path: if tailscaled dies mid-run the vault is torn
+/// down too (exit 1) so the orchestrator restarts the whole container — a
+/// vault nobody can reach is worse than a short outage.
 pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
     // fail closed on a missing internal port: co-binding would expose the vault
     let Some(vault_port) = &cfg.vault_port else {
         log::err("no room for the internal vault port above the exposed port; refusing to start");
-        shutdown(Some(tsd), None, 1, None, None)
+        shutdown(Some(tsd), None, 1, None)
     };
     let gate = match gate_bind(&cfg.port) {
         Ok(g) => g,
@@ -65,7 +37,7 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
                 "gatekeeper bind failed on 0.0.0.0:{}: {e}",
                 log::sanitize(&cfg.port)
             ));
-            shutdown(Some(tsd), None, 1, None, None)
+            shutdown(Some(tsd), None, 1, None)
         }
     };
     gate_describe(&cfg.port, vault_port);
@@ -74,7 +46,7 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
     else {
         log::err("internal vault port is not a valid port; refusing to start");
-        shutdown(Some(tsd), None, 1, None, None)
+        shutdown(Some(tsd), None, 1, None)
     };
     drop(std::thread::spawn(move || {
         gate_serve(gate, Some(vault_addr))
@@ -82,25 +54,26 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
 
     log::info("starting vaultwarden");
     let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
-        shutdown(Some(tsd), None, 1, None, None)
+        shutdown(Some(tsd), None, 1, None)
     };
-    // Periodic maintenance runs off the watch loop: a bounded sync push or
-    // backup must never delay reaping or stop observation by up to its
-    // timeout (60s).
+    // One reactor thread owns every periodic task and the final flush:
+    // exactly one writer per durability resource after boot (why: see
+    // `runtime::maintenance`). Periodic maintenance runs off the watch
+    // loop so a bounded sync push or backup never delays reaping or stop
+    // observation by up to its timeout (60s).
+    let mut tasks = Vec::new();
     if let Some(backup) = cfg.backup.clone().filter(|b| b.periodic) {
-        spawn_periodic(BACKUP_FIRST_DELAY, backup.interval, move || {
-            backup_tick(&backup, stopping);
-        });
+        tasks.push(Task::backup(backup));
     }
-    if let Some(sync) = cfg.sync.clone().filter(|s| !s.interval.is_zero()) {
-        // First push on a short delay, not a full interval: vaultwarden only
-        // creates /data/rsa_key.pem once it has started, and the boot push
-        // ran before it existed. This is the push that preserves the vault's
-        // signing key across a redeploy.
-        spawn_periodic(SYNC_FIRST_DELAY, sync.interval, move || {
-            sync_state(&sync, stopping);
-        });
+    if let Some(sync) = cfg.sync.clone() {
+        // First push on a short delay, not a full interval: vaultwarden
+        // only creates /data/rsa_key.pem once it has started, and the boot
+        // push ran before it existed. This is the push that preserves the
+        // vault's signing key across a redeploy. A zero interval disables
+        // the cadence but still flushes at shutdown.
+        tasks.push(Task::sync(sync));
     }
+    let reactor = Reactor::start(tasks);
 
     let code = 'watch: loop {
         // Exits are delivered by the reaper hub into each child's slot;
@@ -130,26 +103,22 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         std::thread::sleep(POLL);
     };
 
-    shutdown(
-        Some(tsd),
-        Some(vw),
-        code,
-        cfg.backup.as_ref(),
-        cfg.sync.as_ref(),
-    )
+    // No new periodic work from here on: an in-flight tick aborts on the
+    // monotonic token while teardown runs, and the drain below then runs
+    // the final flushes on the same thread.
+    if let Some(reactor) = &reactor {
+        reactor.stop();
+    }
+    shutdown(Some(tsd), Some(vw), code, reactor)
 }
 
 /// Bring every child down and exit the container: TERM each child group,
 /// escalate to KILL after `TERM_GRACE`, wait for one clean reaper pass,
-/// make a final best-effort DB dump and state push, then exit with `code`.
+/// then let the reactor run the final DB dump and state push — children are
+/// gone first, and the reactor is the only writer. The persist budget
+/// bounds the finish; a stop request observed while draining shortens it.
 /// Safe for children that are already dead (group kill + wait are no-ops).
-pub fn shutdown(
-    tsd: Option<Handle>,
-    vw: Option<Handle>,
-    code: i32,
-    backup: Option<&DbBackupConfig>,
-    sync: Option<&SyncConfig>,
-) -> ! {
+pub fn shutdown(tsd: Option<Handle>, vw: Option<Handle>, code: i32, reactor: Option<Reactor>) -> ! {
     log::info("shutting down");
     if let Some(t) = &tsd {
         signal_child(t, Signal::SIGTERM);
@@ -168,15 +137,12 @@ pub fn shutdown(
     if !super::reaper::quiesce(Duration::from_secs(2)) {
         log::err("reaper did not quiesce; continuing shutdown");
     }
-    // Final persists AFTER children are gone; must not abort on the stop
-    // flag. The DB goes first: it carries session and device state and is
-    // the smaller push, so it should win any remaining drain budget over a
-    // potentially large attachments upload.
-    if let Some(backup) = backup.filter(|b| b.periodic) {
-        backup_tick(backup, || false);
-    }
-    if let Some(sync) = sync {
-        sync_state(sync, || false);
+    // Final persists AFTER children are gone. The DB goes first — it
+    // carries session and device state and is the smaller push, so it
+    // should win any remaining drain budget over a potentially large
+    // attachments upload; the reactor enforces the order.
+    if let Some(reactor) = reactor {
+        reactor.drain(PERSIST_BUDGET, PERSIST_FORCED_BUDGET);
     }
     exit(code)
 }

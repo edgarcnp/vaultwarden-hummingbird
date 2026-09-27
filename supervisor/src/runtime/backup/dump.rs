@@ -12,7 +12,7 @@ use super::tools::{client, list_objects};
 use super::unchanged;
 
 /// One periodic backup cycle: sweep staging, dump, push, prune. Runs on
-/// a detached maintenance thread; never fatal, aborting early on a stop
+/// the maintenance reactor thread; never fatal, aborting early on a stop
 /// request.
 ///
 /// Two guards run before anything is staged: an empty database has

@@ -12,6 +12,13 @@ pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
 pub const SERVE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
+/// Overall budget for the final shutdown persists (DB dump, then state
+/// push). Child teardown ahead of it is bounded by the grace constants, so
+/// the shipped compose `stop_grace_period` (180s) covers the total.
+pub const PERSIST_BUDGET: Duration = Duration::from_secs(120);
+/// A stop request observed while draining shortens the persist budget to
+/// this, so a hurry-up SIGTERM gets a fast exit.
+pub const PERSIST_FORCED_BUDGET: Duration = Duration::from_secs(15);
 /// Delay before the first periodic backup after the vault starts. Short so
 /// an ephemeral container that is redeployed early still has a recent dump
 /// to restore.
