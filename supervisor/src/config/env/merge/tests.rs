@@ -239,6 +239,17 @@ fn unrecognized_file_keys_refuse_the_boot() {
     assert!(cfg.is_none());
 }
 
+/// A configured-but-unreadable dotenv file refuses the boot: the
+/// supervisor must not silently run on env-only defaults.
+#[test]
+fn unreadable_dotenv_file_refuses_the_boot() {
+    let file = FileConfig {
+        fatal: Some("config: cannot read /config/.env: no such file".to_string()),
+        ..FileConfig::default()
+    };
+    assert!(Config::build(file, |_| None).is_none());
+}
+
 /// The vault's DB URL follows the same env > file precedence the child
 /// env applies, so the supervisor's backup target is always the DB the
 /// vault actually uses.

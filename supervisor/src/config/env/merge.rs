@@ -9,6 +9,7 @@ use crate::config::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
 use super::knobs::{non_empty, parse_flag, resolve_service, valid_port};
+use super::schema;
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
@@ -68,6 +69,13 @@ impl Config {
     /// [`Self::from_env`] with the env source injected: tests pass a map,
     /// never mutating the process env (unsafe and racy).
     fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        // A configured-but-unreadable file refuses the boot: silently
+        // running on env-only defaults is exactly the quiet
+        // misconfiguration the strict file exists to prevent.
+        if let Some(fatal) = &file.fatal {
+            log::err(fatal);
+            return None;
+        }
         // Legacy port spellings refuse the boot, naming the one valid
         // spelling: they once changed behavior, so silently ignoring
         // them would silently change the deployment.
@@ -116,7 +124,7 @@ impl Config {
         ]
         .into_iter()
         .find_map(valid_port)
-        .unwrap_or_else(|| "8080".into());
+        .unwrap_or_else(|| schema::string_default("VAULTWARDEN_PORT").to_string());
         let vault_port = port
             .parse::<u16>()
             .ok()
@@ -127,6 +135,20 @@ impl Config {
             non_empty(lookup(key))
                 .or_else(|| non_empty(file.knobs.get(key).cloned()))
                 .unwrap_or_else(|| default.to_string())
+        };
+        // Scalar knobs assembled below take their default from the schema
+        // table; the feature resolvers above keep their own `knob` calls.
+        let value = |key: &str| -> String {
+            non_empty(lookup(key))
+                .or_else(|| non_empty(file.knobs.get(key).cloned()))
+                .unwrap_or_else(|| schema::string_default(key).to_string())
+        };
+        // Flag knobs have typed defaults, so they take the raw value and
+        // let `parse_flag` apply the schema default when it is empty.
+        let raw = |key: &str| -> String {
+            non_empty(lookup(key))
+                .or_else(|| non_empty(file.knobs.get(key).cloned()))
+                .unwrap_or_default()
         };
 
         let sync = resolve_sync(&knob);
@@ -139,8 +161,6 @@ impl Config {
         let db_url = non_empty(lookup("VAULTWARDEN_DATABASE_URL"))
             .or_else(|| non_empty(file.child.get("DATABASE_URL").cloned()));
         let backup = resolve_backup(&knob, sync.as_ref(), db_url.clone());
-
-        let flag = |key: &str, default: bool| parse_flag(key, &knob(key, ""), default);
 
         // The node joins the tailnet with EITHER an authkey OR a restored
         // identity: with S3 state sync configured, the pulled
@@ -157,18 +177,26 @@ impl Config {
 
         Some(Self {
             // hard-pinned to the volume; the sync scope is /data too
-            state: knob("TAILSCALE_STATE_FILE", "/data/tailscaled.state"),
-            socket: knob("TAILSCALE_SOCKET", "/tmp/tailscaled.sock"),
+            state: value("TAILSCALE_STATE_FILE"),
+            socket: value("TAILSCALE_SOCKET"),
             port,
             vault_port,
-            hostname: knob("TAILSCALE_HOSTNAME", "vaultwarden-hummingbird"),
+            hostname: value("TAILSCALE_HOSTNAME"),
             authkey,
-            serve: flag("TAILSCALE_SERVE", true),
+            serve: parse_flag(
+                "TAILSCALE_SERVE",
+                &raw("TAILSCALE_SERVE"),
+                schema::bool_default("TAILSCALE_SERVE"),
+            ),
             service: resolve_service(
                 non_empty(lookup("TAILSCALE_SERVICE"))
                     .or_else(|| non_empty(file.knobs.get("TAILSCALE_SERVICE").cloned())),
             ),
-            userspace: flag("TAILSCALE_USERSPACE", true),
+            userspace: parse_flag(
+                "TAILSCALE_USERSPACE",
+                &raw("TAILSCALE_USERSPACE"),
+                schema::bool_default("TAILSCALE_USERSPACE"),
+            ),
             sync,
             backup,
             vw_env: file.child.into_iter().collect(),

@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 
+use super::env::schema::{self, FilePolicy};
 use super::env::{is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
 use crate::util::log;
 
@@ -27,6 +28,10 @@ pub struct FileConfig {
     /// keys outside the accepted namespaces — boot refuses when
     /// non-empty (key names only; values may be secrets)
     pub invalid: Vec<String>,
+    /// A configured-but-unreadable file: the caller must refuse the boot
+    /// rather than continue on env-only defaults (the file is the explicit
+    /// config surface; losing it silently is never right).
+    pub fatal: Option<String>,
 }
 
 impl FileConfig {
@@ -44,20 +49,37 @@ impl FileConfig {
             return Self::default();
         };
         let raw = match std::fs::read_to_string(path) {
-            Ok(r) => r,
+            Ok(raw) => raw,
             Err(e) => {
-                log::err(&format!(
-                    "config: cannot read {path}: {e}; using env/defaults"
-                ));
-                return Self::default();
+                return Self {
+                    fatal: Some(format!(
+                        "config: cannot read {}: {e}; refusing to start — fix the mount, \
+                         or unset SUPERVISOR_ENV_FILE to run from the environment only",
+                        log::sanitize(path)
+                    )),
+                    ..Self::default()
+                };
             }
         };
+        // A UTF-8 BOM (common from Windows editors) is not stripped by
+        // dotenvy's iterator and would corrupt the first key.
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
         let mut cfg = Self::default();
-        for item in dotenvy::from_read_iter(raw.as_bytes()) {
+        for (i, item) in dotenvy::from_read_iter(raw.as_bytes()).enumerate() {
             match item {
                 Ok((k, v)) => {
                     if is_supervisor_consumed(&k) {
-                        cfg.knobs.insert(k, v);
+                        match schema::file_policy(&k) {
+                            // Legacy spellings route to the resolver, which
+                            // refuses them naming the valid spelling.
+                            Some(FilePolicy::File | FilePolicy::Legacy) => {
+                                cfg.knobs.insert(k, v);
+                            }
+                            // A process-env-only key is inert in the file,
+                            // and an unknown supervisor key is a typo:
+                            // both refuse the boot.
+                            Some(FilePolicy::ProcessOnly) | None => cfg.invalid.push(k),
+                        }
                     } else if let Some(stripped) = vaultwarden_key(&k) {
                         // A VAULTWARDEN_ key stripping into the supervisor's
                         // namespace (VAULTWARDEN_TAILSCALE_*) is a dangerous
@@ -73,10 +95,12 @@ impl FileConfig {
                     }
                 }
                 // LineParse embeds the raw line — never log it (it may hold
-                // credentials); the byte offset is safe.
-                Err(dotenvy::Error::LineParse(_, pos)) => {
+                // credentials). The index is the logical entry, not a byte
+                // offset into the value.
+                Err(dotenvy::Error::LineParse(_, _)) => {
                     log::err(&format!(
-                        "config: dotenv: invalid line (byte {pos}); ignored"
+                        "config: dotenv: invalid entry on logical line {}; ignored",
+                        i + 1
                     ));
                 }
                 Err(e) => log::err(&format!("config: dotenv: {e}; file partially applied")),
@@ -222,12 +246,67 @@ not a valid line
         assert!(cfg.child.is_empty());
         assert!(cfg.knobs.is_empty());
         assert!(cfg.invalid.is_empty());
+        assert!(cfg.fatal.is_none());
     }
 
+    /// A configured-but-unreadable file is fatal, never a silent fallback
+    /// to env-only defaults: losing the whole config surface quietly is
+    /// the opposite of what the strict file is for.
     #[test]
-    fn missing_file_degrades() {
+    fn unreadable_file_is_fatal() {
         let cfg = FileConfig::load_from(Some("/nonexistent/.env"));
         assert!(cfg.child.is_empty());
+        assert!(cfg.knobs.is_empty());
+        let fatal = cfg.fatal.expect("unreadable file must be fatal");
+        assert!(fatal.contains("refusing to start"), "{fatal}");
+        assert!(fatal.contains("/nonexistent/.env"), "{fatal}");
+    }
+
+    /// A UTF-8 BOM (Windows editors) must not corrupt the first key:
+    /// dotenvy's iterator does not strip it, the loader does.
+    #[test]
+    fn a_bom_does_not_eat_the_first_key() {
+        let path = write_tmp("\u{feff}TAILSCALE_HOSTNAME=homely\nVAULTWARDEN_DOMAIN=https://x\n");
+        let cfg = FileConfig::load_from(Some(&path));
+        assert!(cfg.invalid.is_empty(), "{:?}", cfg.invalid);
+        assert_eq!(
+            cfg.knobs.get("TAILSCALE_HOSTNAME").map(String::as_str),
+            Some("homely")
+        );
+        assert_eq!(
+            cfg.child.get("DOMAIN").map(String::as_str),
+            Some("https://x")
+        );
+    }
+
+    /// An unknown key inside the supervisor's own namespaces is a typo the
+    /// supervisor can catch (unlike VAULTWARDEN_* keys, whose full set is
+    /// upstream's): it refuses the boot.
+    #[test]
+    fn unknown_supervisor_keys_are_invalid() {
+        let path = write_tmp(
+            "SUPERVISOR_DB_BACKUP_RESTOR=true\nTAILSCALE_SERVE_ME=true\nTAILSCALE_HOSTNAME=ok\n",
+        );
+        let cfg = FileConfig::load_from(Some(&path));
+        assert_eq!(
+            cfg.invalid,
+            vec![
+                "SUPERVISOR_DB_BACKUP_RESTOR".to_string(),
+                "TAILSCALE_SERVE_ME".to_string()
+            ]
+        );
+        assert!(cfg.knobs.contains_key("TAILSCALE_HOSTNAME"));
+    }
+
+    /// SUPERVISOR_ENV_FILE is read from the process env only; inside the
+    /// file it could never take effect, so it refuses the boot instead of
+    /// sitting there inert.
+    #[test]
+    fn process_only_keys_are_invalid_in_the_file() {
+        let path = write_tmp("SUPERVISOR_ENV_FILE=/config/.env\nVAULTWARDEN_DOMAIN=https://x\n");
+        let cfg = FileConfig::load_from(Some(&path));
+        assert_eq!(cfg.invalid, vec!["SUPERVISOR_ENV_FILE".to_string()]);
+        assert!(cfg.child.contains_key("DOMAIN"));
     }
 
     #[test]

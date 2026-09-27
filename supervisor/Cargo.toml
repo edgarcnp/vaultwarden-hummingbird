@@ -8,7 +8,6 @@ anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
 dotenvy = { version = "0.15.7", default-features = false }
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 nix = { version = "0.31.3", default-features = false, features = ["signal"] }
-percent-encoding = { version = "2.3.2", default-features = false, features = ["alloc"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 rusty-s3 = { version = "0.10.2", default-features = false, features = ["rustcrypto", "xml"] }
 signal-hook = { version = "0.4.4", default-features = false }

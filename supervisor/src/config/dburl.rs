@@ -6,19 +6,25 @@
 //! is vaultwarden's sqlite form (the raw string is the file path), and any
 //! other scheme fails closed — dumps and restores must reach the same DB
 //! the vault uses.
-
-use percent_encoding::percent_decode_str;
+//!
+//! Vaultwarden strips exactly the `sqlite://` prefix and uses the rest
+//! *verbatim* as the file path (no percent-decoding), so the supervisor
+//! must not decode either — `sqlite:///data/my%20db.sqlite3` names a file
+//! with a literal `%20` in it.
 
 /// Parse the sqlite file path out of a database URL. `None` = empty or a
 /// foreign scheme (postgres/mysql/...) the pinned vault cannot use.
 pub fn sqlite_path(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    match raw.split_once("://") {
-        Some(("sqlite", rest)) => Some(percent_decode_str(rest).decode_utf8_lossy().into_owned()),
-        Some(_) => None,
-        None if raw.is_empty() => None,
-        None => Some(raw.to_string()),
+    if raw.is_empty() {
+        return None;
     }
+    let path = match raw.split_once("://") {
+        Some(("sqlite", rest)) => rest,
+        Some(_) => return None,
+        None => raw,
+    };
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 /// The scheme of a database URL (for secret-free logs).
@@ -45,11 +51,14 @@ mod tests {
             sqlite_path("sqlite://data/db.sqlite3").as_deref(),
             Some("data/db.sqlite3")
         );
-        // percent-escaped path components are decoded
+        // vaultwarden uses the URL's remainder verbatim (no
+        // percent-decoding), so the supervisor must not decode either
         assert_eq!(
             sqlite_path("sqlite:///data/my%20db.sqlite3").as_deref(),
-            Some("/data/my db.sqlite3")
+            Some("/data/my%20db.sqlite3")
         );
+        // a bare scheme names an empty path: nothing to back up
+        assert_eq!(sqlite_path("sqlite://"), None);
         // surrounding whitespace is not part of the path
         assert_eq!(
             sqlite_path("  sqlite:///data/db.sqlite3  ").as_deref(),
