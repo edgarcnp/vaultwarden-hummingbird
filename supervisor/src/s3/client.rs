@@ -62,10 +62,47 @@ fn resumed_offset(tmp: &str, expected: Option<u64>) -> u64 {
     }
 }
 
-/// Whether a transport-level failure is worth another bounded attempt
-/// (an HTTP status is definitive).
+/// Whether a request failure is worth another attempt: transport errors,
+/// 429, and 5xx. Anything else (403, 404, 3xx from `checked`) is
+/// definitive.
 fn retryable(e: &ureq::Error) -> bool {
-    !matches!(e, ureq::Error::StatusCode(_))
+    match e {
+        ureq::Error::StatusCode(code) => *code == 429 || (500..600).contains(code),
+        _ => true,
+    }
+}
+
+/// Bounded retries for idempotent requests (put/get/list/delete all are):
+/// the caller rebuilds and re-signs the request per attempt, so a retry
+/// can never reuse an expired presigned URL.
+const RETRY_ATTEMPTS: u32 = 3;
+const RETRY_BASE: Duration = Duration::from_millis(200);
+
+/// Run one idempotent request with bounded, jittered retries. `request`
+/// must build a fresh request each call.
+fn retrying<T>(mut request: impl FnMut() -> Result<T, ureq::Error>) -> Result<T, ureq::Error> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match request() {
+            Err(e) if attempt < RETRY_ATTEMPTS && retryable(&e) => {
+                std::thread::sleep(backoff(attempt));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Exponential backoff with jitter derived from the wall clock (no RNG
+/// dependency): 200ms, 400ms, ... plus up to 100ms.
+fn backoff(attempt: u32) -> Duration {
+    let base = RETRY_BASE.saturating_mul(1 << (attempt - 1).min(3));
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_millis() as u64)
+        .unwrap_or(0)
+        % 100;
+    base + Duration::from_millis(jitter)
 }
 
 /// Absolute download cap for one synced object. Upstream clients cap
@@ -182,6 +219,10 @@ pub struct Expect<'a> {
 pub struct Listed {
     pub key: String,
     pub size: u64,
+    /// The object's last-modified stamp (ISO-8601 as the provider sent it).
+    /// Used only to order multiple versions of the same file during the
+    /// state sync's reconciliation; empty when the provider omitted it.
+    pub last_modified: String,
 }
 
 /// One S3 client over a bucket. Cheap to build per run (an endpoint parse
@@ -247,25 +288,26 @@ impl Client {
         if abort() {
             bail!("aborted");
         }
-        let file =
-            std::fs::File::open(path).map_err(|e| anyhow!("cannot open {path} for upload: {e}"))?;
-        let size = file
-            .metadata()
+        let size = std::fs::metadata(path)
             .map_err(|e| anyhow!("cannot size {path}: {e}"))?
             .len();
         if size >= MULTIPART_THRESHOLD {
             return self.put_multipart(key, path, size, PART_SIZE, abort);
         }
-        let url = self
-            .bucket
-            .put_object(Some(&self.credentials), key)
-            .sign(SIGN_EXPIRE);
-        let response = self
-            .agent
-            .put(url.as_str())
-            .header("Content-Length", size.to_string())
-            .send(file)
-            .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
+        let response = retrying(|| {
+            // A retry reopens the file: the request consumes the handle.
+            let file = std::fs::File::open(path).map_err(ureq::Error::Io)?;
+            let length = file.metadata().map_err(ureq::Error::Io)?.len();
+            let url = self
+                .bucket
+                .put_object(Some(&self.credentials), key)
+                .sign(SIGN_EXPIRE);
+            self.agent
+                .put(url.as_str())
+                .header("Content-Length", length.to_string())
+                .send(file)
+        })
+        .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
         checked("upload", key, response)?;
         Ok(())
     }
@@ -285,15 +327,14 @@ impl Client {
         if abort() {
             bail!("aborted");
         }
-        let url = self
-            .bucket
-            .create_multipart_upload(Some(&self.credentials), key)
-            .sign(SIGN_EXPIRE);
-        let response = self
-            .agent
-            .post(url.as_str())
-            .send_empty()
-            .map_err(|e| anyhow!("creating the upload of {key} failed: {}", http_err(&e)))?;
+        let response = retrying(|| {
+            let url = self
+                .bucket
+                .create_multipart_upload(Some(&self.credentials), key)
+                .sign(SIGN_EXPIRE);
+            self.agent.post(url.as_str()).send_empty()
+        })
+        .map_err(|e| anyhow!("creating the upload of {key} failed: {}", http_err(&e)))?;
         let response = checked("create upload", key, response)?;
         let mut body = String::new();
         response
@@ -313,20 +354,21 @@ impl Client {
                 return Err(e);
             }
         };
-        let action = self.bucket.complete_multipart_upload(
-            Some(&self.credentials),
-            key,
-            &upload_id,
-            etags.iter().map(String::as_str),
-        );
-        let url = action.sign(SIGN_EXPIRE);
-        let body = action.body();
-        let response = self
-            .agent
-            .post(url.as_str())
-            .header("Content-Type", "application/xml")
-            .send(body)
-            .map_err(|e| anyhow!("completing the upload of {key} failed: {}", http_err(&e)))?;
+        let response = retrying(|| {
+            let action = self.bucket.complete_multipart_upload(
+                Some(&self.credentials),
+                key,
+                &upload_id,
+                etags.iter().map(String::as_str),
+            );
+            let url = action.sign(SIGN_EXPIRE);
+            let body = action.body();
+            self.agent
+                .post(url.as_str())
+                .header("Content-Type", "application/xml")
+                .send(body)
+        })
+        .map_err(|e| anyhow!("completing the upload of {key} failed: {}", http_err(&e)))?;
         if let Err(e) = checked("complete upload", key, response) {
             self.abort_upload(key, &upload_id);
             return Err(e);
@@ -362,21 +404,22 @@ impl Client {
             let mut chunk = vec![0u8; this as usize];
             file.read_exact(&mut chunk)
                 .map_err(|e| anyhow!("reading {path}: {e}"))?;
-            let url = self
-                .bucket
-                .upload_part(Some(&self.credentials), key, part_number, upload_id)
-                .sign(SIGN_EXPIRE);
-            let response = self
-                .agent
-                .put(url.as_str())
-                .header("Content-Length", chunk.len().to_string())
-                .send(&chunk)
-                .map_err(|e| {
-                    anyhow!(
-                        "upload part {part_number} of {key} failed: {}",
-                        http_err(&e)
-                    )
-                })?;
+            let response = retrying(|| {
+                let url = self
+                    .bucket
+                    .upload_part(Some(&self.credentials), key, part_number, upload_id)
+                    .sign(SIGN_EXPIRE);
+                self.agent
+                    .put(url.as_str())
+                    .header("Content-Length", chunk.len().to_string())
+                    .send(&chunk)
+            })
+            .map_err(|e| {
+                anyhow!(
+                    "upload part {part_number} of {key} failed: {}",
+                    http_err(&e)
+                )
+            })?;
             let response = checked("upload part", key, response)?;
             let etag = response
                 .headers()
@@ -411,16 +454,17 @@ impl Client {
         if abort() {
             bail!("aborted");
         }
-        let url = self
-            .bucket
-            .put_object(Some(&self.credentials), key)
-            .sign(SIGN_EXPIRE);
-        let response = self
-            .agent
-            .put(url.as_str())
-            .header("Content-Length", bytes.len().to_string())
-            .send(bytes)
-            .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
+        let response = retrying(|| {
+            let url = self
+                .bucket
+                .put_object(Some(&self.credentials), key)
+                .sign(SIGN_EXPIRE);
+            self.agent
+                .put(url.as_str())
+                .header("Content-Length", bytes.len().to_string())
+                .send(bytes)
+        })
+        .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
         checked("upload", key, response)?;
         Ok(())
     }
@@ -437,11 +481,13 @@ impl Client {
         if abort() {
             bail!("aborted");
         }
-        let url = self
-            .bucket
-            .get_object(Some(&self.credentials), key)
-            .sign(SIGN_EXPIRE);
-        let response = match self.agent.get(url.as_str()).call() {
+        let response = match retrying(|| {
+            let url = self
+                .bucket
+                .get_object(Some(&self.credentials), key)
+                .sign(SIGN_EXPIRE);
+            self.agent.get(url.as_str()).call()
+        }) {
             Ok(response) => checked("download", key, response)?,
             Err(ureq::Error::StatusCode(404)) => return Ok(None),
             Err(e) => return Err(anyhow!("download of {key} failed: {}", http_err(&e))),
@@ -634,14 +680,13 @@ impl Client {
             if let Some(t) = &token {
                 action.with_continuation_token(t);
             }
-            let url = action.sign(SIGN_EXPIRE);
             // The listing body is capped: an endpoint gone rogue cannot
             // exhaust memory within the request timeout.
-            let response = self
-                .agent
-                .get(url.as_str())
-                .call()
-                .map_err(|e| anyhow!("listing {prefix:?} failed: {}", http_err(&e)))?;
+            let response = retrying(|| {
+                let url = action.sign(SIGN_EXPIRE);
+                self.agent.get(url.as_str()).call()
+            })
+            .map_err(|e| anyhow!("listing {prefix:?} failed: {}", http_err(&e)))?;
             let mut reader = checked("listing", &format!("{prefix:?}"), response)?
                 .into_body()
                 .into_reader()
@@ -658,6 +703,7 @@ impl Client {
             names.extend(parsed.contents.into_iter().map(|c| Listed {
                 key: c.key,
                 size: c.size,
+                last_modified: c.last_modified,
             }));
             if names.len() > MAX_LIST_KEYS {
                 bail!("listing {prefix:?}: exceeded {MAX_LIST_KEYS} keys");
@@ -681,15 +727,14 @@ impl Client {
         if abort() {
             bail!("aborted");
         }
-        let url = self
-            .bucket
-            .delete_object(Some(&self.credentials), key)
-            .sign(SIGN_EXPIRE);
-        let response = self
-            .agent
-            .delete(url.as_str())
-            .call()
-            .map_err(|e| anyhow!("delete of {key} failed: {}", http_err(&e)))?;
+        let response = retrying(|| {
+            let url = self
+                .bucket
+                .delete_object(Some(&self.credentials), key)
+                .sign(SIGN_EXPIRE);
+            self.agent.delete(url.as_str()).call()
+        })
+        .map_err(|e| anyhow!("delete of {key} failed: {}", http_err(&e)))?;
         checked("delete", key, response)?;
         Ok(())
     }
@@ -1371,5 +1416,61 @@ mod tests {
             "each retry after the first is ranged"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retryable statuses (429, 5xx) and transport errors get bounded
+    /// attempts; other statuses are returned immediately.
+    #[test]
+    fn retrying_is_bounded_and_status_aware() {
+        use std::cell::Cell;
+
+        for code in [429u16, 500, 503] {
+            let attempts = Cell::new(0);
+            let err = retrying(|| {
+                attempts.set(attempts.get() + 1);
+                Err::<(), _>(ureq::Error::StatusCode(code))
+            })
+            .expect_err("still failing");
+            assert!(matches!(err, ureq::Error::StatusCode(returned) if returned == code));
+            assert_eq!(
+                attempts.get(),
+                RETRY_ATTEMPTS,
+                "status {code} must use every attempt"
+            );
+        }
+        for code in [400u16, 403, 404] {
+            let attempts = Cell::new(0);
+            let _ = retrying(|| {
+                attempts.set(attempts.get() + 1);
+                Err::<(), _>(ureq::Error::StatusCode(code))
+            });
+            assert_eq!(attempts.get(), 1, "status {code} is definitive");
+        }
+        // success on the second attempt comes back with the value
+        let attempts = Cell::new(0);
+        let value = retrying(|| {
+            let n = attempts.get() + 1;
+            attempts.set(n);
+            if n < 2 {
+                Err(ureq::Error::StatusCode(500))
+            } else {
+                Ok(7)
+            }
+        })
+        .expect("second attempt succeeds");
+        assert_eq!(value, 7);
+        assert_eq!(attempts.get(), 2);
+    }
+
+    /// The backoff grows with the attempt and stays within its jitter band.
+    #[test]
+    fn backoff_is_bounded_and_grows() {
+        for attempt in 1..=3 {
+            let delay = backoff(attempt);
+            assert!(delay >= RETRY_BASE, "{delay:?}");
+            let cap = RETRY_BASE * (1 << (attempt - 1).min(3)) + Duration::from_millis(100);
+            assert!(delay <= cap, "{delay:?} exceeds {cap:?}");
+        }
+        assert!(backoff(2) >= backoff(1));
     }
 }

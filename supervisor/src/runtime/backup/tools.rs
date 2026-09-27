@@ -107,18 +107,22 @@ mod tests {
             Listed {
                 key: format!("{}sqlite-1.sqlite3", bucket_prefix),
                 size: 11,
+                last_modified: String::new(),
             },
             Listed {
                 key: "certs/x".to_string(),
                 size: 0,
+                last_modified: String::new(),
             },
             Listed {
                 key: format!("{}sqlite-not-a-dump.txt", bucket_prefix),
                 size: 0,
+                last_modified: String::new(),
             },
             Listed {
                 key: format!("{}sqlite-2.sqlite3", bucket_prefix),
                 size: 22,
+                last_modified: String::new(),
             },
         ];
         let mut names: Vec<(String, u64)> = listed

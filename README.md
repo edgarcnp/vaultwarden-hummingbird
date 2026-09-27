@@ -84,7 +84,7 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 - At boot it restores what is missing, but never overwrites a newer local file.
 - It saves after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The final save is budgeted (two minutes; fifteen seconds after a second stop signal) so a slow bucket can't hold the container open.
 - It saves the tailnet identity, the vault's RSA signing key, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/data` to ride along; the container says so at boot when it doesn't.
-- Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. A quiet node costs one bucket listing, not a round of uploads.
+- Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. Uploads are content-addressed, so an interrupted push can never replace the copy the last good manifest names, and a new file whose manifest write was interrupted is recovered on the next boot. A quiet node costs one manifest read per push and one listing per boot, not a round of uploads.
 - Keep the bucket private (it holds secrets and your files) and run one container against it.
 
 Rather stay fully ephemeral? Use `TAILSCALE_STATE_FILE=mem:` with an `ephemeral=true` auth key: the container joins as a fresh node every boot and devices log in again. Vaultwarden also tries to detect a non-persistent `/data`, but how well that works depends on the mount — treat `/data` as gone unless it's a real volume or sync is on.
@@ -113,6 +113,7 @@ The container checks that a downloaded backup is a parseable database, but it ca
 - Use a dedicated access key, scoped to this bucket (or prefix) only.
 - Keep identity state and backups apart where your provider allows it, so a leaked key has a smaller blast radius.
 - Turn on object versioning and, if available, object lock/retention.
+- If the provider supports lifecycle rules, let it expire incomplete multipart uploads: a killed container can leave parts behind (the client aborts its own failed uploads, but nothing can run after a SIGKILL).
 - Encrypt at rest (usually the provider's default); consider client-side encryption if the storage provider is inside your threat model.
 
 ## Defaults
