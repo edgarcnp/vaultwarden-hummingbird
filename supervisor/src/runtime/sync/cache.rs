@@ -101,8 +101,12 @@ impl Cache {
                 cached.sha256, cached.size, cached.mtime, rel
             ));
         }
-        if std::fs::write(CACHE_PATH, out).is_ok() {
-            let _ = make_private(CACHE_PATH);
+        if std::fs::write(CACHE_PATH, out).is_ok()
+            && let Err(e) = make_private(CACHE_PATH)
+        {
+            crate::util::log::err(&format!(
+                "state sync: cannot restrict the hash cache {CACHE_PATH} ({e})"
+            ));
         }
     }
 }

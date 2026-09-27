@@ -16,6 +16,7 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Ha
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
     if let Some(dir) = std::path::Path::new(state)
         .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
         .and_then(|d| d.to_str())
     {
         cmd.arg("--statedir").arg(dir);

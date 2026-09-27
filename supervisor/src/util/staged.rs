@@ -1,8 +1,9 @@
 //! Staged `/tmp` files: unique per call (pid + sequence), 0600,
 //! container-private, never following a pre-existing path — and unlinked
-//! when the handle drops, so every exit path (including panics) cleans
-//! up. Consumers: secrets that must never ride argv (the tailscale
-//! authkey) and captured child output.
+//! when the handle drops, the normal exit path. The binary is
+//! `panic = "abort"`, so a panic skips `Drop`; the process (and the
+//! container with it) dies, taking `/tmp` along. Consumers: secrets that
+//! must never ride argv (the tailscale authkey) and captured child output.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

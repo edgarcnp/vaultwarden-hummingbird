@@ -340,6 +340,25 @@ fn empty_env_service_falls_back_to_the_file() {
     assert_eq!(cfg.service.as_deref(), Some("svc:file-svc"));
 }
 
+/// The state file anchors the node identity and the `--statedir` derived
+/// from it: a relative path refuses the boot, an absolute one passes.
+#[test]
+fn state_file_must_be_absolute() {
+    let lookup = |key: &str| (key == "TAILSCALE_AUTHKEY").then(|| "test-key".to_string());
+    let file = FileConfig::load_from(Some(&env_dotenv(
+        "TAILSCALE_STATE_FILE=state/tailscaled.state\n",
+    )));
+    assert!(
+        Config::build(file, lookup).is_none(),
+        "a relative state file must refuse the boot"
+    );
+    let file = FileConfig::load_from(Some(&env_dotenv(
+        "TAILSCALE_STATE_FILE=/custom/tailscaled.state\n",
+    )));
+    let cfg = Config::build(file, lookup).expect("an absolute state file resolves");
+    assert_eq!(cfg.state, "/custom/tailscaled.state");
+}
+
 /// One-key dotenv file for the merge tests above. Unique per call:
 /// tests run in parallel threads of one process, and a shared path
 /// would let one test's write race another test's read.

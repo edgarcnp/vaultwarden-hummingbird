@@ -77,7 +77,12 @@ pub(super) fn retain(staged: &str, db_path: &str) {
     let last = last_path(db_path);
     match std::fs::rename(staged, &last) {
         Ok(()) => {
-            let _ = make_private(&last);
+            if let Err(e) = make_private(&last) {
+                log::err(&format!(
+                    "db backup: cannot restrict the retained dump {} ({e})",
+                    log::sanitize(&last)
+                ));
+            }
         }
         Err(e) => {
             let _ = std::fs::remove_file(staged);

@@ -46,6 +46,28 @@ const MAX_PARTS: usize = 10_000;
 /// Response-body cap for the multipart create handshake.
 const MULTIPART_XML_CAP: u64 = 64 * 1024;
 
+/// Bounded download attempts; each gets the full body budget, and a
+/// partial transfer resumes with a Range request instead of restarting.
+const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// How many bytes of a previous attempt a download may resume from: the
+/// `.part` size, unless it already reached the expected size (a stale or
+/// foreign leftover must never be appended to).
+fn resumed_offset(tmp: &str, expected: Option<u64>) -> u64 {
+    let len = std::fs::metadata(tmp).map(|meta| meta.len()).unwrap_or(0);
+    if expected.is_some_and(|expected| len >= expected) {
+        0
+    } else {
+        len
+    }
+}
+
+/// Whether a transport-level failure is worth another bounded attempt
+/// (an HTTP status is definitive).
+fn retryable(e: &ureq::Error) -> bool {
+    !matches!(e, ureq::Error::StatusCode(_))
+}
+
 /// Absolute download cap for one synced object. Upstream clients cap
 /// Bitwarden attachments at 100 MB by default; 1 GiB leaves generous
 /// headroom while a rogue bucket still cannot fill the data volume.
@@ -441,69 +463,128 @@ impl Client {
             .bucket
             .get_object(Some(&self.credentials), key)
             .sign(SIGN_EXPIRE);
-        let response = checked(
-            "download",
-            key,
-            self.agent
-                .get(url.as_str())
-                .call()
-                .map_err(|e| anyhow!("download of {key} failed: {}", http_err(&e)))?,
-        )?;
-        let mut reader = response.into_body().into_reader();
         // The temp lives beside the target so the publish is one atomic
-        // same-filesystem rename; a crash leaves the target untouched.
+        // same-filesystem rename; a crash leaves the target untouched. A
+        // partial transfer is kept and resumed with a Range request, so a
+        // slow link makes progress across bounded attempts instead of
+        // restarting from zero every time.
         let tmp = format!("{path}.part");
-        let staged = (|| -> anyhow::Result<u64> {
-            let mut out = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)
-                .map_err(|e| anyhow!("cannot create {tmp}: {e}"))?;
-            let mut buf = [0u8; 64 * 1024];
-            let mut total: u64 = 0;
-            loop {
-                if abort() {
-                    bail!("aborted");
+        let mut offset = resumed_offset(&tmp, expect.size);
+        let mut attempt = 0;
+        let staged: anyhow::Result<u64> = loop {
+            attempt += 1;
+            if abort() {
+                break Err(anyhow!("aborted"));
+            }
+            let mut request = self.agent.get(url.as_str());
+            if offset > 0 {
+                request = request.header("Range", &format!("bytes={offset}-"));
+            }
+            let response = match request.call() {
+                Ok(response) => match checked("download", key, response) {
+                    Ok(response) => response,
+                    Err(e) => break Err(e),
+                },
+                Err(e) => {
+                    if retryable(&e) && attempt < MAX_DOWNLOAD_ATTEMPTS {
+                        continue;
+                    }
+                    break Err(anyhow!("download of {key} failed: {}", http_err(&e)));
                 }
-                let n = reader
-                    .read(&mut buf)
-                    .map_err(|e| anyhow!("download of {key}: {e}"))?;
-                if n == 0 {
-                    break;
+            };
+            // A server that ignored the range (or an object that changed)
+            // answers 200: restart rather than append a different body.
+            if offset > 0 && response.status().as_u16() != 206 {
+                offset = 0;
+            }
+            let declared = response
+                .headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            let start = offset;
+            let mut reader = response.into_body().into_reader();
+            let streamed = (|| -> anyhow::Result<u64> {
+                let mut out = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(start == 0)
+                    .append(start > 0)
+                    .mode(0o600)
+                    .open(&tmp)
+                    .map_err(|e| anyhow!("cannot create {tmp}: {e}"))?;
+                let mut buf = [0u8; 64 * 1024];
+                let mut total = start;
+                loop {
+                    if abort() {
+                        bail!("aborted");
+                    }
+                    let n = reader
+                        .read(&mut buf)
+                        .map_err(|e| anyhow!("download of {key}: {e}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    total += n as u64;
+                    if total > expect.max_bytes {
+                        bail!(
+                            "download of {key}: exceeds the {}-byte cap",
+                            expect.max_bytes
+                        );
+                    }
+                    if let Some(expected) = expect.size
+                        && total > expected
+                    {
+                        bail!("download of {key}: larger than the {expected} bytes listed");
+                    }
+                    out.write_all(&buf[..n])
+                        .map_err(|e| anyhow!("download of {key}: {e}"))?;
                 }
-                total += n as u64;
-                if total > expect.max_bytes {
+                // A connection that closed early is a failed attempt, not
+                // a short object: the reader may report EOF either way, so
+                // the declared length is checked explicitly.
+                if let Some(declared) = declared
+                    && total - start != declared
+                {
                     bail!(
-                        "download of {key}: exceeds the {}-byte cap",
-                        expect.max_bytes
+                        "download of {key}: body ended after {} of {declared} bytes",
+                        total - start
                     );
                 }
-                if let Some(expected) = expect.size
-                    && total > expected
-                {
-                    bail!("download of {key}: larger than the {expected} bytes listed");
-                }
-                out.write_all(&buf[..n])
+                out.sync_all()
                     .map_err(|e| anyhow!("download of {key}: {e}"))?;
+                Ok(total)
+            })();
+            match streamed {
+                Ok(total) => break Ok(total),
+                Err(e) => {
+                    // Keep the partial for the next attempt; past the
+                    // budget (or on abort) the failure is final and the
+                    // cleanup below removes it.
+                    let done = std::fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
+                    if attempt < MAX_DOWNLOAD_ATTEMPTS
+                        && !abort()
+                        && done < expect.size.unwrap_or(u64::MAX)
+                    {
+                        offset = done;
+                        continue;
+                    }
+                    break Err(e);
+                }
             }
-            out.sync_all()
-                .map_err(|e| anyhow!("download of {key}: {e}"))?;
+        };
+        let result = staged.and_then(|total| {
+            if let Some(expected) = expect.size
+                && total != expected
+            {
+                bail!("download of {key}: got {total} bytes, expected {expected}");
+            }
             if let Some(expected) = expect.sha256 {
                 let actual = crate::util::hash::sha256_file(&tmp)
                     .map_err(|e| anyhow!("download of {key}: cannot hash the temp file: {e}"))?;
                 if actual != expected {
                     bail!("download of {key}: sha256 mismatch (got {actual}, expected {expected})");
                 }
-            }
-            Ok(total)
-        })();
-        let result = staged.and_then(|total| {
-            if let Some(expected) = expect.size
-                && total != expected
-            {
-                bail!("download of {key}: got {total} bytes, expected {expected}");
             }
             std::fs::rename(&tmp, path).map_err(|e| anyhow!("cannot publish {path}: {e}"))
         });
@@ -1124,6 +1205,131 @@ mod tests {
         assert!(err.to_string().contains("HTTP 500"), "{err}");
         assert_eq!(*parts.lock().unwrap(), vec![1], "part 2 failed");
         assert_eq!(aborts.load(Ordering::SeqCst), 1, "the upload was aborted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fake endpoint that serves a body short on the first (non-range)
+    /// request, simulating a connection that died mid-transfer. With
+    /// `serve_ranges`, a `Range: bytes=N-` retry gets 206 and the
+    /// remainder; without it, every request gets the same short body (the
+    /// endpoint ignores ranges). Records the Range headers it saw.
+    fn fake_resume_server(
+        body: &'static [u8],
+        first_bytes: usize,
+        serve_ranges: bool,
+        ranges_seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut first = true;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => head.push(byte[0]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let range = text
+                    .lines()
+                    .find(|line| line.to_lowercase().starts_with("range:"))
+                    .and_then(|line| line.split(':').nth(1))
+                    .map(|value| value.trim().to_string());
+                if let Some(range) = &range {
+                    ranges_seen.lock().unwrap().push(range.clone());
+                }
+                let start = range
+                    .as_deref()
+                    .and_then(|r| r.strip_prefix("bytes="))
+                    .and_then(|r| r.strip_suffix('-'))
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let (status, declared, payload): (&str, usize, &[u8]) = if serve_ranges && start > 0
+                {
+                    ("206 Partial Content", body.len() - start, &body[start..])
+                } else {
+                    let short = first_bytes.min(body.len());
+                    first = false;
+                    ("200 OK", body.len(), &body[..short])
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(payload);
+                let _ = first;
+            }
+        });
+        addr
+    }
+
+    /// A body that dies mid-transfer resumes from the partial file with a
+    /// Range request instead of restarting: progress survives within the
+    /// attempt budget.
+    #[test]
+    fn get_resumes_an_interrupted_download() {
+        use std::sync::{Arc, Mutex};
+
+        let body = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let client = local_client(fake_resume_server(body, 10, true, Arc::clone(&ranges)));
+        let dir = scratch("get-resume");
+        let target = dir.join("rsa_key.pem");
+        client
+            .get(
+                "state/rsa_key.pem",
+                target.to_str().unwrap(),
+                expect(Some(36), 1024),
+                || false,
+            )
+            .expect("resumed download completes");
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+        assert_eq!(*ranges.lock().unwrap(), vec!["bytes=10-".to_string()]);
+        assert!(!dir.join("rsa_key.pem.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retries are bounded: when every attempt dies early the download
+    /// fails and the partial is removed.
+    #[test]
+    fn get_gives_up_after_the_attempt_budget() {
+        use std::sync::{Arc, Mutex};
+
+        let body = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let client = local_client(fake_resume_server(body, 10, false, Arc::clone(&ranges)));
+        let dir = scratch("get-resume-fail");
+        let target = dir.join("rsa_key.pem");
+        let err = client
+            .get(
+                "state/rsa_key.pem",
+                target.to_str().unwrap(),
+                expect(Some(36), 1024),
+                || false,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("download of state/rsa_key.pem"),
+            "{err}"
+        );
+        assert!(!target.exists(), "nothing published");
+        assert!(!dir.join("rsa_key.pem.part").exists(), "partial cleaned up");
+        assert_eq!(
+            ranges.lock().unwrap().len(),
+            MAX_DOWNLOAD_ATTEMPTS as usize - 1,
+            "each retry after the first is ranged"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

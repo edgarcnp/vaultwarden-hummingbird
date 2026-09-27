@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::liveness::Liveness;
 use super::probe::fake_vault;
-use super::server::{bind, handle, handle_with, serve_with};
+use super::server::{bind, handle, handle_with, is_exhaustion, serve_with};
 
 /// A vaultwarden stand-in that answers 200 forever and counts requests
 /// (the TTL-window and admission tests need to observe probe fan-out).
@@ -307,4 +307,20 @@ fn admission_bounds_concurrent_handlers() {
         "released slot serves again: {resp}"
     );
     assert_eq!(hits.load(Ordering::Relaxed), 1);
+}
+
+/// Descriptor exhaustion is told apart from per-connection accept errors:
+/// only exhaustion needs the backoff that keeps the accept loop from
+/// spinning (the listener stays readable while EMFILE persists).
+#[test]
+fn accept_exhaustion_is_told_apart_from_connection_errors() {
+    assert!(is_exhaustion(&std::io::Error::from_raw_os_error(
+        nix::libc::EMFILE
+    )));
+    assert!(is_exhaustion(&std::io::Error::from_raw_os_error(
+        nix::libc::ENFILE
+    )));
+    assert!(!is_exhaustion(&std::io::Error::from_raw_os_error(
+        nix::libc::ECONNABORTED
+    )));
 }

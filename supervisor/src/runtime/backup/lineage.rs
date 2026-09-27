@@ -68,7 +68,12 @@ fn write_text(db_path: &str, text: &str) {
         ));
         return;
     }
-    let _ = make_private(&path);
+    if let Err(e) = make_private(&path) {
+        log::err(&format!(
+            "db backup: cannot restrict the lineage sidecar {} ({e})",
+            log::sanitize(&path)
+        ));
+    }
 }
 
 /// Whether this database may push its next dump into the bucket.

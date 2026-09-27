@@ -106,8 +106,16 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         );
         return;
     }
-    // Owner-only before the staged dump leaves the volume.
-    let _ = make_private(&staged);
+    // Owner-only before the staged dump leaves the volume: a dump that
+    // could not be restricted must not be pushed (or retained).
+    if let Err(e) = make_private(&staged) {
+        log::err(&format!(
+            "db backup: cannot restrict the staged dump ({e}); nothing was uploaded, \
+             the next tick retries"
+        ));
+        let _ = std::fs::remove_file(&staged);
+        return;
+    }
     let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
     // Skip a redundant upload only while this lineage still owns the
     // newest generation: if that object was deleted externally, the push

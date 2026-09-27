@@ -33,6 +33,10 @@ const VAULT_DOWN: (&str, &str) = ("503", "Service Unavailable");
 /// flood, and flood gets 503.
 const MAX_CONNS: usize = 32;
 
+/// Pause after an accept error that means descriptor exhaustion; without
+/// it the listener stays readable and the loop spins.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
 /// Bind the exposed port on `0.0.0.0`. Failure means the deployment is
 /// broken (health checks unreachable); the caller exits. An unparseable
 /// port is a bind error, never a silent ephemeral fallback.
@@ -66,7 +70,16 @@ pub(super) fn serve_with(listener: TcpListener, vault: Option<std::net::SocketAd
                 }
                 None => reject(s),
             },
-            Err(_) => continue,
+            Err(e) => {
+                // Descriptor exhaustion leaves the listener readable, so
+                // continuing would spin the accept loop: back off briefly.
+                // Per-connection failures (a reset before accept) need no
+                // pause.
+                if is_exhaustion(&e) {
+                    std::thread::sleep(ACCEPT_BACKOFF);
+                }
+                continue;
+            }
         }
     }
 }
@@ -171,6 +184,16 @@ fn line_of(bytes: &[u8]) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Whether an accept error means descriptor exhaustion (EMFILE/ENFILE)
+/// rather than a per-connection failure like ECONNABORTED. Exhaustion
+/// keeps the listener readable, so the caller must back off.
+pub(super) fn is_exhaustion(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(code) if code == nix::libc::EMFILE || code == nix::libc::ENFILE
+    )
 }
 
 /// The request target's path per RFC 7230 §5.3: origin-form `/path?query`

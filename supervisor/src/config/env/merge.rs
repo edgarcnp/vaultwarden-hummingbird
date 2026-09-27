@@ -175,9 +175,21 @@ impl Config {
             return None;
         }
 
+        // The state file anchors the node identity and the `--statedir`
+        // derived from it; a relative path has no stable meaning for a
+        // PID 1 (and would yield an empty statedir).
+        let state = value("TAILSCALE_STATE_FILE");
+        if !state.starts_with('/') {
+            log::err(&format!(
+                "config: TAILSCALE_STATE_FILE '{}' must be an absolute path; refusing to start",
+                log::sanitize(&state)
+            ));
+            return None;
+        }
+
         Some(Self {
             // hard-pinned to the volume; the sync scope is /data too
-            state: value("TAILSCALE_STATE_FILE"),
+            state,
             socket: value("TAILSCALE_SOCKET"),
             port,
             vault_port,
