@@ -579,8 +579,31 @@ Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document)
 - Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
   `cargo test --locked` → **139 passed, 0 failed**, 10 consecutive runs.
 
-Deliberately not yet done: F1/F13/F14/F15 (sync transfer and S3 semantics), F4/F6/F9–F12 (backup generation
-manifests), F17/F18/F19 (dotenv hardening), F16/F21/F24 (S3 endpoint/CI/supply chain).
+### Phase 3 — sync transfer hardening
+
+- **F1 (the data-loss path):** `s3::Client::get` now downloads into a sibling `.part` file, enforces exactly the
+  size the listing promised and an absolute cap, fsyncs, and only then renames into place; any failure removes the
+  temp and leaves the target untouched. A truncated pull (kill, network drop, timeout) can no longer become the
+  volume's authoritative copy that the next push uploads over the good remote object. Published files are 0600.
+- **F12:** unbounded downloads are gone — `MAX_SYNC_OBJECT_BYTES` (1 GiB) and `MAX_DB_OBJECT_BYTES` (4 GiB) bound
+  a rogue endpoint, and sync pulls abort as soon as the body exceeds the listed size. (Uploads stay uncapped: a
+  local file larger than the pull cap still reaches the bucket rather than being silently dropped.)
+- **F15:** every response is status-checked. With redirects disabled a 3xx used to arrive as "success": uploads
+  were silent no-ops and downloads wrote the redirect body. Both now fail loudly.
+- **F14 (partial):** per-phase timeouts replace the single end-to-end 60 s budget — control phases stay bounded by
+  the caller's timeout while transfer bodies get `BODY_TIMEOUT` (10 min), so large objects can sync without
+  loosening hang bounds. Multipart/resume remains open.
+- **Not yet: F13** (size-only change detection; healing equal-size remote corruption) needs the sync
+  manifest/journal, and checksum verification stronger than the listing size arrives with it.
+- Tests: `get_publishes_complete_downloads_owner_only`,
+  `get_refuses_a_truncated_body_without_touching_the_target`, `get_refuses_an_object_over_the_cap`,
+  `redirects_are_rejected_not_treated_as_success`, plus a reusable fake S3 endpoint in the client tests.
+- Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
+  `cargo test --locked` → **143 passed, 0 failed**, 8 consecutive runs.
+
+Deliberately not yet done: F4/F6/F9–F12 (backup generation manifests), F13 and the checksum half of F1's
+verification (sync manifest/journal), F14's multipart/resume half, F17/F18/F19 (dotenv hardening), F16/F21/F24
+(S3 endpoint/CI/supply chain).
 
 ## Appendix A — evidence commands
 
