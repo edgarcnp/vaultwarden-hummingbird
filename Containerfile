@@ -21,12 +21,15 @@ ARG WEB_VAULT_SHA256=002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c3
 ARG TAILSCALE_SHA256_AMD64=50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9
 ARG TAILSCALE_SHA256_ARM64=9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c2895364f6c4c3f
 
-# BASE IMAGES — float on purpose: rebuilds pick up upstream CVE patches.
-# The runtime uses the -openssl variant (ships libssl/libcrypto, so the
-# runtime needs no hand-copied OpenSSL from the builder).
+# BASE IMAGES — digest-pinned: a rebuild uses the exact same base, and the
+# floating tag's CVE patches arrive through Renovate's digest-update PRs
+# (the Dockerfile manager tracks these tags). Never hand-edit a digest:
+# Renovate owns them, like the artifact checksums below. The runtime uses
+# the -openssl variant (ships libssl/libcrypto, so the runtime needs no
+# hand-copied OpenSSL from the builder).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder
-ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:0f9a492d629538e829ef604f2291aa4d5ed8c170129e8ee3cb06efe63574159e
+ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:23f35b6f892f48d97b686326618fa515e0c313666f5b0a3788e206f5ae44a257
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
 # --build-arg (compose passes VAULTWARDEN_WEB_VAULT through from the env).
@@ -121,7 +124,7 @@ ARG VAULTWARDEN_WEB_VAULT
 
 LABEL org.opencontainers.image.title="vaultwarden-hummingbird" \
       org.opencontainers.image.description="Vaultwarden ${VW_VERSION} + Tailscale ${TAILSCALE_VERSION} on Hummingbird core-runtime" \
-      org.opencontainers.image.source="https://github.com/dani-garcia/vaultwarden"
+      org.opencontainers.image.source="https://github.com/edgarcnp/vaultwarden-hummingbird"
 
 # RUNTIME CONTENTS — the -openssl runtime image provides libssl/libcrypto;
 # the sqlite-only vaultwarden build needs no other shared libs copied in.

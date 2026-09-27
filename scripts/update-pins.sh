@@ -34,9 +34,11 @@ set_pin() { # set_pin NAME digest - rewrite the pin, report only on change
 fetch_digest() { # fetch_digest URL -> the artifact's sha256
   local url=$1 file
   file=$(mktemp)
-  curl -fsSL -o "$file" "$url"
+  # The temp file is removed on every return path, including a failed
+  # download under set -e.
+  trap 'rm -f "$file"' RETURN
+  curl -fsSL --max-time 300 --retry 3 --retry-delay 2 -o "$file" "$url"
   sha256sum "$file" | cut -d' ' -f1
-  rm -f "$file"
 }
 
 # vaultwarden source tarball

@@ -16,6 +16,7 @@
         "enabled": false
     },
     "osvVulnerabilityAlerts": true,
+    "pinDigests": true,
     "packageRules": [
         {
             "description": "Recompute the Containerfile checksum pins after version bumps",
@@ -85,19 +86,6 @@
             "datasourceTemplate": "github-tags",
             "depNameTemplate": "tailscale/tailscale",
             "extractVersionTemplate": "^v(?<version>.*)$"
-        },
-        {
-            "description": "Hummingbird base image tag pins",
-            "fileMatch": [
-                "^Containerfile$"
-            ],
-            "matchStrings": [
-                "ARG BUILDER_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/rust):(?<currentValue>\\S+)",
-                "ARG RUNTIME_IMAGE=registry\\.access\\.redhat\\.com/(?<depName>hi/core-runtime):(?<currentValue>\\S+)"
-            ],
-            "datasourceTemplate": "docker",
-            "registryUrlTemplate": "https://registry.access.redhat.com",
-            "pinDigests": false
         }
     ]
 }

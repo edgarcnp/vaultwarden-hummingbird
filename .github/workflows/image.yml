@@ -1,0 +1,62 @@
+# The container image: build the real Containerfile, smoke the
+# entrypoint, and keep the expensive full multi-arch build in publish.
+# Path-filtered to the build context, so ordinary Rust changes stay in
+# supervisor.yml; the Containerfile itself (and Renovate's base-image and
+# version PRs, which touch it) first builds here instead of at tag time.
+name: Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - Containerfile
+      - .containerignore
+      - .github/workflows/image.yml
+  pull_request:
+    paths:
+      - Containerfile
+      - .containerignore
+      - .github/workflows/image.yml
+
+# Superseded runs on the same branch don't need to finish.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build and smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The supervisor suite cannot see production-specific code paths:
+      # vaultwarden's source build, the binary downloads, the runtime
+      # assembly. Build the real image (single arch is enough for routine
+      # checks; the full multi-arch build stays in publish).
+      - name: Build the container image
+        run: |
+          podman build \
+            --format docker \
+            --platform linux/amd64 \
+            --tag pr-check:ci \
+            .
+
+      - name: Verify the healthcheck survived the build
+        run: |
+          test "$(podman inspect pr-check:ci \
+            --format '{{json .HealthCheck.Test}}')" != "null"
+
+      # Smoke: the supervisor must run inside the runtime image (dynamic
+      # linking and baked paths intact) and fail fast with no gate to
+      # probe — exit 1, not a crash.
+      - name: Smoke test the entrypoint
+        run: |
+          podman run --rm --network none --entrypoint /entrypoint pr-check:ci --healthcheck \
+            && exit 1 || test $? -eq 1

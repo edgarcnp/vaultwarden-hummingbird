@@ -33,6 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The release tag names the supervisor version it ships: a pushed
+      # tag must match supervisor/Cargo.toml, never drift from it.
+      - name: Verify the tag matches the supervisor version
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' supervisor/Cargo.toml)
+          test "$tag" = "$version" || {
+            echo "tag v$tag does not match supervisor version $version" >&2
+            exit 1
+          }
+
       # ghcr.io rejects uppercase in image paths; repository names can
       # carry it.
       - name: Normalize the image reference
@@ -64,7 +76,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.push-latest.outputs.digest }}
+      digest: ${{ steps.push-manifest.outputs.digest }}
       image: ${{ steps.image.outputs.image }}
     steps:
       - name: Normalize the image reference
@@ -77,8 +89,8 @@ jobs:
       - name: Podman login to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Push the manifest list as :latest
-        id: push-latest
+      - name: Push the manifest list
+        id: push-manifest
         run: |
           # Strip the ref prefix so both `v1.2.3` and `main` collapse to a
           # usable tag (`v1.2.3` on tag pushes, `main` on manual runs).
@@ -87,9 +99,13 @@ jobs:
           for arch in amd64 arm64; do
             podman manifest add "$IMAGE:${VER}" "docker://$IMAGE:${GITHUB_REF_NAME}-${arch}"
           done
-          podman manifest push "$IMAGE:${VER}" "docker://$IMAGE:${VER}"
-          podman push --digestfile /tmp/digest.txt "$IMAGE:${VER}" "docker://$IMAGE:latest" >/dev/null
+          podman manifest push --digestfile /tmp/digest.txt "$IMAGE:${VER}" "docker://$IMAGE:${VER}"
           echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
+          # :latest moves only for a release tag: a manual dispatch must
+          # never silently redirect the public tag to a branch build.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            podman push "$IMAGE:${VER}" "docker://$IMAGE:latest"
+          fi
 
   provenance:
     name: provenance
@@ -115,6 +131,60 @@ jobs:
         with:
           subject-name: ${{ needs.manifest.outputs.image }}
           # push-to-registry requires the exact digest of the pushed
-          # subject: the manifest list pushed as :latest above.
+          # subject: the manifest list the manifest job published.
           subject-digest: ${{ needs.manifest.outputs.digest }}
+          push-to-registry: true
+
+  sbom:
+    name: sbom
+    needs: manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+      packages: write
+    steps:
+      # The SBOM describes the released amd64 image, resolved by the
+      # manifest digest (multi-arch builds share the layer set covered
+      # here for the platform the scan picks).
+      - name: Pull the released image by digest
+        run: |
+          IMAGE="${{ needs.manifest.outputs.image }}"
+          DIGEST="${{ needs.manifest.outputs.digest }}"
+          podman pull --platform linux/amd64 "docker://${IMAGE}@${DIGEST}"
+          podman tag "${IMAGE}@${DIGEST}" sbom-scan:local
+          podman save --format oci-archive -o /tmp/image.tar sbom-scan:local
+
+      # syft is fetched from its pinned release and verified against the
+      # digest recorded here; never install it from a floating source.
+      - name: Install syft (pinned)
+        run: |
+          curl -fsSL --max-time 300 --retry 3 -o /tmp/syft.tgz \
+            "https://github.com/anchore/syft/releases/download/v1.52.0/syft_1.52.0_linux_amd64.tar.gz"
+          echo "caeedb81fb0491615f1ebd1761e4145d41ee86dd2cc7bf80669f9f5ad9d6133d  /tmp/syft.tgz" | sha256sum -c -
+          tar -xzf /tmp/syft.tgz -C /tmp syft
+
+      - name: Generate the SPDX SBOM
+        run: /tmp/syft /tmp/image.tar -o spdx-json=sbom.spdx.json
+
+      - name: Upload the SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-spdx-${{ github.ref_name }}
+          path: sbom.spdx.json
+          if-no-files-found: error
+
+      # push-to-registry reads credentials from the Docker config, which
+      # podman login does not populate; the attestation is bound to the
+      # exact manifest digest, so the SBOM cannot be detached from it.
+      - name: Docker login to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Attest the SBOM for the released digest
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ needs.manifest.outputs.image }}
+          subject-digest: ${{ needs.manifest.outputs.digest }}
+          sbom-path: sbom.spdx.json
           push-to-registry: true
