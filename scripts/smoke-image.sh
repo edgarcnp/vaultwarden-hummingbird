@@ -40,7 +40,7 @@ user={{.User}}
 healthcheck={{.HealthCheck.Test}}' | sed 's/^/      /'
 USER_ID=$(podman image inspect "$IMAGE" --format '{{.User}}')
 CHECK=$(podman image inspect "$IMAGE" --format '{{json .HealthCheck.Test}}')
-if [ "$USER_ID" = "65532:0" ] && [ "$CHECK" != "null" ]; then
+if [ "$USER_ID" = "65532:0" ] && [ "$CHECK" = '["CMD","/entrypoint","--healthcheck"]' ]; then
   echo "PASS  image-shape (non-root user, exec healthcheck present)"
   PASS=$((PASS + 1))
 else
@@ -73,10 +73,12 @@ run unknown-supervisor-key 1 "SUPERVISOR_DB_BACKUP_RESTOR" -- \
 run relative-state 1 "must be an absolute path" -- \
   -e SUPERVISOR_ENV_FILE=/config/.env -v "$WORK/relative.env:/config/.env:ro,z" "$IMAGE"
 
-# 6. With a bogus auth key and no network, tailscaled must come up, the CLI
-#    must fail, and the supervisor must refuse to run the vault (fail
-#    closed) rather than keep a vault nobody can reach.
-run tailscale-fails-closed 1 "refusing to run the vault without Tailscale" -- \
+# 6. With a bogus auth key and no network, tailscaled must come up and the
+#    CLI must actually run and fail ("authenticating tailscale node..." is
+#    logged only after the daemon socket is ready), and the supervisor must
+#    refuse to run the vault (fail closed) rather than keep a vault nobody
+#    can reach.
+run tailscale-fails-closed 1 "authenticating tailscale node" -- \
   -e SUPERVISOR_ENV_FILE=/config/.env -v "$WORK/fake-auth.env:/config/.env:ro,z" "$IMAGE"
 
 echo

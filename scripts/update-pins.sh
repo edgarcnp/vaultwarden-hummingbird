@@ -22,6 +22,12 @@ arg() { # arg NAME -> the version pinned by `ARG NAME=...`
 
 set_pin() { # set_pin NAME digest - rewrite the pin, report only on change
   local name=$1 digest=$2 current
+  # Belt and braces: nothing but a real sha256 may reach the Containerfile,
+  # whatever a future caller passes.
+  if ! [[ $digest =~ ^[0-9a-f]{64}$ ]]; then
+    echo "update-pins: refusing a non-sha256 digest for $name: '${digest:-<empty>}'" >&2
+    return 1
+  fi
   current=$(sed -n "s/^ARG $name=//p" "$containerfile")
   if [ "$current" = "$digest" ]; then
     echo "$name up to date"
@@ -34,10 +40,16 @@ set_pin() { # set_pin NAME digest - rewrite the pin, report only on change
 fetch_digest() { # fetch_digest URL -> the artifact's sha256
   local url=$1 file
   file=$(mktemp)
-  # The temp file is removed on every return path, including a failed
-  # download under set -e.
+  # The temp file is removed on every return path.
   trap 'rm -f "$file"' RETURN
-  curl -fsSL --max-time 300 --retry 3 --retry-delay 2 -o "$file" "$url"
+  # An explicit check, not set -e: this function runs inside `$( )`, and
+  # bash unsets errexit in command-substitution subshells by default. A
+  # failed download must fail here — sha256sum over the empty temp file
+  # would otherwise become the new pin.
+  if ! curl -fsSL --max-time 300 --retry 3 --retry-delay 2 -o "$file" "$url"; then
+    echo "update-pins: download failed: $url" >&2
+    return 1
+  fi
   sha256sum "$file" | cut -d' ' -f1
 }
 

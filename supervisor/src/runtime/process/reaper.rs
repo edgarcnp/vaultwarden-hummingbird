@@ -148,13 +148,20 @@ fn tick() {
     let fds: Vec<_> = entries.iter().map(|(_, fd)| fd.as_raw_fd()).collect();
     for i in PidFd::ready_indices(&fds, POLL) {
         let (pid, _) = &entries[i];
-        // Targeted wait, WNOHANG: every waitpid call site is
-        // non-blocking, so a spurious poll event can never stall the
-        // reaper. ECHILD = already reaped by an earlier pass here
-        // (defensive only; delivery always consumes the registry entry).
+        // The registry lock is held across the targeted waitpid and the
+        // entry's removal: while a pid is registered, it cannot have been
+        // reaped, so `signal_child` can treat registration as the liveness
+        // proof (pid reuse impossible). WNOHANG keeps the hold brief.
+        // ECHILD = already reaped by an earlier pass here (defensive only;
+        // delivery always consumes the registry entry).
+        let mut reg = registry_lock();
         match waitpid(NixPid::from_raw(*pid), Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {}
-            Ok(status) => deliver_reaped(*pid, status),
+            Ok(status) => {
+                let waiter = reg.remove(pid).map(|e| e.waiter);
+                drop(reg);
+                deliver_waiter(*pid, status, waiter);
+            }
             Err(Errno::ECHILD) => {}
             Err(e) => log::err(&format!("reaper: waitpid({pid}) failed: {e}")),
         }
@@ -182,18 +189,6 @@ fn tick() {
             }
         }
     }
-}
-
-/// A child was just reaped: route its status to the registered waiter —
-/// consuming the registry entry, so both reaping paths (poll, sweep)
-/// leak nothing and cannot double-deliver — or log it as a stray.
-fn deliver_reaped(pid: Pid, status: WaitStatus) {
-    let waiter = registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&pid)
-        .map(|e| e.waiter);
-    deliver_waiter(pid, status, waiter);
 }
 
 /// Shared tail of both delivery paths; the registry entry is already

@@ -63,19 +63,28 @@ pub(super) fn serve_with(listener: TcpListener, vault: Option<std::net::SocketAd
             Ok(s) => match limiter.try_acquire() {
                 Some(permit) => {
                     let live = Arc::clone(&live);
-                    drop(std::thread::spawn(move || {
+                    // A failed spawn drops the closure, closing the
+                    // connection and releasing the permit; the process
+                    // must survive thread exhaustion to keep answering.
+                    if let Err(e) = std::thread::Builder::new().spawn(move || {
                         handle(s, &live);
                         drop(permit);
-                    }));
+                    }) {
+                        log::err(&format!(
+                            "gatekeeper: cannot spawn a handler ({e}); connection refused"
+                        ));
+                        std::thread::sleep(ACCEPT_BACKOFF);
+                    }
                 }
                 None => reject(s),
             },
             Err(e) => {
-                // Descriptor exhaustion leaves the listener readable, so
+                // A failure the next accept will not clear (descriptor or
+                // memory exhaustion) leaves the listener readable, so
                 // continuing would spin the accept loop: back off briefly.
                 // Per-connection failures (a reset before accept) need no
                 // pause.
-                if is_exhaustion(&e) {
+                if !is_per_connection(&e) {
                     std::thread::sleep(ACCEPT_BACKOFF);
                 }
                 continue;
@@ -96,14 +105,18 @@ pub fn describe(exposed: &str, vault: &str) {
 /// Same wire shape as [`VAULT_DOWN`] — to a client, overload and a down
 /// vault are the same verdict.
 fn reject(mut s: TcpStream) {
-    let _ = s.write_all(
-        format!(
-            "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            VAULT_DOWN.0, VAULT_DOWN.1
-        )
-        .as_bytes(),
-    );
+    respond(&mut s, VAULT_DOWN.0, VAULT_DOWN.1);
     let _ = s.shutdown(std::net::Shutdown::Both);
+}
+
+/// The single place response bytes are produced: a canned status line, no
+/// body, every connection closed. Both the denial path and the handler use
+/// it, so the two-response invariant is auditable at one line.
+fn respond(stream: &mut TcpStream, code: &str, text: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {code} {text}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
 }
 
 /// One request, one response, connection closed. Only the first request
@@ -169,10 +182,7 @@ pub(super) fn handle_with(mut stream: TcpStream, live: &Liveness, budget: Durati
     } else {
         VAULT_DOWN
     };
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {code} {text}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    );
+    respond(&mut stream, code, text);
 }
 
 /// First request line as trimmed UTF-8 (empty on undecodable input).
@@ -186,13 +196,14 @@ fn line_of(bytes: &[u8]) -> String {
         .to_string()
 }
 
-/// Whether an accept error means descriptor exhaustion (EMFILE/ENFILE)
-/// rather than a per-connection failure like ECONNABORTED. Exhaustion
-/// keeps the listener readable, so the caller must back off.
-pub(super) fn is_exhaustion(e: &std::io::Error) -> bool {
+/// Whether an accept error is per-connection (the next accept is
+/// unaffected) rather than a persistent condition that needs a backoff.
+/// EMFILE/ENFILE/ENOMEM/ENOBUFS keep the listener readable, so pausing is
+/// what stops the loop from spinning on them.
+pub(super) fn is_per_connection(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
-        Some(code) if code == nix::libc::EMFILE || code == nix::libc::ENFILE
+        Some(code) if code == nix::libc::ECONNABORTED || code == nix::libc::EINTR
     )
 }
 

@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - Containerfile
+      - scripts/update-pins.sh
   schedule:
     - cron: "0 5 * * 1" # weekly, Monday 05:00 UTC
 

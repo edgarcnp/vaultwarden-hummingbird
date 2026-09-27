@@ -13,14 +13,16 @@ use super::schema;
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
-    /// tailscaled state file (under the writable data volume)
+    /// tailscaled state file (under the writable data volume; `mem:` is
+    /// Tailscale's in-memory state for fully ephemeral deployments)
     pub state: String,
     /// LocalAPI unix socket (writable, non-volume path)
     pub socket: String,
     /// exposed (gatekeeper) port: `VAULTWARDEN_PORT`, process env before
-    /// dotenv file, then 8080. The legacy `VAULTWARDEN_ROCKET_PORT` and
-    /// bare `ROCKET_PORT` spellings refuse the boot — see
-    /// [`Self::from_env`].
+    /// dotenv file, then 8080. The legacy `VAULTWARDEN_ROCKET_PORT` (env
+    /// or file) and a bare `ROCKET_PORT` in the dotenv file refuse the
+    /// boot — see [`Self::from_env`]; an ambient bare `ROCKET_PORT` is
+    /// filtered, not fatal.
     pub port: String,
     /// vaultwarden's port (`port + 1`, loopback-only). None = exposed port
     /// is 65535: boot must fail closed.
@@ -53,8 +55,9 @@ impl Config {
     /// strict (see [`FileConfig`]): only the three namespaces are
     /// accepted and any unrecognized key refuses the boot. The
     /// gatekeeper port has ONE spelling, `VAULTWARDEN_PORT` — the legacy
-    /// `VAULTWARDEN_ROCKET_PORT` alias and a bare `ROCKET_PORT` refuse
-    /// the boot with a message naming the valid spelling. vaultwarden
+    /// `VAULTWARDEN_ROCKET_PORT` alias and a bare `ROCKET_PORT` in the
+    /// dotenv file refuse the boot with a message naming the valid
+    /// spelling (ambient values are filtered, not rejected). vaultwarden
     /// keys (incl. the DB URL) resolve env first, so the supervisor
     /// always sees the same values the child gets
     /// ([`crate::runtime::services::vaultwarden`] applies file, then
@@ -151,7 +154,7 @@ impl Config {
                 .unwrap_or_default()
         };
 
-        let sync = resolve_sync(&knob);
+        let mut sync = resolve_sync(&knob);
 
         // The vault's DB URL: env wins over file — the same precedence the
         // child env applies, so dumps and restores always reach the same DB
@@ -177,14 +180,29 @@ impl Config {
 
         // The state file anchors the node identity and the `--statedir`
         // derived from it; a relative path has no stable meaning for a
-        // PID 1 (and would yield an empty statedir).
+        // PID 1 (and would yield an empty statedir). `mem:` is Tailscale's
+        // in-memory state, the documented fully-ephemeral mode.
         let state = value("TAILSCALE_STATE_FILE");
-        if !state.starts_with('/') {
+        if state != "mem:" && !state.starts_with('/') {
             log::err(&format!(
-                "config: TAILSCALE_STATE_FILE '{}' must be an absolute path; refusing to start",
+                "config: TAILSCALE_STATE_FILE '{}' must be an absolute path (or 'mem:'); \
+                 refusing to start",
                 log::sanitize(&state)
             ));
             return None;
+        }
+        // The identity file must ride inside the sync root; anything else
+        // cannot be covered by state sync, so say so rather than silently
+        // losing the node on the next redeploy.
+        if let Some(sync) = sync.as_mut() {
+            sync.set_state_file(&state);
+            if sync.state_file.is_none() && state != "mem:" {
+                log::err(&format!(
+                    "config: TAILSCALE_STATE_FILE '{}' is outside /data; SUPERVISOR_S3_* \
+                     state sync cannot carry the node identity",
+                    log::sanitize(&state)
+                ));
+            }
         }
 
         Some(Self {

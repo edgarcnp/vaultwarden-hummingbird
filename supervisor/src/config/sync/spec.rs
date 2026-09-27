@@ -20,6 +20,12 @@ pub struct SyncConfig {
     pub target: RemoteSpec,
     /// periodic push cadence (0 disables periodic pushes)
     pub interval: Duration,
+    /// The resolved tailscaled state file as a `/data`-relative name when it
+    /// lives directly under `/data` (so it is inside the sync root).
+    /// `None` = the identity file cannot be part of the durable set (a
+    /// `mem:` state, or a path outside `/data`); the default
+    /// `tailscaled.state` name is still accepted by the predicate.
+    pub state_file: Option<String>,
 }
 
 impl SyncConfig {
@@ -45,7 +51,16 @@ impl SyncConfig {
             remote,
             target,
             interval,
+            state_file: None,
         })
+    }
+
+    /// Point the sync at the configured state file, so a custom
+    /// `TAILSCALE_STATE_FILE` under `/data` is still part of the durable
+    /// set. A path outside `/data` (or `mem:`) stays unsynced — the caller
+    /// logs that it cannot be covered.
+    pub fn set_state_file(&mut self, state: &str) {
+        self.state_file = state.strip_prefix("/data/").map(str::to_string);
     }
 
     /// The sync's bucket-relative key prefix (empty, or ending in `/`).

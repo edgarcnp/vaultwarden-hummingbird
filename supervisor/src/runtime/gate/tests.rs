@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::liveness::Liveness;
 use super::probe::fake_vault;
-use super::server::{bind, handle, handle_with, is_exhaustion, serve_with};
+use super::server::{bind, handle, handle_with, is_per_connection, serve_with};
 
 /// A vaultwarden stand-in that answers 200 forever and counts requests
 /// (the TTL-window and admission tests need to observe probe fan-out).
@@ -68,9 +68,10 @@ fn alive_answers_200_when_vault_is_healthy() {
 fn alive_answers_503_when_vault_is_down_or_unhealthy() {
     for vault in [None, Some(fake_vault("500 Internal Server Error"))] {
         let resp = roundtrip(b"GET /alive HTTP/1.1\r\n\r\n", vault);
-        assert!(
-            resp.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
-            "{vault:?} -> {resp}"
+        assert_eq!(
+            resp,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "{vault:?}"
         );
     }
 }
@@ -149,9 +150,9 @@ fn api_paths_answer_403() {
         b"GET /alive/ HTTP/1.1\r\n\r\n",
     ] {
         let resp = roundtrip(req, None);
-        assert!(
-            resp.starts_with("HTTP/1.1 403 Forbidden\r\n"),
-            "{req:?} -> {resp}"
+        assert_eq!(
+            resp, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "{req:?}"
         );
     }
 }
@@ -309,18 +310,26 @@ fn admission_bounds_concurrent_handlers() {
     assert_eq!(hits.load(Ordering::Relaxed), 1);
 }
 
-/// Descriptor exhaustion is told apart from per-connection accept errors:
-/// only exhaustion needs the backoff that keeps the accept loop from
-/// spinning (the listener stays readable while EMFILE persists).
+/// Only per-connection accept errors skip the backoff; anything else
+/// (EMFILE, ENFILE, ENOMEM, ...) keeps the listener readable and would
+/// spin the accept loop without a pause.
 #[test]
-fn accept_exhaustion_is_told_apart_from_connection_errors() {
-    assert!(is_exhaustion(&std::io::Error::from_raw_os_error(
-        nix::libc::EMFILE
-    )));
-    assert!(is_exhaustion(&std::io::Error::from_raw_os_error(
-        nix::libc::ENFILE
-    )));
-    assert!(!is_exhaustion(&std::io::Error::from_raw_os_error(
-        nix::libc::ECONNABORTED
-    )));
+fn accept_backoff_is_told_apart_from_per_connection_errors() {
+    for code in [
+        nix::libc::EMFILE,
+        nix::libc::ENFILE,
+        nix::libc::ENOMEM,
+        nix::libc::ENOBUFS,
+    ] {
+        assert!(
+            !is_per_connection(&std::io::Error::from_raw_os_error(code)),
+            "errno {code} must back off"
+        );
+    }
+    for code in [nix::libc::ECONNABORTED, nix::libc::EINTR] {
+        assert!(
+            is_per_connection(&std::io::Error::from_raw_os_error(code)),
+            "errno {code} is per-connection"
+        );
+    }
 }

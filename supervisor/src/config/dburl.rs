@@ -7,24 +7,68 @@
 //! other scheme fails closed — dumps and restores must reach the same DB
 //! the vault uses.
 //!
-//! Vaultwarden strips exactly the `sqlite://` prefix and uses the rest
-//! *verbatim* as the file path (no percent-decoding), so the supervisor
-//! must not decode either — `sqlite:///data/my%20db.sqlite3` names a file
-//! with a literal `%20` in it.
+//! `sqlite://` URLs go to diesel, which rewrites the prefix to `file:` and
+//! opens with `SQLITE_OPEN_URI` (diesel 2.3.11
+//! `sqlite/connection/raw.rs::RawConnection::establish`); SQLite then ends
+//! the path at the first `?` (query) or `#` (fragment), percent-decodes
+//! `%HH` once, and truncates at a decoded NUL. The supervisor mirrors that
+//! exactly, because dumping a path the vault never opens is worse than not
+//! dumping at all. Scheme-less values are not URIs and stay verbatim.
 
-/// Parse the sqlite file path out of a database URL. `None` = empty or a
-/// foreign scheme (postgres/mysql/...) the pinned vault cannot use.
+/// Parse the sqlite file path out of a database URL. `None` = empty, a
+/// foreign scheme (postgres/mysql/...), or a URI path that cannot be a
+/// Rust file path (non-UTF-8) — in every case there is no DB to back up.
 pub fn sqlite_path(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
     let path = match raw.split_once("://") {
-        Some(("sqlite", rest)) => rest,
+        Some(("sqlite", rest)) => sqlite_uri_path(rest),
         Some(_) => return None,
-        None => raw,
+        None => raw.to_string(),
     };
-    (!path.is_empty()).then(|| path.to_string())
+    (!path.is_empty()).then_some(path)
+}
+
+/// The path SQLite opens for diesel's `file:<rest>` URI: cut at the first
+/// `?` or `#`, percent-decode once, truncate at NUL. Malformed escapes are
+/// kept literally, as SQLite keeps them.
+fn sqlite_uri_path(rest: &str) -> String {
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let bytes = &rest.as_bytes()[..end];
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            let decoded = hi * 16 + lo;
+            if decoded == 0 {
+                break; // a decoded NUL truncates the path, like SQLite
+            }
+            out.push(decoded);
+            i += 3;
+            continue;
+        }
+        if b == 0 {
+            break;
+        }
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// The scheme of a database URL (for secret-free logs).
@@ -41,7 +85,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sqlite_urls_give_the_path() {
+    fn sqlite_urls_give_the_decoded_uri_path() {
         assert_eq!(
             sqlite_path("sqlite:///data/db.sqlite3").as_deref(),
             Some("/data/db.sqlite3")
@@ -51,11 +95,42 @@ mod tests {
             sqlite_path("sqlite://data/db.sqlite3").as_deref(),
             Some("data/db.sqlite3")
         );
-        // vaultwarden uses the URL's remainder verbatim (no
-        // percent-decoding), so the supervisor must not decode either
+        // diesel opens `file:` + rest with SQLITE_OPEN_URI, so SQLite
+        // decodes percent-escapes exactly once
         assert_eq!(
             sqlite_path("sqlite:///data/my%20db.sqlite3").as_deref(),
-            Some("/data/my%20db.sqlite3")
+            Some("/data/my db.sqlite3")
+        );
+        assert_eq!(
+            sqlite_path("sqlite:///data/pct%2520.db").as_deref(),
+            Some("/data/pct%20.db")
+        );
+        assert_eq!(
+            sqlite_path("sqlite:///data/plus+name.db").as_deref(),
+            Some("/data/plus+name.db")
+        );
+        // the query and fragment parts are not part of the path
+        assert_eq!(
+            sqlite_path("sqlite:///data/db.sqlite3?mode=ro").as_deref(),
+            Some("/data/db.sqlite3")
+        );
+        assert_eq!(
+            sqlite_path("sqlite:///data/db.sqlite3#frag").as_deref(),
+            Some("/data/db.sqlite3")
+        );
+        // malformed escapes are kept literally (as SQLite keeps them)
+        assert_eq!(
+            sqlite_path("sqlite:///data/pct%ZZ.db").as_deref(),
+            Some("/data/pct%ZZ.db")
+        );
+        assert_eq!(
+            sqlite_path("sqlite:///data/trail%.db").as_deref(),
+            Some("/data/trail%.db")
+        );
+        // a decoded NUL truncates the path
+        assert_eq!(
+            sqlite_path("sqlite:///data/a%00b.db").as_deref(),
+            Some("/data/a")
         );
         // a bare scheme names an empty path: nothing to back up
         assert_eq!(sqlite_path("sqlite://"), None);
@@ -75,6 +150,11 @@ mod tests {
         assert_eq!(
             sqlite_path("data/db.sqlite3").as_deref(),
             Some("data/db.sqlite3")
+        );
+        // no `file:` prefix means no URI decoding (verified against sqlite3)
+        assert_eq!(
+            sqlite_path("data/my%20db.sqlite3").as_deref(),
+            Some("data/my%20db.sqlite3")
         );
     }
 

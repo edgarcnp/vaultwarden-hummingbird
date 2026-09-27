@@ -21,12 +21,21 @@ const TREES: [(&str, &str); 3] = [
 ];
 
 /// Whether a bucket-relative path is inside the durable set. Traversal
-/// and absolute paths never pass, in any position.
-pub(super) fn is_synced_file(rel: &str) -> bool {
-    if rel.contains("..") || rel.starts_with('/') {
+/// and absolute paths never pass, in any position; neither does a `.part`
+/// staging file left by an interrupted download (excluded from both
+/// directions, so junk can neither be uploaded nor planted). The
+/// configured state file (a /data-relative name) is always inside the set;
+/// the default `tailscaled.state` spelling stays accepted even when a
+/// custom path is configured, so an identity synced by an earlier
+/// deployment remains restorable.
+pub(super) fn is_synced_file(rel: &str, state_file: Option<&str>) -> bool {
+    if rel.contains("..") || rel.starts_with('/') || rel.ends_with(".part") {
         return false;
     }
-    if rel == "tailscaled.state" || (rel.starts_with("rsa_key") && !rel.contains('/')) {
+    if rel == "tailscaled.state"
+        || state_file == Some(rel)
+        || (rel.starts_with("rsa_key") && !rel.contains('/'))
+    {
         return true;
     }
     match rel.split_once('/') {
@@ -36,10 +45,16 @@ pub(super) fn is_synced_file(rel: &str) -> bool {
 }
 
 /// The /data files in the durable set, as bucket-relative paths.
-pub(super) fn local_synced_files() -> Vec<String> {
+pub(super) fn local_synced_files(state_file: Option<&str>) -> Vec<String> {
     let mut files = Vec::new();
     if Path::new("/data/tailscaled.state").is_file() {
         files.push("tailscaled.state".to_string());
+    }
+    if let Some(state) = state_file
+        && state != "tailscaled.state"
+        && Path::new("/data").join(state).is_file()
+    {
+        files.push(state.to_string());
     }
     if let Ok(entries) = std::fs::read_dir("/data") {
         for entry in entries.flatten() {
@@ -53,14 +68,20 @@ pub(super) fn local_synced_files() -> Vec<String> {
         }
     }
     for (abs, rel) in TREES {
-        walk_dir(Path::new(abs), rel, &mut |path| files.push(path));
+        walk_dir(Path::new(abs), rel, state_file, &mut |path| {
+            files.push(path)
+        });
     }
+    // The invariant both directions share: what push may upload is exactly
+    // what pull may write.
+    files.retain(|file| is_synced_file(file, state_file));
     files.sort();
     files
 }
 
-/// Recursively collect files under `dir`, as paths relative to /data.
-fn walk_dir(dir: &Path, rel: &str, out: &mut impl FnMut(String)) {
+/// Recursively collect files under `dir`, as paths relative to /data that
+/// pass the durable-set predicate.
+fn walk_dir(dir: &Path, rel: &str, state_file: Option<&str>, out: &mut impl FnMut(String)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -69,8 +90,8 @@ fn walk_dir(dir: &Path, rel: &str, out: &mut impl FnMut(String)) {
         let Some(name) = name.to_str() else { continue };
         let path_rel = format!("{rel}/{name}");
         if entry.path().is_dir() {
-            walk_dir(&entry.path(), &path_rel, out);
-        } else {
+            walk_dir(&entry.path(), &path_rel, state_file, out);
+        } else if is_synced_file(&path_rel, state_file) {
             out(path_rel);
         }
     }
@@ -82,28 +103,38 @@ mod tests {
 
     #[test]
     fn synced_set_is_enforced_in_both_directions() {
-        assert!(is_synced_file("tailscaled.state"));
-        assert!(is_synced_file("rsa_key"));
-        assert!(is_synced_file("rsa_key.foo.bar"));
-        assert!(is_synced_file("certs/key.crt"));
-        assert!(is_synced_file("certs/sub/key.crt"));
-        assert!(is_synced_file("attachments/8f14e45f-uuid"));
-        assert!(is_synced_file("attachments/sub/uuid"));
-        assert!(is_synced_file("sends/uuid"));
-        assert!(is_synced_file("sends/sub/uuid"));
+        let synced = |rel: &str| is_synced_file(rel, None);
+        assert!(synced("tailscaled.state"));
+        assert!(synced("rsa_key"));
+        assert!(synced("rsa_key.foo.bar"));
+        assert!(synced("certs/key.crt"));
+        assert!(synced("certs/sub/key.crt"));
+        assert!(synced("attachments/8f14e45f-uuid"));
+        assert!(synced("attachments/sub/uuid"));
+        assert!(synced("sends/uuid"));
+        assert!(synced("sends/sub/uuid"));
+        // `.part` staging leftovers are never part of the set
+        assert!(!synced("attachments/8f14e45f-uuid.part"));
+        assert!(!synced("certs/key.crt.part"));
+        assert!(!synced("sends/uuid.part"));
         // everything else is outside the set
-        assert!(!is_synced_file("db.sqlite3"));
-        assert!(!is_synced_file("certs"));
-        assert!(!is_synced_file("attachments"));
-        assert!(!is_synced_file("sends"));
-        assert!(!is_synced_file("icon_cache/x"));
-        assert!(!is_synced_file("db-backups/x"));
-        assert!(!is_synced_file("tailscaled.state.bak"));
+        assert!(!synced("db.sqlite3"));
+        assert!(!synced("certs"));
+        assert!(!synced("attachments"));
+        assert!(!synced("sends"));
+        assert!(!synced("icon_cache/x"));
+        assert!(!synced("db-backups/x"));
+        assert!(!synced("tailscaled.state.bak"));
         // traversal and absolute paths never pass, in any position
-        assert!(!is_synced_file("../tailscaled.state"));
-        assert!(!is_synced_file("certs/../../etc/passwd"));
-        assert!(!is_synced_file("attachments/../../etc/passwd"));
-        assert!(!is_synced_file("/etc/passwd"));
+        assert!(!synced("../tailscaled.state"));
+        assert!(!synced("certs/../../etc/passwd"));
+        assert!(!synced("attachments/../../etc/passwd"));
+        assert!(!synced("/etc/passwd"));
+        // a custom configured state file is inside the set (and only then)
+        assert!(is_synced_file("node.state", Some("node.state")));
+        assert!(is_synced_file("sub/x.state", Some("sub/x.state")));
+        assert!(!is_synced_file("node.state", None));
+        assert!(!is_synced_file("other.state", Some("node.state")));
     }
 
     /// The push filter only treats regular files as synced files; a
@@ -120,6 +151,7 @@ mod tests {
         std::fs::write(dir.join("certs/example.com.crt"), b"x").unwrap();
         std::fs::write(dir.join("certs/sub/deep.crt"), b"x").unwrap();
         std::fs::write(dir.join("attachments/uuid-1"), b"x").unwrap();
+        std::fs::write(dir.join("attachments/uuid-1.part"), b"x").unwrap();
         std::fs::write(dir.join("sends/sub/uuid-2"), b"x").unwrap();
         std::fs::write(dir.join("db.sqlite3"), b"x").unwrap();
         // temp dir stands in for /data via the walker's inputs is not
@@ -127,7 +159,7 @@ mod tests {
         // top-level predicate instead.
         let mut found = Vec::new();
         for name in ["certs", "attachments", "sends"] {
-            walk_dir(&dir.join(name), name, &mut |path| found.push(path));
+            walk_dir(&dir.join(name), name, None, &mut |path| found.push(path));
         }
         found.sort();
         assert_eq!(
@@ -139,8 +171,8 @@ mod tests {
                 "sends/sub/uuid-2",
             ]
         );
-        assert!(found.iter().all(|f| is_synced_file(f)));
-        assert!(!is_synced_file("db.sqlite3"));
+        assert!(found.iter().all(|f| is_synced_file(f, None)));
+        assert!(!is_synced_file("db.sqlite3", None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

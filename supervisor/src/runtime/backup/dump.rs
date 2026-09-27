@@ -96,6 +96,16 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     let staged = format!("{}/{}-{ts}.{}", cfg.staging, cfg.db_label(), cfg.db_ext());
     let name = object_name(cfg, &ts);
 
+    // Allocate before anything is staged: a saturated generation space
+    // must refuse the push, never wrap the manifest back to generation 0.
+    let Some(generation) = manifest.next_generation() else {
+        log::err(
+            "db backup: generation space is exhausted; refusing to push — clear the \
+             bucket to start a new generation",
+        );
+        return;
+    };
+
     if !sweep_staging(&cfg.staging) {
         return;
     }
@@ -118,8 +128,11 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     }
     let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
     // Skip a redundant upload only while this lineage still owns the
-    // newest generation: if that object was deleted externally, the push
-    // below heals continuity instead of skipping over the gap.
+    // newest generation: a stale or unproven lineage must push, so a gap
+    // is never skipped over. (An externally deleted newest object is not
+    // detected while the dump stays byte-identical; the next changed dump
+    // replaces it, and restore falls back to the next older entry until
+    // then.)
     if upload_is_redundant(
         known,
         manifest.latest(),
@@ -138,7 +151,6 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         let _ = std::fs::remove_file(&staged);
         return;
     }
-    let generation = manifest.next_generation();
     manifest.push(Entry {
         generation,
         name: name.clone(),

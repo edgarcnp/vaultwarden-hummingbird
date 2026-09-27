@@ -1,6 +1,9 @@
 //! Unix-socket readiness probing for the tailscaled LocalAPI.
 
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use super::wait_until;
@@ -18,14 +21,29 @@ fn unix_socket_alive(path: &str) -> bool {
 /// Poll the LocalAPI socket until tailscaled is listening, or until
 /// timeout/abort (`None` covers both; the caller distinguishes the two
 /// outcomes via its own stop flag).
+///
+/// The blocking connect runs on a detached worker, and the caller waits on
+/// its verdict: a full listen backlog makes `connect()` block, and without
+/// the separation that single call could outlive the timeout. The worker
+/// checks the stop flag between attempts, so it exits (at the latest after
+/// one blocked connect returns) once the caller has given up.
 pub fn wait_daemon(socket: &str, timeout: Duration, abort: impl Fn() -> bool) -> bool {
-    wait_until(
-        || unix_socket_alive(socket).then_some(()),
-        timeout,
-        abort,
-        TICK,
-    )
-    .is_some()
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let path = socket.to_string();
+    drop(std::thread::spawn(move || {
+        while !worker_stop.load(Ordering::Relaxed) {
+            if unix_socket_alive(&path) {
+                let _ = tx.send(());
+                return;
+            }
+            std::thread::sleep(TICK);
+        }
+    }));
+    let ready = wait_until(|| rx.try_recv().ok(), timeout, abort, TICK);
+    stop.store(true, Ordering::Relaxed);
+    ready.is_some()
 }
 
 #[cfg(test)]

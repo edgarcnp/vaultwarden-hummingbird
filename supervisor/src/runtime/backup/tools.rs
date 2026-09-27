@@ -42,7 +42,15 @@ pub(crate) fn store_manifest(
     manifest: &Manifest,
     abort: &impl Fn() -> bool,
 ) -> anyhow::Result<()> {
-    client.put_bytes(&manifest_key(cfg), manifest.render().as_bytes(), abort)
+    let rendered = manifest.render();
+    // Never write a manifest this process could not read back: the read
+    // path caps at MAX_MANIFEST_BYTES, and a larger one would jam every
+    // later cycle. KEEP is bounded at resolution; this is the backstop.
+    anyhow::ensure!(
+        rendered.len() as u64 <= MAX_MANIFEST_BYTES,
+        "refusing to write a manifest over the {MAX_MANIFEST_BYTES}-byte read cap"
+    );
+    client.put_bytes(&manifest_key(cfg), rendered.as_bytes(), abort)
 }
 
 /// The legacy dump listing (`<prefix><label>-*.<ext>`, name + size,

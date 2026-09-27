@@ -99,7 +99,8 @@ impl FileConfig {
                 // offset into the value.
                 Err(dotenvy::Error::LineParse(_, _)) => {
                     log::err(&format!(
-                        "config: dotenv: invalid entry on logical line {}; ignored",
+                        "config: dotenv: invalid entry #{} (blank/comment lines excluded); \
+                         ignored",
                         i + 1
                     ));
                 }

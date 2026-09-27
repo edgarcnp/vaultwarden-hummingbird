@@ -14,6 +14,7 @@ on:
       - Containerfile
       - .containerignore
       - .github/workflows/image.yml
+      - scripts/smoke-image.sh
 
 # Superseded runs on the same branch don't need to finish.
 concurrency:

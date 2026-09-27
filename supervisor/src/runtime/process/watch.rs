@@ -73,7 +73,17 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         // the cadence but still flushes at shutdown.
         tasks.push(Task::sync(sync));
     }
-    let reactor = Reactor::start(tasks);
+    let reactor = match Reactor::start(tasks) {
+        Ok(reactor) => reactor,
+        Err(e) => {
+            // Maintenance silently ceasing to exist is worse than refusing
+            // to run: a thread that cannot start fails the boot.
+            log::err(&format!(
+                "maintenance thread failed to start ({e}); refusing to run without it"
+            ));
+            shutdown(Some(tsd), Some(vw), 1, None)
+        }
+    };
 
     let code = 'watch: loop {
         // Exits are delivered by the reaper hub into each child's slot;
@@ -93,6 +103,12 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         }
         if take_stop() {
             log::info("stop requested; terminating children");
+            // Tell the reactor before teardown, not after: an in-flight
+            // tick must observe the monotonic stop while children are
+            // reaped, and the drain below then flushes on the same thread.
+            if let Some(reactor) = &reactor {
+                reactor.stop();
+            }
             signal_child(&tsd, Signal::SIGTERM);
             signal_child(&vw, Signal::SIGTERM);
             break 'watch match reap_until_gone(&vw, TERM_GRACE) {

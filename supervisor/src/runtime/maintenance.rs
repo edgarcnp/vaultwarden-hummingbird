@@ -112,9 +112,12 @@ impl Task {
 }
 
 enum Command {
+    /// Final-flush budgets as durations: the deadlines are computed when
+    /// the reactor actually enters the flush, so an in-flight tick that
+    /// overran cannot pre-consume the flush's window.
     Drain {
-        deadline: Instant,
-        forced_deadline: Instant,
+        budget: Duration,
+        forced_budget: Duration,
     },
 }
 
@@ -132,22 +135,21 @@ pub struct Reactor {
 }
 
 impl Reactor {
-    /// Start the reactor for the given (feature-filtered) tasks. `None`
-    /// when there is nothing to schedule. A thread that cannot start is a
-    /// failed boot, not a degraded one: maintenance silently ceasing to
-    /// exist is worse than refusing to run.
-    pub fn start(tasks: Vec<Task>) -> Option<Self> {
+    /// Start the reactor for the given (feature-filtered) tasks. `Ok(None)`
+    /// when there is nothing to schedule; `Err` when the thread cannot
+    /// start — a failed boot, not a degraded one: maintenance silently
+    /// ceasing to exist is worse than refusing to run.
+    pub fn start(tasks: Vec<Task>) -> std::io::Result<Option<Self>> {
         if tasks.is_empty() {
-            return None;
+            return Ok(None);
         }
         let token = Arc::new(Token::new());
         let (tx, rx) = channel();
         let thread_token = Arc::clone(&token);
         let handle = std::thread::Builder::new()
             .name("maintenance".into())
-            .spawn(move || run(tasks, rx, thread_token))
-            .expect("maintenance thread");
-        Some(Self { token, tx, handle })
+            .spawn(move || run(tasks, rx, thread_token))?;
+        Ok(Some(Self { token, tx, handle }))
     }
 
     /// Ask the reactor to stop scheduling periodic work. Monotonic; call it
@@ -168,18 +170,31 @@ impl Reactor {
     /// [`Self::drain`] with the hurry-up source injected (tests).
     fn drain_with(self, budget: Duration, forced_budget: Duration, hurry: impl Fn() -> bool) {
         self.token.request_stop();
-        let deadline = Instant::now() + budget;
-        let forced_deadline = Instant::now() + forced_budget;
         let _ = self.tx.send(Command::Drain {
-            deadline,
-            forced_deadline,
+            budget,
+            forced_budget,
         });
-        let hard_stop = deadline + SYNC_TIMEOUT;
-        while !self.handle.is_finished() {
+        // The wait bound leaves room for the in-flight tick, the flush's
+        // whole budget, and one stuck S3 call. A hurry-up observed while
+        // draining bounds the wait from that moment instead, so a second
+        // stop signal actually shortens the shutdown.
+        let hard_stop = Instant::now() + budget + SYNC_TIMEOUT;
+        let mut forced_at: Option<Instant> = None;
+        loop {
+            if self.handle.is_finished() {
+                break;
+            }
             if hurry() {
                 self.token.force();
             }
-            if Instant::now() >= hard_stop {
+            if self.token.forced() && forced_at.is_none() {
+                forced_at = Some(Instant::now());
+            }
+            let bound = match forced_at {
+                Some(at) => at + forced_budget + SYNC_TIMEOUT,
+                None => hard_stop,
+            };
+            if Instant::now() >= bound {
                 log::err("maintenance: still draining at the hard deadline; exiting anyway");
                 return; // dropping the handle detaches a stuck thread
             }
@@ -196,13 +211,16 @@ impl Reactor {
 fn run(mut tasks: Vec<Task>, rx: Receiver<Command>, token: Arc<Token>) {
     let mut due: Vec<Option<Instant>> = tasks
         .iter()
-        .map(|task| task.cadence.map(|_| Instant::now() + task.first_delay))
+        .map(|task| {
+            task.cadence
+                .and_then(|_| Instant::now().checked_add(task.first_delay))
+        })
         .collect();
     loop {
         let now = Instant::now();
         for (i, task) in tasks.iter_mut().enumerate() {
             if due[i].is_some_and(|at| now >= at) {
-                due[i] = task.cadence.map(|c| Instant::now() + c);
+                due[i] = task.cadence.and_then(|c| Instant::now().checked_add(c));
                 // A stop already observed means a drain is coming: never
                 // start new periodic work after it.
                 if token.stopping() {
@@ -215,10 +233,10 @@ fn run(mut tasks: Vec<Task>, rx: Receiver<Command>, token: Arc<Token>) {
         let timeout = next.map(|at| at.saturating_duration_since(Instant::now()));
         match wait_for_command(&rx, timeout) {
             Wait::Command(Command::Drain {
-                deadline,
-                forced_deadline,
+                budget,
+                forced_budget,
             }) => {
-                flush(tasks, deadline, forced_deadline, &token);
+                flush(tasks, budget, forced_budget, &token);
                 return;
             }
             Wait::Timeout => {}
@@ -244,7 +262,11 @@ fn wait_for_command(rx: &Receiver<Command>, timeout: Option<Duration>) -> Wait {
 /// The final flushes, in task order. Each gets a deadline-based abort so a
 /// slow bucket cannot hold the container open past the shutdown budget;
 /// once the deadline passed, later tasks are skipped rather than started.
-fn flush(tasks: Vec<Task>, deadline: Instant, forced_deadline: Instant, token: &Token) {
+fn flush(tasks: Vec<Task>, budget: Duration, forced_budget: Duration, token: &Token) {
+    // Budgets start here, when the flush actually runs: an in-flight
+    // periodic tick that overran must not eat the final flush's window.
+    let deadline = Instant::now() + budget;
+    let forced_deadline = Instant::now() + forced_budget;
     let abort = || {
         Instant::now()
             >= if token.forced() {
@@ -312,7 +334,8 @@ mod tests {
             Arc::clone(&finals),
             Arc::clone(&saw_stop),
         )])
-        .expect("one task starts the reactor");
+        .expect("reactor starts")
+        .expect("one task schedules a reactor");
 
         // Let the periodic run begin; it blocks on the token.
         std::thread::sleep(Duration::from_millis(50));
@@ -351,7 +374,8 @@ mod tests {
                 finish_flag.fetch_add(1, Ordering::SeqCst);
             })),
         }])
-        .expect("one task starts the reactor");
+        .expect("reactor starts")
+        .expect("one task schedules a reactor");
 
         std::thread::sleep(Duration::from_millis(30));
         reactor.drain(Duration::from_secs(2), Duration::from_secs(1));
@@ -380,7 +404,8 @@ mod tests {
         };
         let start = Instant::now();
         Reactor::start(vec![task])
-            .expect("one task starts the reactor")
+            .expect("reactor starts")
+            .expect("one task schedules a reactor")
             .drain(Duration::from_millis(80), Duration::from_millis(40));
         assert!(
             saw_abort.load(Ordering::SeqCst),
@@ -413,7 +438,8 @@ mod tests {
             })),
         };
         Reactor::start(vec![task])
-            .expect("one task starts the reactor")
+            .expect("reactor starts")
+            .expect("one task schedules a reactor")
             // Full budget 10s would dominate the test; the hurry-up must end
             // the flush at the forced 60ms instead.
             .drain_with(Duration::from_secs(10), Duration::from_millis(60), || true);

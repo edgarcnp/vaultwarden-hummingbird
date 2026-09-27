@@ -31,6 +31,17 @@ pub(crate) fn is_empty(path: &str) -> anyhow::Result<bool> {
     Ok(count == 0)
 }
 
+/// Why an import failed. The caller distinguishes a candidate that is
+/// proven unusable (an older backup may be tried) from a local failure
+/// (no fallback can fix it; the boot must refuse).
+#[derive(Debug)]
+pub(crate) enum ImportError {
+    /// The staged copy is not a usable SQLite database.
+    Invalid,
+    /// Publication failed locally (I/O, permissions, or the live path).
+    Local,
+}
+
 /// Integrity pre-check (`PRAGMA integrity_check` on the staged copy),
 /// then import via atomic no-replace publication. `link(2)` fails with
 /// `AlreadyExists` if anything created the live path meanwhile — unlike
@@ -42,7 +53,7 @@ pub(crate) fn is_empty(path: &str) -> anyhow::Result<bool> {
 /// linking, so the live path never exists with wider permissions. Both
 /// paths sit on the same data volume, so the hard link is always possible
 /// (same constraint `rename` had).
-pub(crate) fn import(staged: &str, path: &str) -> bool {
+pub(crate) fn import(staged: &str, path: &str) -> Result<(), ImportError> {
     let check = match rusqlite::Connection::open_with_flags(
         staged,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -56,11 +67,11 @@ pub(crate) fn import(staged: &str, path: &str) -> bool {
         log::err(&format!(
             "db restore: staged dump failed integrity check ({check})"
         ));
-        return false;
+        return Err(ImportError::Invalid);
     }
     if let Err(e) = make_private(staged) {
         log::err(&format!("db restore: cannot secure staged dump: {e}"));
-        return false;
+        return Err(ImportError::Local);
     }
     // A tableless live file would fail the link with EEXIST and jam the
     // boot in a retry loop; it is provably empty (no user tables), so
@@ -72,18 +83,18 @@ pub(crate) fn import(staged: &str, path: &str) -> bool {
             Ok(true) => {
                 if let Err(e) = std::fs::remove_file(path) {
                     log::err(&format!("db restore: cannot clear the empty live DB: {e}"));
-                    return false;
+                    return Err(ImportError::Local);
                 }
             }
             Ok(false) => {
                 log::err("db restore: live DB is not empty; not overwriting");
-                return false;
+                return Err(ImportError::Local);
             }
             Err(e) => {
                 log::err(&format!(
                     "db restore: cannot verify the live DB is empty ({e}); not overwriting"
                 ));
-                return false;
+                return Err(ImportError::Local);
             }
         }
     }
@@ -98,15 +109,15 @@ pub(crate) fn import(staged: &str, path: &str) -> bool {
             // at boot time, so removing them is safe.
             let _ = std::fs::remove_file(format!("{path}-wal"));
             let _ = std::fs::remove_file(format!("{path}-shm"));
-            true
+            Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             log::err("db restore: live DB appeared mid-restore; not overwriting");
-            false
+            Err(ImportError::Local)
         }
         Err(e) => {
             log::err(&format!("db restore: cannot move dump into place: {e}"));
-            false
+            Err(ImportError::Local)
         }
     }
 }
@@ -209,7 +220,7 @@ mod tests {
         drop(conn);
         let before = std::fs::metadata(&live).unwrap().ino();
 
-        assert!(!import(staged.to_str().unwrap(), live.to_str().unwrap()));
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()).is_err());
 
         // The live file is untouched (same inode, same data).
         use std::os::unix::fs::MetadataExt;
@@ -228,7 +239,7 @@ mod tests {
         // Happy path for contrast: publication into an absent path works
         // and lands 0600.
         let target = dir.join("fresh.sqlite3");
-        assert!(import(staged.to_str().unwrap(), target.to_str().unwrap()));
+        assert!(import(staged.to_str().unwrap(), target.to_str().unwrap()).is_ok());
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -253,7 +264,7 @@ mod tests {
         let live = dir.join("live.sqlite3");
         rusqlite::Connection::open(&live).unwrap(); // tableless, no user data
 
-        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()));
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()).is_ok());
 
         let conn = rusqlite::Connection::open_with_flags(
             &live,
@@ -285,10 +296,27 @@ mod tests {
         std::fs::write(&wal, b"stale").unwrap();
         std::fs::write(&shm, b"stale").unwrap();
 
-        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()));
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()).is_ok());
 
         assert!(!wal.exists(), "stale -wal must be removed");
         assert!(!shm.exists(), "stale -shm must be removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A staged copy that is not a database at all is classified Invalid
+    /// (the caller may try an older candidate), unlike a local failure.
+    #[test]
+    fn import_marks_a_non_database_staged_copy_invalid() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-sqlinv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("staged.sqlite3");
+        std::fs::write(&staged, b"not a database").unwrap();
+        let live = dir.join("live.sqlite3");
+        let err = import(staged.to_str().unwrap(), live.to_str().unwrap())
+            .expect_err("garbage must not import");
+        assert!(matches!(err, ImportError::Invalid), "got {err:?}");
+        assert!(!live.exists(), "a rejected candidate must not publish");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

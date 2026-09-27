@@ -82,6 +82,12 @@ pub const MAX_DB_OBJECT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// not memory pressure.
 const MAX_LIST_KEYS: usize = 10_000;
 
+/// Page bound for one listing. A real page carries up to 1000 keys, so far
+/// fewer pages than this can reach [`MAX_LIST_KEYS`]; the bound exists for
+/// a broken or hostile endpoint that keeps announcing more pages without
+/// content (which would otherwise loop until the request timeout).
+const MAX_LIST_PAGES: usize = 1024;
+
 /// Raw listing-body bound (16 MiB): a page of 1000 keys is a few MiB at
 /// most; anything larger is hostile or broken, and the read stops before
 /// memory grows.
@@ -94,17 +100,27 @@ const AUTO_REGION: &str = "auto";
 
 /// The signing region for an endpoint: the region embedded in AWS S3's
 /// hostnames, `auto` for every other S3-compatible provider. Handles the
-/// regional, dualstack, and FIPS spellings AWS serves:
-/// `s3.<region>.amazonaws.com`, `s3-<region>.amazonaws.com`,
+/// regional, dualstack, FIPS, and China spellings AWS serves
+/// (`s3.<region>.amazonaws.com`, `s3-<region>.amazonaws.com`,
 /// `s3.dualstack.<region>.amazonaws.com`, `s3-fips.<region>.amazonaws.com`,
-/// and `s3-fips.dualstack.<region>.amazonaws.com`.
+/// `s3-fips.dualstack.<region>.amazonaws.com`, and their
+/// `.amazonaws.com.cn` variants); acceleration hosts always sign in
+/// us-east-1.
 fn region_for(endpoint: &Url) -> String {
     let Some(host) = endpoint.host_str() else {
         return AUTO_REGION.to_string();
     };
-    let Some(rest) = host.strip_suffix(".amazonaws.com") else {
+    let Some(rest) = host
+        .strip_suffix(".amazonaws.com")
+        .or_else(|| host.strip_suffix(".amazonaws.com.cn"))
+    else {
         return AUTO_REGION.to_string();
     };
+    // S3 Transfer Acceleration signs in us-east-1 whatever the host
+    // spelling says (`s3-accelerate[.dualstack].amazonaws.com`).
+    if rest.starts_with("s3-accelerate") {
+        return "us-east-1".to_string();
+    }
     if rest == "s3" {
         // The legacy global host (`s3.amazonaws.com`).
         return "us-east-1".to_string();
@@ -459,10 +475,6 @@ impl Client {
         if abort() {
             bail!("aborted");
         }
-        let url = self
-            .bucket
-            .get_object(Some(&self.credentials), key)
-            .sign(SIGN_EXPIRE);
         // The temp lives beside the target so the publish is one atomic
         // same-filesystem rename; a crash leaves the target untouched. A
         // partial transfer is kept and resumed with a Range request, so a
@@ -476,6 +488,12 @@ impl Client {
             if abort() {
                 break Err(anyhow!("aborted"));
             }
+            // Sign per attempt: a retry must not reuse a URL that may have
+            // expired while the previous attempt consumed its body budget.
+            let url = self
+                .bucket
+                .get_object(Some(&self.credentials), key)
+                .sign(SIGN_EXPIRE);
             let mut request = self.agent.get(url.as_str());
             if offset > 0 {
                 request = request.header("Range", &format!("bytes={offset}-"));
@@ -601,9 +619,14 @@ impl Client {
     pub fn list(&self, prefix: &str, abort: impl Fn() -> bool) -> anyhow::Result<Vec<Listed>> {
         let mut names: Vec<Listed> = Vec::new();
         let mut token: Option<String> = None;
+        let mut pages = 0usize;
         loop {
             if abort() {
                 bail!("aborted");
+            }
+            pages += 1;
+            if pages > MAX_LIST_PAGES {
+                bail!("listing {prefix:?}: exceeded {MAX_LIST_PAGES} pages");
             }
             let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
             action.with_prefix(prefix);
@@ -639,9 +662,13 @@ impl Client {
             if names.len() > MAX_LIST_KEYS {
                 bail!("listing {prefix:?}: exceeded {MAX_LIST_KEYS} keys");
             }
+            let previous = token.take();
             token = parsed.next_continuation_token;
-            if token.is_none() {
-                break;
+            let Some(next) = &token else { break };
+            if Some(next) == previous.as_ref() {
+                // Identical page forever: a broken endpoint must not keep
+                // the maintenance thread in this loop.
+                bail!("listing {prefix:?}: repeated continuation token");
             }
         }
         names.sort_by(|a, b| a.key.cmp(&b.key));
@@ -724,6 +751,19 @@ mod tests {
         assert_eq!(
             region("https://s3-fips.dualstack.us-east-1.amazonaws.com"),
             "us-east-1"
+        );
+        assert_eq!(region("https://s3-accelerate.amazonaws.com"), "us-east-1");
+        assert_eq!(
+            region("https://s3-accelerate.dualstack.amazonaws.com"),
+            "us-east-1"
+        );
+        assert_eq!(
+            region("https://s3.cn-north-1.amazonaws.com.cn"),
+            "cn-north-1"
+        );
+        assert_eq!(
+            region("https://s3.dualstack.cn-north-1.amazonaws.com.cn"),
+            "cn-north-1"
         );
         assert_eq!(
             region("https://s3.eu-central-1.amazonaws.com"),

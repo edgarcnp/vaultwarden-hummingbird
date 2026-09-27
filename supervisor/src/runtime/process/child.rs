@@ -88,13 +88,20 @@ pub fn signal_group(pid: Pid, sig: Signal) -> bool {
     killpg(NixPid::from_raw(pid), sig).is_ok() || kill(NixPid::from_raw(pid), sig).is_ok()
 }
 
-/// Signal a still-running child through its handle: once the reaper has
-/// delivered a status the pid may have been recycled, so signaling it
-/// could hit an unrelated process. Returns false for a reaped child (and
-/// for the [`signal_group`] refusals), true when a signal was delivered.
+/// Signal a still-running child through its handle. Registration in the
+/// reaper's registry is the liveness proof: the targeted `waitpid` and
+/// the entry's removal happen under the registry lock, so while the entry
+/// is present the child has not been reaped and its pid cannot have been
+/// recycled. The signal goes out under that same lock, closing the window
+/// between the reaper's waitpid and its status delivery. Returns false
+/// for a reaped child (and for the [`signal_group`] refusals), true when
+/// a signal was delivered.
 pub fn signal_child(child: &Handle, sig: Signal) -> bool {
-    if child.status().is_some() {
+    let reg = reaper::registry_lock();
+    if !reg.contains_key(&child.pid) {
         return false;
     }
-    signal_group(child.pid, sig)
+    let delivered = signal_group(child.pid, sig);
+    drop(reg);
+    delivered
 }

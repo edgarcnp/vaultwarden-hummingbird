@@ -37,15 +37,16 @@ pub(super) fn non_empty(v: Option<String>) -> Option<String> {
     v.filter(|v| !v.is_empty())
 }
 
-/// `Some(v)` only for a valid 1-65535 port; invalid values warn and fall
-/// back to the default instead of breaking listeners.
+/// `Some(v)` only for a valid 1-65535 port; invalid values warn and are
+/// ignored (the caller's next source — the file value or the default —
+/// wins, so do not name a fallback here).
 pub(super) fn valid_port(v: Option<String>) -> Option<String> {
     let v = non_empty(v)?;
     match v.parse::<u16>() {
         Ok(p) if p != 0 => Some(v),
         _ => {
             log::err(&format!(
-                "config: invalid port '{}' (want 1-65535); using default",
+                "config: invalid port '{}' (want 1-65535); ignoring it",
                 log::sanitize(&v)
             ));
             None

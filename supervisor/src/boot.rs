@@ -4,9 +4,9 @@
 //!
 //! | Phase        | Stop request                       | Failure                     |
 //! |--------------|------------------------------------|-----------------------------|
-//! | RestoreDb    | bounded ops abort; a failed        | exit 1: never start the     |
-//! |              | import is still a failure          | vault on partial state      |
 //! | AdoptLineage | non-fatal (skips)                  | never fails                 |
+//! | RestoreDb    | exit 0 (clean boot abort)          | exit 1: never start the     |
+//! |              |                                    | vault on partial state      |
 //! | RestoreState | non-fatal (skips)                  | logged; continue            |
 //! |              |                                    | (fresh node / re-login)     |
 //! | Tailscaled   | —                                  | exit 1: no Tailscale, no    |
@@ -25,8 +25,9 @@
 
 use crate::config::{AUTH_TIMEOUT, Config, DAEMON_WAIT, SERVE_TIMEOUT};
 use crate::runtime::{
-    Handle, adopt_lineage, install_signal_handlers, restore_if_empty, restore_state, shutdown,
-    spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
+    Handle, RestoreOutcome, adopt_lineage, install_signal_handlers, restore_if_empty,
+    restore_state, shutdown, spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve,
+    tailscale_up, take_stop,
 };
 use crate::util::{log, net};
 
@@ -40,8 +41,8 @@ enum Outcome {
 /// loop's tail and never returns.
 #[derive(Clone, Copy)]
 enum Phase {
-    RestoreDb,
     AdoptLineage,
+    RestoreDb,
     RestoreState,
     Tailscaled,
     DaemonWait,
@@ -49,9 +50,14 @@ enum Phase {
     Serve,
 }
 
+// AdoptLineage deliberately precedes RestoreDb: a restore records the
+// generation it actually imported, and adoption (which stamps the bucket's
+// newest) must never overwrite that. Adoption only acts on a non-empty DB
+// and restore only on an empty one, so at most one of the two does
+// anything in a given boot.
 const PHASES: [Phase; 7] = [
-    Phase::RestoreDb,
     Phase::AdoptLineage,
+    Phase::RestoreDb,
     Phase::RestoreState,
     Phase::Tailscaled,
     Phase::DaemonWait,
@@ -76,14 +82,17 @@ impl Boot {
     fn run(&mut self, phase: Phase) -> Outcome {
         match phase {
             Phase::RestoreDb => {
-                // DB restore first: only an empty DB is touched, and
-                // vaultwarden must not start on top of a half-done
-                // import — a failed restore refuses to boot so the
-                // orchestrator retries with the DB still empty.
-                if let Some(backup) = &self.cfg.backup
-                    && !restore_if_empty(backup, stopping)
-                {
-                    return Outcome::Exit(1);
+                // Only an empty DB is touched, and vaultwarden must not
+                // start on top of a half-done import — a failed restore
+                // refuses to boot so the orchestrator retries with the DB
+                // still empty. A stop that interrupted the attempt is a
+                // clean boot abort, like every other phase.
+                if let Some(backup) = &self.cfg.backup {
+                    match restore_if_empty(backup, stopping) {
+                        RestoreOutcome::Ready => {}
+                        RestoreOutcome::Failed => return Outcome::Exit(1),
+                        RestoreOutcome::Aborted => return Outcome::Exit(0),
+                    }
                 }
                 Outcome::Next
             }
@@ -103,6 +112,12 @@ impl Boot {
                 Outcome::Next
             }
             Phase::Tailscaled => {
+                // A stop that landed during an earlier phase is a clean
+                // boot abort: never spawn children for a container that is
+                // already going down.
+                if take_stop() {
+                    return Outcome::Exit(0);
+                }
                 match spawn_tailscaled(&self.cfg.state, &self.cfg.socket, self.cfg.userspace) {
                     Some(tsd) => {
                         self.tsd = Some(tsd);

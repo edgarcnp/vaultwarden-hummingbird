@@ -5,7 +5,10 @@
 
 use std::time::Duration;
 
-use super::super::consts::{BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT, BACKUP_STAGING};
+use super::super::consts::{
+    BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT, BACKUP_STAGING, MAX_BACKUP_KEEP,
+    MAX_INTERVAL_SECS,
+};
 use super::super::dburl;
 use super::super::env::{parse_count, parse_flag};
 use super::super::sync::SyncConfig;
@@ -45,11 +48,19 @@ pub(crate) fn resolve_backup(
         Some(url) => match dburl::sqlite_path(url) {
             Some(path) => path,
             None => {
-                log::err(&format!(
-                    "config: VAULTWARDEN_DATABASE_URL scheme '{}' is not sqlite (the image \
-                     builds sqlite only); backup disabled",
-                    log::sanitize(&dburl::scheme_for_log(url))
-                ));
+                let scheme = dburl::scheme_for_log(url);
+                if scheme == "sqlite" {
+                    log::err(
+                        "config: VAULTWARDEN_DATABASE_URL names an empty sqlite path; \
+                         backup disabled",
+                    );
+                } else {
+                    log::err(&format!(
+                        "config: VAULTWARDEN_DATABASE_URL scheme '{}' is not sqlite (the \
+                         image builds sqlite only); backup disabled",
+                        log::sanitize(&scheme)
+                    ));
+                }
                 return None;
             }
         },
@@ -71,6 +82,13 @@ pub(crate) fn resolve_backup(
             log::err("config: SUPERVISOR_DB_BACKUP_INTERVAL=0; using default");
             BACKUP_INTERVAL_DEFAULT
         }
+        s if s > MAX_INTERVAL_SECS => {
+            log::err(&format!(
+                "config: SUPERVISOR_DB_BACKUP_INTERVAL={s} exceeds the \
+                 {MAX_INTERVAL_SECS}-second cap; using default"
+            ));
+            BACKUP_INTERVAL_DEFAULT
+        }
         s => s,
     };
 
@@ -80,6 +98,13 @@ pub(crate) fn resolve_backup(
             log::err(
                 "config: SUPERVISOR_DB_BACKUP_KEEP=0 would delete every backup; using default",
             );
+            BACKUP_KEEP_DEFAULT
+        }
+        k if k > MAX_BACKUP_KEEP => {
+            log::err(&format!(
+                "config: SUPERVISOR_DB_BACKUP_KEEP={k} exceeds the {MAX_BACKUP_KEEP}-entry \
+                 cap (the manifest must stay readable); using default"
+            ));
             BACKUP_KEEP_DEFAULT
         }
         k => k,
@@ -239,6 +264,9 @@ mod tests {
             ("SUPERVISOR_DB_BACKUP_INTERVAL", "0"),
             ("SUPERVISOR_DB_BACKUP_KEEP", "not-a-number"),
             ("SUPERVISOR_DB_BACKUP_KEEP", "0"),
+            // absurd values beyond the caps degrade to the defaults
+            ("SUPERVISOR_DB_BACKUP_INTERVAL", "18446744073709551615"),
+            ("SUPERVISOR_DB_BACKUP_KEEP", "1000000"),
         ] {
             let mut vars: Vec<(&str, &str)> = S3_KNOBS.to_vec();
             vars.push(("SUPERVISOR_DB_BACKUP", "true"));

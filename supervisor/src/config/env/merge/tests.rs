@@ -357,6 +357,41 @@ fn state_file_must_be_absolute() {
     )));
     let cfg = Config::build(file, lookup).expect("an absolute state file resolves");
     assert_eq!(cfg.state, "/custom/tailscaled.state");
+
+    // `mem:` is Tailscale's in-memory state: accepted, no path check
+    let cfg = mk(&[("TAILSCALE_STATE_FILE", "mem:")]);
+    assert_eq!(cfg.state, "mem:");
+}
+
+/// A custom state file under /data is wired into the sync set, so state
+/// sync still carries the node identity; one outside /data cannot be
+/// covered (the boot succeeds, loudly).
+#[test]
+fn custom_state_files_are_wired_into_sync() {
+    const SYNC: &[(&str, &str)] = &[
+        ("SUPERVISOR_S3_REMOTE", "r2:vw"),
+        ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
+        ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "sec"),
+        ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
+    ];
+
+    let mut vars = SYNC.to_vec();
+    vars.push(("TAILSCALE_STATE_FILE", "/data/node.state"));
+    let cfg = mk(&vars);
+    assert_eq!(cfg.state, "/data/node.state");
+    assert_eq!(
+        cfg.sync
+            .as_ref()
+            .expect("sync configured")
+            .state_file
+            .as_deref(),
+        Some("node.state")
+    );
+
+    let mut vars = SYNC.to_vec();
+    vars.push(("TAILSCALE_STATE_FILE", "/var/lib/tailscale/state"));
+    let cfg = mk(&vars);
+    assert_eq!(cfg.sync.as_ref().expect("sync configured").state_file, None);
 }
 
 /// One-key dotenv file for the merge tests above. Unique per call:

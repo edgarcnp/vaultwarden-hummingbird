@@ -18,8 +18,10 @@
 //! only when its content actually changed and a pull verifies the hash
 //! before the file is published. Without a manifest (a pre-manifest
 //! bucket) the name listing is used, size-checked only, until the first
-//! push writes one. Hashes are cached locally keyed by (size, mtime)
-//! ([`super::cache`]) so a quiet push does not re-hash gigabytes.
+//! push writes one. Hashes are cached locally keyed by (size, mtime,
+//! ctime) ([`super::cache`]) so a quiet push does not re-hash gigabytes,
+//! and a cached hash is only ever used to *skip* — every upload records a
+//! hash computed from the bytes on disk.
 
 use std::path::Path;
 
@@ -128,7 +130,7 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
                 }
             };
             let mut targets = Vec::new();
-            for Listed { key, .. } in &listed {
+            for Listed { key, size } in &listed {
                 let Some(rel) = key.strip_prefix(cfg.prefix()) else {
                     continue;
                 };
@@ -138,7 +140,7 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
                 }
                 targets.push(Target {
                     rel: rel.to_string(),
-                    size: None,
+                    size: Some(*size),
                     sha256: None,
                 });
             }
@@ -152,7 +154,7 @@ pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
         if abort() {
             return true;
         }
-        if !is_synced_file(&target.rel) {
+        if !is_synced_file(&target.rel, cfg.state_file.as_deref()) {
             log::err(&format!(
                 "state sync: pull ignored {} (outside the synced set)",
                 log::sanitize(&target.rel)
@@ -216,7 +218,7 @@ pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;
     };
-    let files = local_synced_files();
+    let files = local_synced_files(cfg.state_file.as_deref());
     if files.is_empty() {
         log::info("state sync: no synced files to push yet");
         return true;
@@ -253,28 +255,44 @@ pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
         };
         let size = meta.len();
         let mtime = mtime_nanos(&meta);
-        let hash = match cache.hash_of(rel, size, mtime) {
-            Some(hash) => hash.to_string(),
-            None => match sha256_file(&path) {
-                Ok(hash) => hash,
-                Err(e) => {
-                    log::err(&format!("state sync: cannot hash {rel}: {e}"));
-                    failed = true;
-                    continue;
-                }
-            },
+        let ctime = ctime_nanos(&meta);
+        // The cache may skip hashing only when its remembered hash still
+        // matches the bucket; it is a hint, never the manifest's identity.
+        if cache.hash_of(rel, size, mtime, ctime).is_some_and(|hash| {
+            manifest
+                .get(rel)
+                .is_some_and(|entry| entry.sha256 == hash && entry.size == size)
+        }) {
+            continue; // unchanged in the bucket; nothing to upload
+        }
+        // Hash the bytes actually on disk before recording them: a stale
+        // cache entry must never become the bucket's claimed identity.
+        let hash = match sha256_file(&path) {
+            Ok(hash) => hash,
+            Err(e) => {
+                log::err(&format!("state sync: cannot hash {rel}: {e}"));
+                failed = true;
+                continue;
+            }
         };
-        cache.record(rel, size, mtime, hash.clone());
         if manifest
             .get(rel)
             .is_some_and(|entry| entry.sha256 == hash && entry.size == size)
         {
-            continue; // unchanged in the bucket; nothing to upload
+            cache.record(rel, size, mtime, ctime, hash);
+            continue;
         }
         let key = format!("{}{rel}", cfg.prefix());
         match client.put(&key, &path, &abort) {
             Ok(()) => {
-                manifest.insert(rel.clone(), Entry { size, sha256: hash });
+                manifest.insert(
+                    rel.clone(),
+                    Entry {
+                        size,
+                        sha256: hash.clone(),
+                    },
+                );
+                cache.record(rel, size, mtime, ctime, hash);
                 pushed += 1;
             }
             Err(e) => {
@@ -294,7 +312,8 @@ pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
             Err(e) => {
                 log::err(&format!(
                     "state sync: pushed {pushed} object(s) but cannot publish the manifest \
-                     ({e}); they will be re-uploaded next tick"
+                     ({e}); the objects stay unreferenced until a later run re-uploads \
+                     them (a shutdown flush may exit first)"
                 ));
                 failed = true;
             }
@@ -312,6 +331,20 @@ fn mtime_nanos(meta: &std::fs::Metadata) -> u64 {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+/// The inode change time in nanoseconds since the epoch, 0 when
+/// unavailable (the cache treats 0 as "always hash"). Any content change
+/// bumps ctime, even one that preserves size and mtime.
+fn ctime_nanos(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let (secs, nsec) = (meta.ctime(), meta.ctime_nsec());
+    if secs < 0 || nsec < 0 {
+        return 0;
+    }
+    (secs as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nsec as u64)
 }
 
 #[cfg(test)]

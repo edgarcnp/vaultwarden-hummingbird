@@ -1,12 +1,14 @@
 //! The boot-time restore path: verify emptiness (fail closed), pull the
-//! newest restorable backup, import it. A failed import is fatal: starting
-//! the vault on a half-restored database would surface partial state as the
-//! vault's truth — the container exits and the orchestrator retries instead.
+//! newest restorable backup, import it. Only a candidate that was fully
+//! downloaded and then failed its integrity check falls through to the
+//! next older one; a download, staging, or local publication failure
+//! refuses the boot outright — a transient failure must never silently
+//! downgrade the volume to an older backup, and the vault must never
+//! start on partial state.
 //!
-//! Candidates come from the manifest, newest generation first, so one
-//! corrupt object falls through to the next older one instead of blocking
-//! boot. Without a manifest (legacy bucket) the name listing is used, and
-//! an unreadable manifest falls back to that listing loudly as recovery.
+//! Candidates come from the manifest, newest generation first. Without a
+//! manifest (legacy bucket) the name listing is used, and an unreadable
+//! manifest falls back to that listing loudly as recovery.
 
 use crate::config::DbBackupConfig;
 use crate::s3::{Expect, MAX_DB_OBJECT_BYTES};
@@ -25,76 +27,114 @@ struct Candidate {
     generation: Option<u64>,
 }
 
+/// What the boot-time restore decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// Boot may continue: restore is off, nothing needed restoring, or an
+    /// import completed.
+    Ready,
+    /// A restore was attempted and failed for a durable reason (unlistable
+    /// bucket, undecidable DB, failed download or publication); the caller
+    /// must not start the vault.
+    Failed,
+    /// A stop request interrupted the attempt: a clean boot abort.
+    Aborted,
+}
+
 /// Boot-time restore (opt-in via `SUPERVISOR_DB_BACKUP_RESTORE`): runs
 /// before vaultwarden spawns. Acts ONLY on an unambiguously empty DB;
-/// ambiguity (unreachable, malformed) fails closed — never overwrites
-/// existing data. Returns false only when a restore was attempted and
-/// failed: the caller must not start the vault. "No backup found" is not a
-/// failure (a fresh deployment legitimately boots on an empty DB), but a
-/// bucket that cannot be listed is: an empty database against an unknown
-/// bucket is exactly the ambiguity this function exists to refuse.
-pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> bool {
+/// ambiguity (unreadable DB, unreachable bucket) fails closed — never
+/// overwrites existing data and never starts the vault on state it could
+/// not verify. A candidate that downloaded completely but is not a usable
+/// database falls through to the next older one; every other failure is
+/// durable (`Failed`), so a transient error cannot downgrade the volume to
+/// an older backup. "No backup found" is not a failure (a fresh deployment
+/// legitimately boots on an empty DB).
+pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> RestoreOutcome {
     if !cfg.restore {
-        return true;
+        return RestoreOutcome::Ready;
     }
     match is_empty(cfg) {
-        Err(e) => log::err(&format!(
-            "db restore: cannot verify the DB is empty ({e}); not restoring (fail-closed)"
-        )),
-        Ok(false) => log::info("db restore: database is not empty; skipped"),
-        Ok(true) => {
-            log::info("db restore: database is empty; looking for the newest backup");
-            let s3 = match client(cfg) {
-                Ok(s3) => s3,
-                Err(e) => {
-                    log::err(&format!(
-                        "db restore: skipped: unusable S3 configuration ({e}); \
-                         check the SUPERVISOR_S3_* settings and endpoint (a fresh DB \
-                         will boot)"
-                    ));
-                    return true;
-                }
-            };
-            let candidates = match candidates(&s3, cfg, &abort) {
-                Ok(candidates) => candidates,
-                Err(e) => {
-                    log::err(&format!(
-                        "db restore: cannot list the bucket ({e}); an empty database \
-                         against an unreachable bucket is ambiguous, so refusing to \
-                         start the vault — the orchestrator will retry"
-                    ));
-                    return false;
-                }
-            };
-            if candidates.is_empty() {
-                log::info(
-                    "db restore: empty DB and no backup found in the bucket; \
-                     booting fresh",
-                );
-                return true;
+        Err(e) => {
+            log::err(&format!(
+                "db restore: cannot verify the DB is empty ({e}); refusing to start \
+                 the vault on an undecidable database"
+            ));
+            return RestoreOutcome::Failed;
+        }
+        Ok(false) => {
+            log::info("db restore: database is not empty; skipped");
+            return RestoreOutcome::Ready;
+        }
+        Ok(true) => {}
+    }
+    log::info("db restore: database is empty; looking for the newest backup");
+    let s3 = match client(cfg) {
+        Ok(s3) => s3,
+        Err(e) => {
+            log::err(&format!(
+                "db restore: skipped: unusable S3 configuration ({e}); \
+                 check the SUPERVISOR_S3_* settings and endpoint (a fresh DB \
+                 will boot)"
+            ));
+            return RestoreOutcome::Ready;
+        }
+    };
+    let candidates = match candidates(&s3, cfg, &abort) {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            if abort() {
+                return RestoreOutcome::Aborted;
             }
-            for candidate in candidates {
-                if abort() {
-                    return true;
-                }
-                log::info(&format!("db restore: importing {}", candidate.key));
-                if restore_object(&s3, cfg, &candidate, &abort) {
-                    log::info("db restore: done");
-                    return true;
-                }
+            log::err(&format!(
+                "db restore: cannot list the bucket ({e}); an empty database \
+                 against an unreachable bucket is ambiguous, so refusing to \
+                 start the vault — the orchestrator will retry"
+            ));
+            return RestoreOutcome::Failed;
+        }
+    };
+    if candidates.is_empty() {
+        log::info(
+            "db restore: empty DB and no backup found in the bucket; \
+             booting fresh",
+        );
+        return RestoreOutcome::Ready;
+    }
+    for candidate in candidates {
+        if abort() {
+            return RestoreOutcome::Aborted;
+        }
+        log::info(&format!("db restore: importing {}", candidate.key));
+        match restore_object(&s3, cfg, &candidate, &abort) {
+            Attempt::Imported => {
+                log::info("db restore: done");
+                return RestoreOutcome::Ready;
+            }
+            Attempt::Invalid => {
                 log::err(&format!(
-                    "db restore: {} did not restore; trying the next older backup",
+                    "db restore: {} is not a usable database; trying the next older backup",
                     candidate.key
                 ));
             }
-            log::err(
-                "db restore: no restorable backup found (every candidate failed); \
-                 refusing to start the vault on a partial restore",
-            );
-            return false;
+            Attempt::Failed => {
+                if abort() {
+                    return RestoreOutcome::Aborted;
+                }
+                log::err(&format!(
+                    "db restore: {} could not be fetched or published; refusing to \
+                     fall back to an older backup on a non-corruption failure",
+                    candidate.key
+                ));
+                return RestoreOutcome::Failed;
+            }
         }
     }
-    true
+    log::err(
+        "db restore: no restorable backup found (every candidate failed its \
+         integrity check); refusing to start the vault on partial state",
+    );
+    RestoreOutcome::Failed
 }
 
 /// Candidate backups, newest first: the manifest's generations when it
@@ -194,17 +234,30 @@ pub fn adopt_lineage(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     }
 }
 
+/// Outcome of one candidate attempt.
+enum Attempt {
+    /// The candidate was downloaded and imported.
+    Imported,
+    /// Downloaded completely, but not a usable database: the caller may
+    /// try the next older candidate.
+    Invalid,
+    /// Could not be downloaded, staged, or published: never fall back.
+    Failed,
+}
+
 /// Download one candidate into staging, verify integrity, import; on a
-/// successful import record its lineage. Any failure returns false with
-/// the live DB untouched (the download is atomic and the import links).
+/// successful import record its lineage. Any failure leaves the live DB
+/// untouched (the download is atomic and the import links, and the staged
+/// copy is removed on every path). The `Invalid`/`Failed` distinction is
+/// what decides whether the caller may try an older candidate.
 fn restore_object(
     s3: &Client,
     cfg: &DbBackupConfig,
     candidate: &Candidate,
     abort: &impl Fn() -> bool,
-) -> bool {
+) -> Attempt {
     if !sweep_staging(&cfg.staging) {
-        return false;
+        return Attempt::Failed;
     }
     let staged = format!("{}/restore-{}", cfg.staging, cfg.db_label());
     if let Err(e) = s3.get(
@@ -218,20 +271,24 @@ fn restore_object(
         abort,
     ) {
         log::err(&format!("db restore: download failed ({e})"));
-        return false;
+        return Attempt::Failed;
     }
-    let ok = super::sqlite::import(&staged, &cfg.db_path);
+    let imported = super::sqlite::import(&staged, &cfg.db_path);
     let _ = std::fs::remove_file(&staged);
-    if ok {
-        match candidate.generation {
-            Some(generation) => lineage::write(&cfg.db_path, generation),
-            None => {
-                let name = candidate.key.rsplit('/').next().unwrap_or(&candidate.key);
-                lineage::write_name(&cfg.db_path, name);
+    match imported {
+        Ok(()) => {
+            match candidate.generation {
+                Some(generation) => lineage::write(&cfg.db_path, generation),
+                None => {
+                    let name = candidate.key.rsplit('/').next().unwrap_or(&candidate.key);
+                    lineage::write_name(&cfg.db_path, name);
+                }
             }
+            Attempt::Imported
         }
+        Err(super::sqlite::ImportError::Invalid) => Attempt::Invalid,
+        Err(super::sqlite::ImportError::Local) => Attempt::Failed,
     }
-    ok
 }
 
 #[cfg(test)]
@@ -247,7 +304,10 @@ mod tests {
 
     #[test]
     fn restore_noop_when_disabled() {
-        assert!(restore_if_empty(&support::cfg(), || false));
+        assert_eq!(
+            restore_if_empty(&support::cfg(), || false),
+            RestoreOutcome::Ready
+        );
     }
 
     /// An S3 endpoint that answers `GET .../manifest` with 404 (no
@@ -311,7 +371,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         cfg.db_path = dir.join("db.sqlite3").to_string_lossy().into_owned();
         rusqlite::Connection::open(&cfg.db_path).unwrap();
-        assert!(restore_if_empty(&cfg, || false));
+        assert_eq!(restore_if_empty(&cfg, || false), RestoreOutcome::Ready);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -334,7 +394,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         cfg.db_path = dir.join("db.sqlite3").to_string_lossy().into_owned();
         rusqlite::Connection::open(&cfg.db_path).unwrap();
-        assert!(!restore_if_empty(&cfg, || false));
+        assert_eq!(restore_if_empty(&cfg, || false), RestoreOutcome::Failed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -356,6 +416,22 @@ mod tests {
         cfg.db_path = db_path;
         adopt_lineage(&cfg, || false);
         assert!(lineage::read(&cfg.db_path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable (corrupt) live DB cannot be proven empty: with restore
+    /// enabled the boot refuses rather than start the vault on it (the
+    /// documented fail-closed behavior).
+    #[test]
+    fn restore_refuses_an_undecidable_database() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-rund-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = support::cfg();
+        cfg.restore = true;
+        cfg.db_path = dir.join("db.sqlite3").to_string_lossy().into_owned();
+        std::fs::write(&cfg.db_path, b"not a database").unwrap();
+        assert_eq!(restore_if_empty(&cfg, || false), RestoreOutcome::Failed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

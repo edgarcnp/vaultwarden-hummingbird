@@ -83,7 +83,7 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 
 - At boot it restores what is missing, but never overwrites a newer local file.
 - It saves after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The final save is budgeted (two minutes; fifteen seconds after a second stop signal) so a slow bucket can't hold the container open.
-- It saves the tailnet identity, the vault's RSA signing key, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out.
+- It saves the tailnet identity, the vault's RSA signing key, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/data` to ride along; the container says so at boot when it doesn't.
 - Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. A quiet node costs one bucket listing, not a round of uploads.
 - Keep the bucket private (it holds secrets and your files) and run one container against it.
 

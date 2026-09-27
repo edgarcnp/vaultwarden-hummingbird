@@ -21,15 +21,32 @@ mod util;
 
 use config::Config;
 use runtime::gate_healthcheck;
+use util::log;
 
 /// One-shot `--healthcheck` mode: exit 0 iff the gate chain answers 2xx.
 /// Runs before any boot side effect; config resolution is a pure read, so
-/// the probe targets exactly the port the running supervisor binds.
+/// the probe targets exactly the port the running supervisor binds. A
+/// failed check logs one line, so a health-driven restart loop is
+/// diagnosable from the container logs.
 fn healthcheck() -> ! {
-    match Config::from_env() {
-        Some(cfg) => std::process::exit(if gate_healthcheck(&cfg.port) { 0 } else { 1 }),
-        None => std::process::exit(1),
-    }
+    let healthy = match Config::from_env() {
+        Some(cfg) => {
+            if gate_healthcheck(&cfg.port) {
+                true
+            } else {
+                log::err(
+                    "healthcheck: the gate did not answer healthy (gate not bound, or \
+                     vaultwarden down)",
+                );
+                false
+            }
+        }
+        None => {
+            log::err("healthcheck: configuration could not be resolved");
+            false
+        }
+    };
+    std::process::exit(if healthy { 0 } else { 1 });
 }
 
 fn main() {

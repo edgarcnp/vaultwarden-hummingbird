@@ -41,4 +41,4 @@ mod tools;
 mod unchanged;
 
 pub use dump::tick;
-pub use restore::{adopt_lineage, restore_if_empty};
+pub use restore::{RestoreOutcome, adopt_lineage, restore_if_empty};

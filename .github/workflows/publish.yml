@@ -63,10 +63,12 @@ jobs:
             --tag "$IMAGE:${GITHUB_REF_NAME}-${{ matrix.arch }}" \
             .
 
-      - name: Verify the healthcheck survived the build
-        run: |
-          test "$(podman inspect "$IMAGE:${GITHUB_REF_NAME}-${{ matrix.arch }}" \
-            --format '{{json .HealthCheck.Test}}')" != "null"
+      # The full fail-closed smoke suite runs against the real release
+      # image (every release is exercised on both arches, not just built):
+      # entrypoint execution, strict-dotenv refusals, exec-form healthcheck,
+      # and the Tailscale fail-closed chain.
+      - name: Smoke test the release image
+        run: scripts/smoke-image.sh "$IMAGE:${GITHUB_REF_NAME}-${{ matrix.arch }}"
 
       - name: Push per-arch tag
         run: podman push "$IMAGE:${GITHUB_REF_NAME}-${{ matrix.arch }}"
@@ -101,9 +103,9 @@ jobs:
           done
           podman manifest push --digestfile /tmp/digest.txt "$IMAGE:${VER}" "docker://$IMAGE:${VER}"
           echo "digest=$(cat /tmp/digest.txt)" >> "$GITHUB_OUTPUT"
-          # :latest moves only for a release tag: a manual dispatch must
-          # never silently redirect the public tag to a branch build.
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+          # :latest moves only for a release tag, never a manual dispatch,
+          # and never a prerelease (`v1.2.0-rc.1`).
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [[ "$GITHUB_REF_NAME" != *-* ]]; then
             podman push "$IMAGE:${VER}" "docker://$IMAGE:latest"
           fi
 

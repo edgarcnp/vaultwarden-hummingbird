@@ -1,9 +1,11 @@
 //! Staged `/tmp` files: unique per call (pid + sequence), 0600,
 //! container-private, never following a pre-existing path — and unlinked
 //! when the handle drops, the normal exit path. The binary is
-//! `panic = "abort"`, so a panic skips `Drop`; the process (and the
-//! container with it) dies, taking `/tmp` along. Consumers: secrets that
-//! must never ride argv (the tailscale authkey) and captured child output.
+//! `panic = "abort"`, so a panic skips `Drop`; a leftover from an
+//! ungraceful exit is reclaimed by name on the next start (a container
+//! restart reuses the same pid and sequence), so a stale secret neither
+//! lingers nor jams the boot. Consumers: secrets that must never ride
+//! argv (the tailscale authkey) and captured child output.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -18,8 +20,11 @@ pub struct StagedFile {
 
 impl StagedFile {
     /// Create `/tmp/<prefix>-<pid>-<seq>` (create_new: a pre-existing
-    /// file or symlink is never followed), owner-only regardless of
-    /// umask.
+    /// file or symlink is never followed), owner-only (mode 0600, masked
+    /// by the umask — never wider). A leftover from an interrupted run
+    /// sits at the same deterministic name (pid 1 restarts at sequence
+    /// 0), so it is reclaimed instead of returned: a stale secret must not
+    /// linger and a crash must not jam the next boot.
     pub fn create(prefix: &str) -> std::io::Result<Self> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let path = format!(
@@ -27,12 +32,7 @@ impl StagedFile {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         );
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
+        let file = open_staged(&path)?;
         Ok(Self { file, path })
     }
 
@@ -64,6 +64,26 @@ impl StagedFile {
 impl Drop for StagedFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Open a staged path with `create_new` semantics, reclaiming a leftover
+/// from an ungraceful exit: the deterministic name repeats across restarts,
+/// so a stale file — possibly a secret, possibly a symlink — is unlinked
+/// and the name reused. `create_new` never follows a link; `remove_file`
+/// removes the link itself, never its target.
+fn open_staged(path: &str) -> std::io::Result<File> {
+    let options = || {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true).mode(0o600);
+        options
+    };
+    match options().open(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path)?;
+            options().open(path)
+        }
+        other => other,
     }
 }
 
@@ -112,5 +132,22 @@ mod tests {
             !std::path::Path::new(&path).exists(),
             "removed after failed write"
         );
+    }
+
+    /// A leftover from an ungraceful exit (same pid, same sequence) is
+    /// reclaimed instead of jamming the next start, and the stale bytes
+    /// (possibly a secret) are gone.
+    #[test]
+    fn a_stale_leftover_is_reclaimed() {
+        let path = format!("/tmp/vw-staged-stale-{}-0", std::process::id());
+        std::fs::write(&path, b"stale secret").unwrap();
+        let file = open_staged(&path).expect("reclaims the name");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "a fresh file, not the stale one"
+        );
+        drop(file);
+        let _ = std::fs::remove_file(&path);
     }
 }

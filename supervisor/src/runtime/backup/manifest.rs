@@ -59,12 +59,18 @@ impl Manifest {
             let size: u64 = size
                 .parse()
                 .map_err(|_| anyhow::anyhow!("line {}: bad size", i + 2))?;
+            ensure!(generation > 0, "line {}: generation 0 is reserved", i + 2);
             if entries
                 .last()
                 .is_some_and(|last| last.generation >= generation)
             {
                 bail!("line {}: generations must strictly ascend", i + 2);
             }
+            ensure!(
+                !entries.iter().any(|entry| entry.name == name),
+                "line {}: duplicate name {name}",
+                i + 2
+            );
             entries.push(Entry {
                 generation,
                 name: name.to_string(),
@@ -94,8 +100,12 @@ impl Manifest {
         self.entries.last().map(|e| e.generation).unwrap_or(0)
     }
 
-    pub(super) fn next_generation(&self) -> u64 {
-        self.latest() + 1
+    /// The next generation, or `None` once the `u64` space is exhausted:
+    /// wrapping to 0 would write a manifest that can never be parsed again,
+    /// so the push refuses instead (fail closed; clear the bucket to
+    /// recover).
+    pub(super) fn next_generation(&self) -> Option<u64> {
+        self.latest().checked_add(1)
     }
 
     /// Entries newest-first: the order restore tries candidates in.
@@ -160,7 +170,7 @@ mod tests {
         let parsed = Manifest::parse(&manifest.render()).expect("round trip");
         assert_eq!(parsed, manifest);
         assert_eq!(parsed.latest(), 2);
-        assert_eq!(parsed.next_generation(), 3);
+        assert_eq!(parsed.next_generation(), Some(3));
         assert_eq!(
             parsed
                 .newest_first()
@@ -170,6 +180,16 @@ mod tests {
         );
         assert_eq!(parsed.find_name("sqlite-a.sqlite3").unwrap().generation, 1);
         assert!(parsed.find_name("missing").is_none());
+    }
+
+    /// The generation space is never wrapped: an exhausted manifest loads
+    /// but cannot be extended, so the push refuses instead of writing a
+    /// manifest that strict ascending order would reject forever.
+    #[test]
+    fn generation_space_is_not_wrapped() {
+        let manifest = Manifest::parse("v1\n18446744073709551615 a 1\n").expect("u64::MAX parses");
+        assert_eq!(manifest.next_generation(), None);
+        assert_eq!(Manifest::default().next_generation(), Some(1));
     }
 
     #[test]
@@ -182,6 +202,8 @@ mod tests {
             "v1\n1 a 1 2\n",
             "v1\n2 a 1\n1 b 1\n",
             "v1\n1 a 1\n1 b 1\n",
+            "v1\n0 a 1\n",
+            "v1\n1 a 1\n2 a 2\n",
         ] {
             assert!(Manifest::parse(bad).is_err(), "must reject {bad:?}");
         }

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use super::super::consts::SYNC_INTERVAL_DEFAULT;
+use super::super::consts::{MAX_INTERVAL_SECS, SYNC_INTERVAL_DEFAULT};
 use super::super::env::parse_count;
 use super::spec::SyncConfig;
 use crate::util::log;
@@ -22,16 +22,27 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
         );
         None
     } else {
+        let raw_interval = knob("SUPERVISOR_S3_SYNC_INTERVAL", "");
+        let secs = match parse_count(
+            "SUPERVISOR_S3_SYNC_INTERVAL",
+            &raw_interval,
+            SYNC_INTERVAL_DEFAULT,
+        ) {
+            s if s > MAX_INTERVAL_SECS => {
+                log::err(&format!(
+                    "config: SUPERVISOR_S3_SYNC_INTERVAL={s} exceeds the \
+                     {MAX_INTERVAL_SECS}-second cap; using default"
+                ));
+                SYNC_INTERVAL_DEFAULT
+            }
+            s => s,
+        };
         match SyncConfig::new(
             remote.clone(),
             key_id,
             key_secret,
             knob("SUPERVISOR_S3_ENDPOINT", ""),
-            Duration::from_secs(parse_count(
-                "SUPERVISOR_S3_SYNC_INTERVAL",
-                &knob("SUPERVISOR_S3_SYNC_INTERVAL", ""),
-                SYNC_INTERVAL_DEFAULT,
-            )),
+            Duration::from_secs(secs),
         ) {
             Ok(sync) => Some(sync),
             Err(e) => {
@@ -107,6 +118,13 @@ mod tests {
     fn invalid_interval_falls_back_to_default() {
         let mut vars: Vec<(&str, &str)> = BASE.to_vec();
         vars.push(("SUPERVISOR_S3_SYNC_INTERVAL", "not-a-number"));
+        assert_eq!(
+            resolved(&vars).expect("sync enabled").interval,
+            Duration::from_secs(SYNC_INTERVAL_DEFAULT)
+        );
+        // an absurd value (scheduler overflow territory) degrades too
+        let mut vars: Vec<(&str, &str)> = BASE.to_vec();
+        vars.push(("SUPERVISOR_S3_SYNC_INTERVAL", "18446744073709551615"));
         assert_eq!(
             resolved(&vars).expect("sync enabled").interval,
             Duration::from_secs(SYNC_INTERVAL_DEFAULT)

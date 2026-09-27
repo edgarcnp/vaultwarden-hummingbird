@@ -14,7 +14,10 @@ pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 /// Overall budget for the final shutdown persists (DB dump, then state
 /// push). Child teardown ahead of it is bounded by the grace constants, so
-/// the shipped compose `stop_grace_period` (180s) covers the total.
+/// the normal path fits inside the shipped compose `stop_grace_period`
+/// (180s: reaping ≤ 32s plus this budget). A thread stuck past the budget
+/// is abandoned at budget + `SYNC_TIMEOUT`, which can exceed that grace —
+/// the process exits anyway; only that transfer is lost.
 pub const PERSIST_BUDGET: Duration = Duration::from_secs(120);
 /// A stop request observed while draining shortens the persist budget to
 /// this, so a hurry-up SIGTERM gets a fast exit.
@@ -34,6 +37,17 @@ pub const SYNC_FIRST_DELAY: Duration = Duration::from_secs(60);
 pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;
 pub const BACKUP_INTERVAL_DEFAULT: u64 = 21600;
 pub const BACKUP_KEEP_DEFAULT: u64 = 3;
+
+/// Upper bound for every interval knob: `Instant + Duration` panics on
+/// overflow (and aborts the container under `panic = "abort"`), and no
+/// legitimate cadence is longer than a week. Larger values degrade to the
+/// knob's default, loudly.
+pub const MAX_INTERVAL_SECS: u64 = 7 * 24 * 3600;
+
+/// Upper bound for `SUPERVISOR_DB_BACKUP_KEEP`: the manifest has a 256 KiB
+/// read cap, so an unbounded keep could write a manifest this process
+/// could never read back (~75 bytes per entry).
+pub const MAX_BACKUP_KEEP: u64 = 1000;
 
 /// Local staging directory (on the data volume) for in-flight dumps and
 /// restore pulls; swept before each run and after each restore.
