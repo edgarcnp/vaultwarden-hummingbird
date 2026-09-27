@@ -233,6 +233,21 @@ fn bind_conflict_is_an_error() {
     assert!(bind(&port.to_string()).is_err());
 }
 
+/// The gate accepts IPv4 loopback probes (health checks), and IPv6 too
+/// when the kernel's wildcard default is dual-stack.
+#[test]
+fn bind_accepts_loopback_probes() {
+    let listener = bind("0").expect("ephemeral bind");
+    let port = listener.local_addr().unwrap().port();
+    std::net::TcpStream::connect(("127.0.0.1", port)).expect("IPv4 loopback reaches the gate");
+    if super::server::dual_stack_wildcard() {
+        assert!(
+            std::net::TcpStream::connect(("::1", port)).is_ok(),
+            "dual-stack default: IPv6 loopback must reach the gate too"
+        );
+    }
+}
+
 /// Concurrent /alive requests each get a verdict (thread-safety under
 /// load); the admission cap in `server` bounds how many can probe at once,
 /// and the TTL window amortizes a steady flood to one probe per window

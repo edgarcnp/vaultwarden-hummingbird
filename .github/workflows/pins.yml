@@ -11,6 +11,7 @@ on:
     paths:
       - Containerfile
       - scripts/update-pins.sh
+      - .github/workflows/publish.yml
   schedule:
     - cron: "0 5 * * 1" # weekly, Monday 05:00 UTC
 
@@ -34,3 +35,15 @@ jobs:
 
       - name: Fail on drift
         run: git diff --exit-code Containerfile
+
+      # The syft pin in publish.yml is manual (no Renovate datasource
+      # carries its digest), so re-download the artifact here: a stale or
+      # replaced release is a red build, exactly like the Containerfile
+      # pins.
+      - name: Recheck the syft pin
+        run: |
+          url=$(grep -oE 'https://github\.com/anchore/syft/releases/download/v[0-9.]+/syft_[0-9.]+_linux_amd64\.tar\.gz' .github/workflows/publish.yml)
+          sha=$(grep -oE '[0-9a-f]{64}  /tmp/syft\.tgz' .github/workflows/publish.yml | cut -d' ' -f1)
+          test -n "$url" && test -n "$sha"
+          curl -fsSL --max-time 300 --retry 3 -o /tmp/syft.tgz "$url"
+          echo "$sha  /tmp/syft.tgz" | sha256sum -c -

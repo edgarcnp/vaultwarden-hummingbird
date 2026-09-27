@@ -50,6 +50,7 @@ curl -i http://127.0.0.1:8080/alive
 - `VAULTWARDEN_WEB_VAULT=false` builds an API-only image, no web UI.
 - The database is SQLite on the data volume. There's no DB backend knob.
 - Renovate bumps the version ARGs and runs `scripts/update-pins.sh` to refresh the checksum digests. Never hand-edit a digest: if you bump a version yourself, run the script. CI recomputes the pins on every Containerfile change (and weekly), so a missing or stale digest is a red build.
+- The syft pin in `publish.yml` is manual (no Renovate datasource carries its digest); the Pins workflow re-downloads it, so a stale or replaced artifact is a red build. Bump the URL and its checksum together.
 - The Hummingbird base images are digest-pinned too; Renovate's Dockerfile manager owns those ARGs and opens digest-update PRs when Red Hat moves the floating tags. Don't hand-edit them either.
 
 ## Working on the supervisor

@@ -141,6 +141,14 @@ pub(crate) fn file_policy(name: &str) -> Option<FilePolicy> {
     find(name).map(|knob| knob.policy)
 }
 
+/// Whether a `VAULTWARDEN_*` name is consumed by the supervisor rather
+/// than forwarded to the child. Derived from the table, so a future
+/// `VAULTWARDEN_*` knob is routed to the supervisor automatically instead
+/// of silently reaching the child.
+pub(crate) fn consumed_child_key(name: &str) -> bool {
+    name.starts_with("VAULTWARDEN_") && find(name).is_some()
+}
+
 /// The declared string default of a scalar knob assembled by `merge`.
 pub(crate) fn string_default(name: &str) -> &'static str {
     match find(name).and_then(|knob| knob.default) {
@@ -238,6 +246,20 @@ mod tests {
                 "{} is legacy and must not be documented as usable",
                 knob.name
             );
+        }
+    }
+
+    /// `VAULTWARDEN_*` routing is derived from the table: a declared knob
+    /// is consumed by the supervisor, everything else is forwarded to the
+    /// child.
+    #[test]
+    fn child_namespace_routing_comes_from_the_table() {
+        assert!(consumed_child_key("VAULTWARDEN_PORT"));
+        assert!(consumed_child_key("VAULTWARDEN_ROCKET_PORT"));
+        assert!(!consumed_child_key("VAULTWARDEN_DATABASE_URL"));
+        assert!(!consumed_child_key("DATABASE_URL"));
+        for knob in KNOBS.iter().filter(|k| k.name.starts_with("VAULTWARDEN_")) {
+            assert!(consumed_child_key(knob.name), "{}", knob.name);
         }
     }
 }

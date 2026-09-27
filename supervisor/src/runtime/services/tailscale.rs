@@ -1,7 +1,7 @@
 //! tailscaled / tailscale CLI control.
 
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::{TAILSCALE, TAILSCALED};
 use crate::runtime::{Handle, apply_env, run_bounded, run_bounded_capture, spawn};
@@ -87,6 +87,9 @@ pub fn tailscale_up(
 /// config not yet active), so the live `serve status` output is checked
 /// for the configured target before success is reported — the boot gate
 /// that treats serve failure as fatal is only as good as this check.
+///
+/// The whole sequence shares one `timeout` budget: a slow CLI must not
+/// multiply the phase's bound by the number of calls (up to six).
 pub fn tailscale_serve(
     port: &str,
     service: Option<&str>,
@@ -94,9 +97,13 @@ pub fn tailscale_serve(
     timeout: Duration,
     abort: &impl Fn() -> bool,
 ) -> bool {
-    if let Some(svc) = service {
+    let deadline = Instant::now() + timeout;
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+    if let Some(svc) = service
+        && !remaining().is_zero()
+    {
         let _ = run_bounded(
-            timeout,
+            remaining(),
             TAILSCALE,
             &["--socket", socket, "serve", "clear", svc],
             abort,
@@ -111,18 +118,18 @@ pub fn tailscale_serve(
     }
     args.push("--https=443");
     args.push(&target);
-    if !run_bounded(timeout, TAILSCALE, &args, abort) {
+    if remaining().is_zero() || !run_bounded(remaining(), TAILSCALE, &args, abort) {
         return false;
     }
     // Readiness: `serve status` must show the configured target. One
     // bounded retry covers the config-propagation gap between `serve`
     // returning and the status reflecting it.
     for _ in 0..3 {
-        if abort() {
+        if abort() || remaining().is_zero() {
             return false;
         }
         let status = run_bounded_capture(
-            timeout,
+            remaining(),
             TAILSCALE,
             &["--socket", socket, "serve", "status", "--json"],
             &[],
@@ -131,7 +138,7 @@ pub fn tailscale_serve(
         if status.is_some_and(|s| serve_status_has(&s, &target)) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(500).min(remaining()));
     }
     log::err("tailscale serve: config not visible in serve status");
     false

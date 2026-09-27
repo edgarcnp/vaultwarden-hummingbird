@@ -2,6 +2,7 @@
 //! namespacing, non-empty semantics, port validation, lenient booleans,
 //! and the Tailscale Service reference.
 
+use super::schema;
 use crate::util::log;
 
 /// Keys that stay with PID 1 and never reach the vaultwarden child: the
@@ -11,16 +12,17 @@ pub fn is_supervisor_key(key: &str) -> bool {
     key.starts_with("TAILSCALE_") || key.starts_with("SUPERVISOR_")
 }
 
-/// Keys the supervisor consumes itself, on top of its own namespaces: the
-/// exposed-port knob (`VAULTWARDEN_PORT`), and the legacy alias
-/// `VAULTWARDEN_ROCKET_PORT` — which is consumed only so it can be routed
-/// away from the child and refused at resolution with a message naming
-/// the one valid spelling. These must resolve the same way wherever the
-/// user defined them (env or dotenv file) and must never reach the
-/// vaultwarden child — the supervisor binds the gate on them and pins
-/// the child's ROCKET_PORT itself.
+/// Keys the supervisor consumes itself, on top of its own namespaces: a
+/// `VAULTWARDEN_*` name is consumed only when it is declared in the schema
+/// table (the exposed-port knob `VAULTWARDEN_PORT`, and the legacy alias
+/// `VAULTWARDEN_ROCKET_PORT`, which is consumed only so it can be routed
+/// away from the child and refused at resolution with a message naming the
+/// one valid spelling). These must resolve the same way wherever the user
+/// defined them (env or dotenv file) and must never reach the vaultwarden
+/// child — the supervisor binds the gate on them and pins the child's
+/// ROCKET_PORT itself.
 pub fn is_supervisor_consumed(key: &str) -> bool {
-    is_supervisor_key(key) || key == "VAULTWARDEN_PORT" || key == "VAULTWARDEN_ROCKET_PORT"
+    is_supervisor_key(key) || schema::consumed_child_key(key)
 }
 
 /// The child-side name for a `VAULTWARDEN_*` key: the prefix is stripped so

@@ -37,14 +37,33 @@ const MAX_CONNS: usize = 32;
 /// it the listener stays readable and the loop spins.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
-/// Bind the exposed port on `0.0.0.0`. Failure means the deployment is
-/// broken (health checks unreachable); the caller exits. An unparseable
-/// port is a bind error, never a silent ephemeral fallback.
+/// Bind the exposed port. When the kernel serves IPv4 on an IPv6 wildcard
+/// socket (`net.ipv6.bindv6only=0`, the common default), prefer `[::]` so
+/// a platform probing over either family reaches `/alive`; otherwise bind
+/// IPv4 only, as before. Failure means the deployment is broken (health
+/// checks unreachable); the caller exits. An unparseable port is a bind
+/// error, never a silent ephemeral fallback.
 pub fn bind(port: &str) -> std::io::Result<TcpListener> {
     let port: u16 = port
         .parse()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid port"))?;
+    if dual_stack_wildcard()
+        && let Ok(listener) = TcpListener::bind(("::", port))
+    {
+        return Ok(listener);
+    }
     TcpListener::bind(("0.0.0.0", port))
+}
+
+/// Whether a wildcard IPv6 socket also serves IPv4 on this system: the
+/// kernel default for new sockets (`0` = dual-stack, `1` = IPv6 only).
+/// Without a `setsockopt` dependency this is the reliable signal; when the
+/// sysctl is unreadable (IPv6 disabled, or not Linux procfs) the caller
+/// falls back to an IPv4 bind.
+pub(super) fn dual_stack_wildcard() -> bool {
+    std::fs::read_to_string("/proc/sys/net/ipv6/bindv6only")
+        .map(|value| value.trim() == "0")
+        .unwrap_or(false)
 }
 
 /// Serve the bound listener forever, probing vaultwarden at `vault` for
@@ -96,8 +115,8 @@ pub(super) fn serve_with(listener: TcpListener, vault: Option<std::net::SocketAd
 /// Boot-time log line describing the exposure model (single line, no secrets).
 pub fn describe(exposed: &str, vault: &str) {
     log::info(&format!(
-        "gatekeeper: /alive on 0.0.0.0:{exposed}; API loopback-only on 127.0.0.1:{vault} \
-         (tailnet via tailscale serve)"
+        "gatekeeper: /alive on the exposed port {exposed} (IPv4, and IPv6 where available); \
+         API loopback-only on 127.0.0.1:{vault} (tailnet via tailscale serve)"
     ));
 }
 
