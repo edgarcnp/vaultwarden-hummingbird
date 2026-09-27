@@ -601,9 +601,35 @@ Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document)
 - Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
   `cargo test --locked` → **143 passed, 0 failed**, 8 consecutive runs.
 
-Deliberately not yet done: F4/F6/F9–F12 (backup generation manifests), F13 and the checksum half of F1's
-verification (sync manifest/journal), F14's multipart/resume half, F17/F18/F19 (dotenv hardening), F16/F21/F24
-(S3 endpoint/CI/supply chain).
+### Phase 4 — backup generation manifest
+
+- **F9 (clock rollback), F10 (corrupt newest blocks boot), F11 (foreign object becomes newest), F4 (stale
+  sidecar jams backups):** the bucket now carries `<prefix>/manifest` (line-oriented, versioned, no new
+  dependency) listing `generation name size` in ascending order. Ordering is by generation, never by wall clock;
+  restore walks generations newest-first and imports the first one that passes `integrity_check`; prune deletes
+  the exact generations the manifest write dropped; objects not in the manifest are never imported as backups.
+- **F4's remedy now works:** the sidecar records a generation, and an explicit `SUPERVISOR_DB_BACKUP_RESTORE=true`
+  adopts the manifest's generation even when a stale sidecar is present — the crash window between the manifest
+  write and the sidecar write can no longer jam backups forever. The refusal message names the real alternatives
+  (adopt, or clear the bucket).
+- **F6:** an existing but *provably empty* live database (the state the emptiness gate accepts) is cleared before
+  the no-replace link, instead of failing with `EEXIST` in a permanent boot loop. A non-empty file is still never
+  touched.
+- **Crash/ordering discipline:** object PUT → manifest write → prune. A crash leaves at most an unreferenced
+  object; a manifest-write failure deletes the just-pushed orphan and leaves lineage untouched, so the next tick
+  retries instead of accumulating junk or advancing a lie.
+- **Migration:** a bucket without a manifest is read through the legacy listing (generations assigned by name
+  order); the first successful push persists a real manifest, and a pre-manifest sidecar name resolves through it.
+- **Tests:** manifest parse/render/reject/evict/legacy tests; lineage generation + legacy-name resolution and the
+  numeric verdict matrix; pure skip-decision and lineage-resolution tests; `import_replaces_a_provably_empty_live_db`;
+  the restore-stub test now exercises the manifest-first path. The restore fallback loop itself is not
+  stub-exercised end-to-end — the pure ordering decisions are covered instead.
+- Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
+  `cargo test --locked` → **151 passed, 0 failed**, 6 consecutive runs.
+
+Deliberately not yet done: F13 (sync manifest/journal: hash-based change detection, healing equal-size remote
+corruption), F14's multipart/resume half, F17/F18/F19 (dotenv hardening), F16/F21/F24 (S3 endpoint/CI/supply
+chain).
 
 ## Appendix A — evidence commands
 
