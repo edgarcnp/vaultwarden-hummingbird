@@ -45,9 +45,9 @@ The keys come in three groups:
 - `SUPERVISOR_*` — the optional extras below: state sync, backups.
 - `VAULTWARDEN_*` — vaultwarden's own settings, just with a prefix. `VAULTWARDEN_DATABASE_URL` becomes `DATABASE_URL` inside. Vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template) lists everything it understands.
 
-The file is strict on purpose. Only those three prefixes are accepted, and anything else (a typo, or a bare name like `DATABASE_URL`) stops the boot and names the offending keys. A misconfigured vault should never start quietly. A key outside the namespaces is always fatal; a typo *inside* one can't be told apart from a key that is merely unused, so it isn't: unknown `SUPERVISOR_*`/`TAILSCALE_*` keys are ignored, and unknown `VAULTWARDEN_*` keys are handed to the vault, which ignores them. Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and rename `VAULTWARDEN_ROCKET_PORT`/`ROCKET_PORT` to `VAULTWARDEN_PORT`. The port has one spelling now.
+The file is strict on purpose. Only those three prefixes are accepted, and anything else (a typo, or a bare name like `DATABASE_URL`) stops the boot and names the offending keys. A misconfigured vault should never start quietly. A key outside the namespaces is always fatal, and so is a key inside the supervisor's own namespaces that the supervisor doesn't know — its `SUPERVISOR_*`/`TAILSCALE_*` keys are a closed set. Unknown `VAULTWARDEN_*` keys are handed to the vault, which ignores what it doesn't know. Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and rename `VAULTWARDEN_ROCKET_PORT`/`ROCKET_PORT` to `VAULTWARDEN_PORT`. The port has one spelling now.
 
-If a key is set both in the file and on the container, the container wins. An empty value counts as unset. And the vault's environment is default-deny: on the container env, only `VAULTWARDEN_`-prefixed keys reach the vault.
+If a key is set both in the file and on the container, the container wins. An empty value counts as unset. Unquoted `$VAR` in the file is substituted from the environment; single-quote a value to keep a literal `$`. And the vault's environment is default-deny: on the container env, only `VAULTWARDEN_`-prefixed keys reach the vault.
 
 ### Tailscale
 

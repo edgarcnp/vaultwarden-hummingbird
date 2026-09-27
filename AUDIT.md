@@ -627,9 +627,34 @@ Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document)
 - Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
   `cargo test --locked` → **151 passed, 0 failed**, 6 consecutive runs.
 
+### Phase 5 — declarative config schema
+
+- **One knob table:** `config/env/schema.rs` is the inventory of every supervisor-consumed key with its file
+  policy (accepted / legacy / process-env-only) and typed default. It drives:
+  - dotenv validation — an unknown `SUPERVISOR_*`/`TAILSCALE_*` key now refuses the boot (**F19**), and
+    `SUPERVISOR_ENV_FILE` inside the file refuses instead of sitting inert;
+  - the scalar defaults `merge` assembles (`TAILSCALE_STATE_FILE`, `TAILSCALE_SOCKET`, `TAILSCALE_HOSTNAME`,
+    `TAILSCALE_SERVE`, `TAILSCALE_USERSPACE`, `VAULTWARDEN_PORT`), which no longer exist twice;
+  - a docs contract test: `.env.example` and the table must agree in both directions — a documented key that is
+    not a knob fails, a file-facing knob that is undocumented fails, legacy spellings must not be documented.
+- **F17:** a configured-but-unreadable dotenv file refuses the boot instead of silently continuing with env-only
+  defaults; a UTF-8 BOM is stripped (it used to corrupt the first key); syntax errors log the logical entry
+  instead of a value byte offset.
+- **F18:** unquoted `$VAR` substitution is documented in README and `.env.example` (single-quote a value to keep
+  a literal `$`), with the behavior pinned by the existing dotenv tests.
+- **F23:** `sqlite_path` now mirrors the pinned vaultwarden exactly — strip `sqlite://` and keep the remainder
+  verbatim, no percent-decoding (checked against upstream 1.37.2, which does the same) — and a bare `sqlite://`
+  yields no path instead of arming a backup at `""`.
+- Dependency: `percent-encoding` removed; its only user was the decoding that was wrong.
+- Tests: 157 total; new coverage for the table itself, the `.env.example` contract, BOM handling, unknown and
+  process-only keys, the unreadable-file refusal, and the dburl cases.
+- Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
+  `cargo test --locked` → **157 passed, 0 failed**, 6 consecutive runs.
+
 Deliberately not yet done: F13 (sync manifest/journal: hash-based change detection, healing equal-size remote
-corruption), F14's multipart/resume half, F17/F18/F19 (dotenv hardening), F16/F21/F24 (S3 endpoint/CI/supply
-chain).
+corruption), F14's multipart/resume half, F16 (AWS region/path endpoint handling), F21/F24 (PR image build,
+pinning policy, SBOM), and the blueprint's typed `SecretString` wrappers (the current invariant — no `Debug` on
+config types, sanitized logs — already holds and has no open defect behind it).
 
 ## Appendix A — evidence commands
 
