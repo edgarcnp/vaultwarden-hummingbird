@@ -544,7 +544,9 @@ and the phase machine, reaper, and import mechanisms do not need to be touched a
 
 ---
 
-## 6. Phase 1 status (applied 2026-09-27)
+## 6. Phase status (2026-09-27)
+
+### Phase 1 — correctness patches
 
 The correctness patches from the migration plan's step 1 are implemented:
 
@@ -559,11 +561,26 @@ The correctness patches from the migration plan's step 1 are implemented:
 | F8 | One absolute budget for the whole request head; a timed-out head is answered 403 | `a_trickling_request_cannot_extend_the_head_budget` |
 | Docs drift | README lines 5/48/73/93/109, `.env.example` 19/86-88, CONTRIBUTING 38/110-117, Containerfile defaults comment | n/a |
 
-Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
-`cargo test --locked` → **135 passed, 0 failed**.
+Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document).
 
-Deliberately not in phase 1: F1/F13/F14/F15 (sync transfer and S3 semantics), F4/F5/F6/F9–F12 (reactor and
-backup generation manifests), F17/F18/F19 (dotenv hardening), F16/F21/F24 (S3 endpoint/CI/supply chain).
+### Phase 2 — single maintenance reactor
+
+- **F5 and the staging race (backup report M1):** `runtime/maintenance.rs` replaces the two detached periodic
+  threads with one scheduler thread that owns the DB backup and state-sync tasks *and* the final shutdown flush.
+  The stop token is monotonic (never consumed, unlike the process flag), so an in-flight tick aborts at its next
+  check; the drain waits for it and then runs the finals in task order (DB dump before state push) on the same
+  thread. Exactly one writer per durability resource after boot; interval and shutdown ticks can no longer
+  overlap, so one can never sweep away the other's staged dump.
+- **Shutdown is bounded:** the final persists get an explicit budget (`PERSIST_BUDGET`, 120 s); a stop request
+  observed while draining shortens it to `PERSIST_FORCED_BUDGET` (15 s). The watch loop asks the reactor to stop
+  the moment shutdown is decided, not after child teardown.
+- Tests: `drain_stops_in_flight_work_and_flushes_once`, `a_cadence_less_task_only_flushes`,
+  `final_flush_aborts_at_the_budget`, `a_hurry_up_shortens_the_flush_budget`.
+- Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
+  `cargo test --locked` → **139 passed, 0 failed**, 10 consecutive runs.
+
+Deliberately not yet done: F1/F13/F14/F15 (sync transfer and S3 semantics), F4/F6/F9–F12 (backup generation
+manifests), F17/F18/F19 (dotenv hardening), F16/F21/F24 (S3 endpoint/CI/supply chain).
 
 ## Appendix A — evidence commands
 
