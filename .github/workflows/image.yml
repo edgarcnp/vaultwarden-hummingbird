@@ -1,20 +1,14 @@
-# The container image: build the real Containerfile, run the fail-closed
-# smoke suite (scripts/smoke-image.sh), and keep the expensive full
-# multi-arch build in publish. Path-filtered to the build context, so
-# ordinary Rust changes stay in supervisor.yml; the Containerfile itself
-# (and Renovate's base-image and version PRs, which touch it) first builds
-# here instead of at tag time.
+# The container image: build the real Containerfile and run the
+# fail-closed smoke suite (scripts/smoke-image.sh) on changes to the build
+# context. Pull requests are where a Containerfile change is validated
+# before merge; releases are built and checked by publish at tag time; a
+# manual dispatch covers ad-hoc validation of main. Main pushes are
+# deliberately not built here: the PR run already tested the same content,
+# and rebuilding it on every push just burns CI.
 name: Image
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - Containerfile
-      - .containerignore
-      - .github/workflows/image.yml
   pull_request:
     paths:
       - Containerfile

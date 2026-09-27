@@ -111,7 +111,7 @@ The fail-closed paths need no credentials, and they're worth exercising whenever
 scripts/smoke-image.sh                    # defaults to vaultwarden-hummingbird:local
 ```
 
-It runs the image networkless and asserts: non-root user with an exec healthcheck, the one-shot `--healthcheck` refusal, the missing-authkey refusal, a bare upstream key in the dotenv file, an unknown supervisor key, a relative `TAILSCALE_STATE_FILE`, and the Tailscale fail-closed chain (tailscaled starts, the CLI fails, no vault runs). The Image workflow runs the same script on every build-context change.
+It runs the image networkless and asserts: non-root user with an exec healthcheck, the one-shot `--healthcheck` refusal, the missing-authkey refusal, a bare upstream key in the dotenv file, an unknown supervisor key, a relative `TAILSCALE_STATE_FILE`, and the Tailscale fail-closed chain (tailscaled starts, the CLI fails, no vault runs). The Image workflow runs the same script on pull requests that change the build context; releases are built and smoke-tested again by publish at tag time.
 
 ## Releases
 

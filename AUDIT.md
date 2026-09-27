@@ -653,11 +653,12 @@ Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document)
 
 ### Phase 6 — supply chain and release path
 
-- **F21 (PR image build):** `.github/workflows/image.yml` builds the real Containerfile whenever the build context
-  changes — including Renovate's Containerfile PRs — and runs the fail-closed smoke suite
+- **F21 (PR image build):** `.github/workflows/image.yml` builds the real Containerfile on pull requests that
+  change the build context — including Renovate's Containerfile PRs — and runs the fail-closed smoke suite
   (`scripts/smoke-image.sh`: image shape, entrypoint, strict-dotenv refusals, the Tailscale fail-closed chain) on
   the built image, so a broken image build is caught before tag time instead of only during a release. Path-filtered
-  so Rust-only PRs stay in `supervisor.yml`.
+  so Rust-only PRs stay in `supervisor.yml`; main pushes are not rebuilt (the PR run tested the same content) and a
+  manual dispatch covers ad-hoc validation.
 - **Base images (F21's other half):** digest-pinned to the currently served multi-arch indexes (verified with
   podman: both pins resolve to OCI indexes carrying amd64 and arm64). Renovate's Dockerfile manager now owns those
   ARGs (`pinDigests: true`; the custom tag manager is gone), so Red Hat's CVE patches arrive as digest-update PRs
