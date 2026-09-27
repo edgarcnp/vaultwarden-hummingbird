@@ -14,6 +14,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
+use rusty_s3::actions::CreateMultipartUpload;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use url::Url;
 
@@ -28,6 +29,22 @@ const SIGN_EXPIRE: Duration = Duration::from_secs(900);
 /// bucket was slow; per-phase budgets bound every hang while still giving
 /// a body this whole window to make progress.
 const BODY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Files at or above this size upload in parts: the body budget is then
+/// paid per part, so a large attachment is no longer unsyncable on a slow
+/// link.
+const MULTIPART_THRESHOLD: u64 = 16 * 1024 * 1024;
+
+/// Part size: comfortably above S3's 5 MiB minimum for non-final parts,
+/// and small enough that the in-memory part stays bounded (10k parts
+/// ≈ 80 GiB maximum).
+const PART_SIZE: u64 = 8 * 1024 * 1024;
+
+/// The part-count ceiling S3 enforces.
+const MAX_PARTS: usize = 10_000;
+
+/// Response-body cap for the multipart create handshake.
+const MULTIPART_XML_CAP: u64 = 64 * 1024;
 
 /// Absolute download cap for one synced object. Upstream clients cap
 /// Bitwarden attachments at 100 MB by default; 1 GiB leaves generous
@@ -54,15 +71,72 @@ const LIST_BODY_CAP: u64 = 16 * 1024 * 1024;
 const AUTO_REGION: &str = "auto";
 
 /// The signing region for an endpoint: the region embedded in AWS S3's
-/// regional hostnames, `auto` for every other S3-compatible provider.
+/// hostnames, `auto` for every other S3-compatible provider. Handles the
+/// regional, dualstack, and FIPS spellings AWS serves:
+/// `s3.<region>.amazonaws.com`, `s3-<region>.amazonaws.com`,
+/// `s3.dualstack.<region>.amazonaws.com`, `s3-fips.<region>.amazonaws.com`,
+/// and `s3-fips.dualstack.<region>.amazonaws.com`.
 fn region_for(endpoint: &Url) -> String {
-    match endpoint.host_str() {
-        Some("s3.amazonaws.com") => "us-east-1".into(),
-        Some(host) if host.starts_with("s3.") && host.ends_with(".amazonaws.com") => {
-            host["s3.".len()..host.len() - ".amazonaws.com".len()].to_string()
-        }
-        _ => AUTO_REGION.to_string(),
+    let Some(host) = endpoint.host_str() else {
+        return AUTO_REGION.to_string();
+    };
+    let Some(rest) = host.strip_suffix(".amazonaws.com") else {
+        return AUTO_REGION.to_string();
+    };
+    if rest == "s3" {
+        // The legacy global host (`s3.amazonaws.com`).
+        return "us-east-1".to_string();
     }
+    // The dot form (`s3.<...>`) or the hyphen form (`s3-<...>`).
+    let rest = match rest.strip_prefix("s3.") {
+        Some(rest) => rest,
+        None => match rest.strip_prefix("s3-") {
+            Some(rest) => rest,
+            None => return AUTO_REGION.to_string(),
+        },
+    };
+    let mut region = rest;
+    loop {
+        let stripped = region
+            .strip_prefix("dualstack.")
+            .or_else(|| region.strip_prefix("fips."))
+            .or_else(|| region.strip_prefix("fips-"));
+        match stripped {
+            Some(next) => region = next,
+            None => break,
+        }
+    }
+    match region {
+        // The legacy `s3-external-1` alias is us-east-1.
+        "" | "external-1" => "us-east-1".to_string(),
+        region => region.to_string(),
+    }
+}
+
+/// A path-prefixed endpoint must keep its prefix when rusty-s3 joins the
+/// bucket: `Url::join` replaces the last segment unless the path ends with
+/// a separator, which would silently drop `https://host/s3` to
+/// `https://host/<bucket>`. Normalize once, at connect.
+fn normalize_endpoint(mut endpoint: Url) -> Url {
+    if !endpoint.path().ends_with('/') {
+        let mut path = endpoint.path().to_string();
+        path.push('/');
+        endpoint.set_path(&path);
+    }
+    endpoint
+}
+
+/// What a download must turn out to be: the caller's expectations, checked
+/// before the temp file is published. Size and checksum together protect
+/// against an object that was truncated, corrupted, or substituted.
+#[derive(Clone, Copy)]
+pub struct Expect<'a> {
+    /// The exact size, when the listing or manifest provided one.
+    pub size: Option<u64>,
+    /// The exact lowercase-hex SHA-256, when the manifest provided one.
+    pub sha256: Option<&'a str>,
+    /// Absolute cap regardless of the expectations above.
+    pub max_bytes: u64,
 }
 
 /// One listed object: its full key and size. The size feeds the state
@@ -97,6 +171,7 @@ impl Client {
             .endpoint
             .parse()
             .map_err(|e| anyhow!("invalid S3 endpoint: {e}"))?;
+        let endpoint = normalize_endpoint(endpoint);
         let bucket = Bucket::new(
             endpoint.clone(),
             UrlStyle::Path,
@@ -127,7 +202,9 @@ impl Client {
     }
 
     /// Upload a file as `key`. Content-Length is set explicitly: S3
-    /// rejects chunked PUT bodies.
+    /// rejects chunked PUT bodies. Files at or above
+    /// [`MULTIPART_THRESHOLD`] go through the multipart path, so each part
+    /// gets its own body budget.
     pub fn put(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");
@@ -138,6 +215,9 @@ impl Client {
             .metadata()
             .map_err(|e| anyhow!("cannot size {path}: {e}"))?
             .len();
+        if size >= MULTIPART_THRESHOLD {
+            return self.put_multipart(key, path, size, PART_SIZE, abort);
+        }
         let url = self
             .bucket
             .put_object(Some(&self.credentials), key)
@@ -150,6 +230,136 @@ impl Client {
             .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
         checked("upload", key, response)?;
         Ok(())
+    }
+
+    /// Multipart upload for large files: create, upload parts sequentially
+    /// (each part with the full body budget), complete — or abort, so no
+    /// half-uploaded object lingers consuming storage. The part size is a
+    /// parameter so tests can exercise the flow without moving gigabytes.
+    fn put_multipart(
+        &self,
+        key: &str,
+        path: &str,
+        size: u64,
+        part_size: u64,
+        abort: impl Fn() -> bool,
+    ) -> anyhow::Result<()> {
+        if abort() {
+            bail!("aborted");
+        }
+        let url = self
+            .bucket
+            .create_multipart_upload(Some(&self.credentials), key)
+            .sign(SIGN_EXPIRE);
+        let response = self
+            .agent
+            .post(url.as_str())
+            .send_empty()
+            .map_err(|e| anyhow!("creating the upload of {key} failed: {}", http_err(&e)))?;
+        let response = checked("create upload", key, response)?;
+        let mut body = String::new();
+        response
+            .into_body()
+            .into_reader()
+            .take(MULTIPART_XML_CAP)
+            .read_to_string(&mut body)
+            .map_err(|e| anyhow!("creating the upload of {key}: {e}"))?;
+        let upload_id = CreateMultipartUpload::parse_response(&body)
+            .map_err(|_| anyhow!("creating the upload of {key}: unparseable response"))?
+            .upload_id()
+            .to_string();
+        let etags = match self.put_parts(key, path, size, part_size, &upload_id, &abort) {
+            Ok(etags) => etags,
+            Err(e) => {
+                self.abort_upload(key, &upload_id);
+                return Err(e);
+            }
+        };
+        let action = self.bucket.complete_multipart_upload(
+            Some(&self.credentials),
+            key,
+            &upload_id,
+            etags.iter().map(String::as_str),
+        );
+        let url = action.sign(SIGN_EXPIRE);
+        let body = action.body();
+        let response = self
+            .agent
+            .post(url.as_str())
+            .header("Content-Type", "application/xml")
+            .send(body)
+            .map_err(|e| anyhow!("completing the upload of {key} failed: {}", http_err(&e)))?;
+        if let Err(e) = checked("complete upload", key, response) {
+            self.abort_upload(key, &upload_id);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Upload every part in order, collecting the ETags the completion
+    /// needs. Parts are read one at a time (bounded memory) and each part
+    /// request gets the full body budget.
+    fn put_parts(
+        &self,
+        key: &str,
+        path: &str,
+        size: u64,
+        part_size: u64,
+        upload_id: &str,
+        abort: &impl Fn() -> bool,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut file =
+            std::fs::File::open(path).map_err(|e| anyhow!("cannot open {path} for upload: {e}"))?;
+        let mut etags: Vec<String> = Vec::new();
+        let mut offset: u64 = 0;
+        while offset < size {
+            if abort() {
+                bail!("aborted");
+            }
+            if etags.len() >= MAX_PARTS {
+                bail!("upload of {key}: more than {MAX_PARTS} parts needed");
+            }
+            let part_number = etags.len() as u16 + 1;
+            let this = (size - offset).min(part_size);
+            let mut chunk = vec![0u8; this as usize];
+            file.read_exact(&mut chunk)
+                .map_err(|e| anyhow!("reading {path}: {e}"))?;
+            let url = self
+                .bucket
+                .upload_part(Some(&self.credentials), key, part_number, upload_id)
+                .sign(SIGN_EXPIRE);
+            let response = self
+                .agent
+                .put(url.as_str())
+                .header("Content-Length", chunk.len().to_string())
+                .send(&chunk)
+                .map_err(|e| {
+                    anyhow!(
+                        "upload part {part_number} of {key} failed: {}",
+                        http_err(&e)
+                    )
+                })?;
+            let response = checked("upload part", key, response)?;
+            let etag = response
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("upload part {part_number} of {key}: no ETag returned"))?;
+            etags.push(etag);
+            offset += this;
+        }
+        Ok(etags)
+    }
+
+    /// Best-effort abort: the caller keeps the original failure, and S3
+    /// stops billing for the parts.
+    fn abort_upload(&self, key: &str, upload_id: &str) {
+        let url = self
+            .bucket
+            .abort_multipart_upload(Some(&self.credentials), key, upload_id)
+            .sign(SIGN_EXPIRE);
+        let _ = self.agent.delete(url.as_str()).call();
     }
 
     /// Upload a small in-memory object (the DB manifest): [`Self::put`]
@@ -212,17 +422,16 @@ impl Client {
     }
 
     /// Download `key` into `path` atomically. Bytes land in a sibling temp
-    /// file (same filesystem) bounded by `max_bytes` and, when the listing
-    /// provided one, checked against `expected_size`; only a complete
-    /// transfer is renamed into place, so a failed or truncated download
-    /// leaves `path` untouched and removes the temp. The published file is
-    /// 0600: everything here is a secret (identity, keys, attachments).
+    /// file (same filesystem) bounded by [`Expect`], and only a transfer
+    /// that meets every expectation is renamed into place: a failed,
+    /// truncated, or mismatched download leaves `path` untouched and
+    /// removes the temp. The published file is 0600: everything here is a
+    /// secret (identity, keys, attachments).
     pub fn get(
         &self,
         key: &str,
         path: &str,
-        expected_size: Option<u64>,
-        max_bytes: u64,
+        expect: Expect<'_>,
         abort: impl Fn() -> bool,
     ) -> anyhow::Result<()> {
         if abort() {
@@ -265,10 +474,13 @@ impl Client {
                     break;
                 }
                 total += n as u64;
-                if total > max_bytes {
-                    bail!("download of {key}: exceeds the {max_bytes}-byte cap");
+                if total > expect.max_bytes {
+                    bail!(
+                        "download of {key}: exceeds the {}-byte cap",
+                        expect.max_bytes
+                    );
                 }
-                if let Some(expected) = expected_size
+                if let Some(expected) = expect.size
                     && total > expected
                 {
                     bail!("download of {key}: larger than the {expected} bytes listed");
@@ -278,10 +490,17 @@ impl Client {
             }
             out.sync_all()
                 .map_err(|e| anyhow!("download of {key}: {e}"))?;
+            if let Some(expected) = expect.sha256 {
+                let actual = crate::util::hash::sha256_file(&tmp)
+                    .map_err(|e| anyhow!("download of {key}: cannot hash the temp file: {e}"))?;
+                if actual != expected {
+                    bail!("download of {key}: sha256 mismatch (got {actual}, expected {expected})");
+                }
+            }
             Ok(total)
         })();
         let result = staged.and_then(|total| {
-            if let Some(expected) = expected_size
+            if let Some(expected) = expect.size
                 && total != expected
             {
                 bail!("download of {key}: got {total} bytes, expected {expected}");
@@ -400,9 +619,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// The signing region comes from the endpoint: AWS regional hosts
-    /// embed it (the signature is region-checked there), every other
-    /// S3-compatible provider gets `auto`.
+    /// The signing region comes from the endpoint: AWS's regional,
+    /// dualstack, and FIPS spellings embed it; every other S3-compatible
+    /// provider gets `auto`.
     #[test]
     fn region_follows_the_endpoint() {
         let region = |url: &str| region_for(&url.parse().expect("test url"));
@@ -412,8 +631,44 @@ mod tests {
         );
         assert_eq!(region("https://s3.amazonaws.com"), "us-east-1");
         assert_eq!(region("https://s3.us-east-1.amazonaws.com"), "us-east-1");
+        assert_eq!(region("https://s3-us-west-2.amazonaws.com"), "us-west-2");
+        assert_eq!(
+            region("https://s3.dualstack.us-west-2.amazonaws.com"),
+            "us-west-2"
+        );
+        assert_eq!(
+            region("https://s3-fips.us-east-1.amazonaws.com"),
+            "us-east-1"
+        );
+        assert_eq!(
+            region("https://s3-fips.dualstack.us-east-1.amazonaws.com"),
+            "us-east-1"
+        );
+        assert_eq!(
+            region("https://s3.eu-central-1.amazonaws.com"),
+            region("https://s3.dualstack.eu-central-1.amazonaws.com"),
+            "spellings must agree"
+        );
         assert_eq!(region("https://acct.r2.cloudflarestorage.com"), AUTO_REGION);
         assert_eq!(region("http://127.0.0.1:9000"), AUTO_REGION);
+        assert_eq!(region("https://notaws.example.com"), AUTO_REGION);
+    }
+
+    /// A path-prefixed endpoint keeps its prefix: rusty-s3 joins the
+    /// bucket onto the normalized URL, so an unnormalized `…/s3` would
+    /// silently become `…/<bucket>`.
+    #[test]
+    fn path_prefixes_survive_the_bucket_join() {
+        let joined = |url: &str| {
+            normalize_endpoint(url.parse().expect("test url"))
+                .join("vw-state")
+                .expect("bucket join")
+                .to_string()
+        };
+        assert_eq!(joined("https://host/s3"), "https://host/s3/vw-state");
+        assert_eq!(joined("https://host/s3/"), "https://host/s3/vw-state");
+        assert_eq!(joined("https://host/"), "https://host/vw-state");
+        assert_eq!(joined("https://host"), "https://host/vw-state");
     }
 
     fn spec(endpoint: &str) -> RemoteSpec {
@@ -471,7 +726,12 @@ mod tests {
         );
         assert!(
             client
-                .get("k", "/tmp/vw-s3-should-not-exist", None, 1024, abort)
+                .get(
+                    "k",
+                    "/tmp/vw-s3-should-not-exist",
+                    expect(None, 1024),
+                    abort
+                )
                 .is_err()
         );
         assert!(client.list("prefix/", abort).is_err());
@@ -567,6 +827,15 @@ mod tests {
             .expect("local endpoint")
     }
 
+    /// A download expectation with no hash (the listing/legacy case).
+    fn expect(size: Option<u64>, max: u64) -> Expect<'static> {
+        Expect {
+            size,
+            sha256: None,
+            max_bytes: max,
+        }
+    }
+
     /// A complete download lands atomically with owner-only permissions
     /// and leaves no temp file behind.
     #[test]
@@ -580,8 +849,7 @@ mod tests {
             .get(
                 "state/rsa_key.pem",
                 target.to_str().unwrap(),
-                Some(5),
-                1024,
+                expect(Some(5), 1024),
                 || false,
             )
             .expect("complete body publishes");
@@ -608,8 +876,7 @@ mod tests {
             .get(
                 "state/rsa_key.pem",
                 target.to_str().unwrap(),
-                Some(5),
-                1024,
+                expect(Some(5), 1024),
                 || false,
             )
             .unwrap_err();
@@ -627,9 +894,12 @@ mod tests {
         let dir = scratch("get-cap");
         let target = dir.join("db.sqlite3");
         let err = client
-            .get("db/dump.sqlite3", target.to_str().unwrap(), None, 4, || {
-                false
-            })
+            .get(
+                "db/dump.sqlite3",
+                target.to_str().unwrap(),
+                expect(None, 4),
+                || false,
+            )
             .unwrap_err();
         assert!(err.to_string().contains("cap"), "{err}");
         assert!(!target.exists(), "nothing published");
@@ -654,8 +924,7 @@ mod tests {
             .get(
                 "state/rsa_key.pem",
                 target.to_str().unwrap(),
-                None,
-                1024,
+                expect(None, 1024),
                 || false,
             )
             .unwrap_err();
@@ -668,6 +937,193 @@ mod tests {
             .put("state/rsa_key.pem", file.to_str().unwrap(), || false)
             .unwrap_err();
         assert!(err.to_string().contains("HTTP 302"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest hash mismatch fails the download and leaves the target
+    /// untouched: equal-size corruption cannot be published (F13).
+    #[test]
+    fn get_verifies_the_manifest_hash() {
+        // sha256("hello")
+        const HELLO: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        // Correct hash: published.
+        let client = local_client(fake_server("200 OK", "", b"hello"));
+        let dir = scratch("get-hash-ok");
+        let target = dir.join("rsa_key.pem");
+        client
+            .get(
+                "state/rsa_key.pem",
+                target.to_str().unwrap(),
+                Expect {
+                    size: Some(5),
+                    sha256: Some(HELLO),
+                    max_bytes: 1024,
+                },
+                || false,
+            )
+            .expect("matching hash publishes");
+        assert_eq!(std::fs::read(&target).unwrap(), b"hello");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Wrong hash: refused, target untouched, temp removed.
+        let client = local_client(fake_server("200 OK", "", b"hello"));
+        let dir = scratch("get-hash-bad");
+        let target = dir.join("rsa_key.pem");
+        std::fs::write(&target, b"old").unwrap();
+        let err = client
+            .get(
+                "state/rsa_key.pem",
+                target.to_str().unwrap(),
+                Expect {
+                    size: Some(5),
+                    sha256: Some(&"0".repeat(64)),
+                    max_bytes: 1024,
+                },
+                || false,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("sha256 mismatch"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old", "target untouched");
+        assert!(!dir.join("rsa_key.pem.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A canned endpoint for the multipart flow: create -> UploadId, part
+    /// PUTs -> ETags, complete -> 200, abort -> 204. Records the part
+    /// numbers it saw and the aborts; `fail_part` makes that part fail so
+    /// the abort path can be exercised.
+    fn fake_multipart_server(
+        parts_seen: std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
+        aborts_seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail_part: Option<u16>,
+    ) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => head.push(byte[0]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let line = text.lines().next().unwrap_or_default().to_string();
+                if let Some(len) = text
+                    .to_lowercase()
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                {
+                    let mut rest = vec![0u8; len];
+                    let _ = stream.read_exact(&mut rest);
+                }
+                let (status, extra, body) = if line.contains("uploads") {
+                    (
+                        "200 OK",
+                        String::new(),
+                        "<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><UploadId>test-upload</UploadId></InitiateMultipartUploadResult>".to_string(),
+                    )
+                } else if line.starts_with("PUT") && line.contains("partNumber=") {
+                    let part = line
+                        .split("partNumber=")
+                        .nth(1)
+                        .and_then(|rest| rest.split('&').next())
+                        .and_then(|n| n.parse::<u16>().ok())
+                        .unwrap_or(0);
+                    if Some(part) == fail_part {
+                        ("500 Internal Server Error", String::new(), String::new())
+                    } else {
+                        parts_seen.lock().unwrap().push(part);
+                        (
+                            "200 OK",
+                            format!("ETag: \"etag-{part}\"\r\n"),
+                            String::new(),
+                        )
+                    }
+                } else if line.starts_with("DELETE") {
+                    aborts_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ("204 No Content", String::new(), String::new())
+                } else if line.starts_with("POST") && line.contains("uploadId=") {
+                    (
+                        "200 OK",
+                        String::new(),
+                        "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></CompleteMultipartUploadResult>".to_string(),
+                    )
+                } else {
+                    ("400 Bad Request", String::new(), String::new())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        addr
+    }
+
+    /// Large files go multipart: parts are uploaded individually and the
+    /// upload is completed. A small part size keeps the test fast while
+    /// exercising the exact flow production uses.
+    #[test]
+    fn multipart_upload_sends_parts_and_completes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let parts = Arc::new(Mutex::new(Vec::new()));
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let client = local_client(fake_multipart_server(
+            Arc::clone(&parts),
+            Arc::clone(&aborts),
+            None,
+        ));
+        let dir = scratch("multipart");
+        let file = dir.join("big.bin");
+        std::fs::write(&file, vec![7u8; 20]).unwrap();
+        client
+            .put_multipart("state/big.bin", file.to_str().unwrap(), 20, 8, || false)
+            .expect("multipart upload completes");
+        assert_eq!(*parts.lock().unwrap(), vec![1, 2, 3], "20 bytes at 8/part");
+        assert_eq!(aborts.load(Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed part aborts the upload — no orphaned parts linger — and the
+    /// part number is named in the error.
+    #[test]
+    fn multipart_upload_aborts_on_a_failed_part() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let parts = Arc::new(Mutex::new(Vec::new()));
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let client = local_client(fake_multipart_server(
+            Arc::clone(&parts),
+            Arc::clone(&aborts),
+            Some(2),
+        ));
+        let dir = scratch("multipart-fail");
+        let file = dir.join("big.bin");
+        std::fs::write(&file, vec![7u8; 20]).unwrap();
+        let err = client
+            .put_multipart("state/big.bin", file.to_str().unwrap(), 20, 8, || false)
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 500"), "{err}");
+        assert_eq!(*parts.lock().unwrap(), vec![1], "part 2 failed");
+        assert_eq!(aborts.load(Ordering::SeqCst), 1, "the upload was aborted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

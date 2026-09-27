@@ -691,6 +691,7 @@ dependencies = [
  "nix",
  "rusqlite",
  "rusty-s3",
+ "sha2",
  "signal-hook",
  "ureq",
  "url",

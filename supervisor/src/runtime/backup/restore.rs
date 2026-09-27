@@ -9,7 +9,7 @@
 //! an unreadable manifest falls back to that listing loudly as recovery.
 
 use crate::config::DbBackupConfig;
-use crate::s3::MAX_DB_OBJECT_BYTES;
+use crate::s3::{Expect, MAX_DB_OBJECT_BYTES};
 use crate::util::log;
 
 use super::check::is_empty;
@@ -210,8 +210,11 @@ fn restore_object(
     if let Err(e) = s3.get(
         &candidate.key,
         &staged,
-        Some(candidate.size),
-        MAX_DB_OBJECT_BYTES,
+        Expect {
+            size: Some(candidate.size),
+            sha256: None,
+            max_bytes: MAX_DB_OBJECT_BYTES,
+        },
         abort,
     ) {
         log::err(&format!("db restore: download failed ({e})"));
