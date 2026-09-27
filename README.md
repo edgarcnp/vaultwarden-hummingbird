@@ -2,7 +2,7 @@
 
 Your own password vault, private and reachable only from your devices.
 
-This image bundles [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (a lightweight, Bitwarden-compatible server) with [Tailscale](https://tailscale.com), on top of Red Hat's minimal [Hummingbird](https://images.redhat.com/) images. The release artifacts inside come from official sources and are verified against pinned checksums before they run; the base images track Red Hat's latest Hummingbird tags so rebuilds pick up CVE patches. The container runs as a non-root user, with no shell and no package manager. If someone breaks in, there's almost nothing for them to work with.
+This image bundles [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (a lightweight, Bitwarden-compatible server) with [Tailscale](https://tailscale.com), on top of Red Hat's minimal [Hummingbird](https://images.redhat.com/) images. The release artifacts inside come from official sources and are verified against pinned checksums before they run, and the base images are pinned to their digests: when Red Hat's Hummingbird tags move, Renovate opens a digest-update pull request, so CVE patches arrive through review instead. The container runs as a non-root user, with no shell and no package manager. If someone breaks in, there's almost nothing for them to work with.
 
 ## How it works
 

@@ -19,7 +19,8 @@ Containerfile      the image: fetch -> supervisor -> vaultwarden -> runtime
 compose.yaml       local runner (podman/docker compose)
 .env.example       the user-facing config template (strict: 3 key prefixes)
 scripts/           update-pins.sh — recompute checksum ARGs after a version bump
-.github/workflows/ supervisor.yml (lint/test/build), pins.yml (CI digest recheck),
+.github/workflows/ supervisor.yml (lint/test/build), image.yml (Containerfile
+                   build + entrypoint smoke), pins.yml (CI digest recheck),
                    publish.yml (release images)
 supervisor/        the Rust crate — module map below
 ```
@@ -49,6 +50,7 @@ curl -i http://127.0.0.1:8080/alive
 - `VAULTWARDEN_WEB_VAULT=false` builds an API-only image, no web UI.
 - The database is SQLite on the data volume. There's no DB backend knob.
 - Renovate bumps the version ARGs and runs `scripts/update-pins.sh` to refresh the checksum digests. Never hand-edit a digest: if you bump a version yourself, run the script. CI recomputes the pins on every Containerfile change (and weekly), so a missing or stale digest is a red build.
+- The Hummingbird base images are digest-pinned too; Renovate's Dockerfile manager owns those ARGs and opens digest-update PRs when Red Hat moves the floating tags. Don't hand-edit them either.
 
 ## Working on the supervisor
 
@@ -121,12 +123,12 @@ podman exec <container> /entrypoint --healthcheck
 
 ## Releases
 
-Cutting a release is just a tag. Push a `v*` tag (or run `publish.yml` by hand) and the workflow builds amd64 and arm64, pushes the per-arch images, then publishes the multi-arch manifest as `:<tag>` and `:latest` on `ghcr.io/edgarcnp/vaultwarden-hummingbird`, with provenance attestations. The workflow never changes versions itself. It builds whatever the Containerfile pins, so bump upstream versions first (via Renovate or `scripts/update-pins.sh`) and let CI confirm the digests before you tag.
+Cutting a release is just a tag. Push a `v*` tag (or run `publish.yml` by hand) and the workflow builds amd64 and arm64, pushes the per-arch images, then publishes the multi-arch manifest on `ghcr.io/edgarcnp/vaultwarden-hummingbird`, with provenance and SPDX SBOM attestations. The tag must match `supervisor/Cargo.toml`'s version — publish verifies it — and `:latest` moves only for a tag push; a manual dispatch publishes its ref name alone. The workflow never changes versions itself. It builds whatever the Containerfile pins, so bump upstream versions first (via Renovate or `scripts/update-pins.sh`) and let CI confirm the digests before you tag.
 
 ## Opening a pull request
 
 1. Fork and make a branch.
-2. Run the checks from the sections above; build the image if you touched it.
+2. Run the checks from the sections above. If you touched the Containerfile, CI builds and smoke-tests the image; building it locally too is still the fastest way to see the whole thing run.
 3. If you edited the version pins in the Containerfile, keep those `ARG` lines byte-for-byte as they were (Renovate finds them with regexes) and run `scripts/update-pins.sh` so the digests match.
 4. If user-visible behavior changed, update README.md in the same PR.
 5. Open the PR with a short note on what changed and why.
