@@ -155,6 +155,7 @@ COPY --from=fetch --chown=65532:0 /data /data
 # is the supervisor's state sync + DB backup, not the vault's own check.
 
 ENV DATA_FOLDER=/data \
+    ENABLE_DB_WAL=true \
     ORG_ATTACHMENT_LIMIT=0 \
     ORG_CREATION_USERS=all \
     ROCKET_ADDRESS=127.0.0.1 \

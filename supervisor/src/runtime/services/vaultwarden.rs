@@ -46,6 +46,10 @@ const IMAGE_DEFAULTS: &[(&str, &str)] = &[
     ("SIGNUPS_ALLOWED", "true"),
     // the base image has no localtime; pin the documented default
     ("TZ", "UTC"),
+    // WAL keeps a live VACUUM INTO copy from blocking the vault, which is
+    // the backup promise in the README: upstream defaults it on, pinned
+    // here so an upstream default change cannot quietly break that.
+    ("ENABLE_DB_WAL", "true"),
 ];
 
 /// The vaultwarden child's granted environment, in precedence order: the
@@ -271,6 +275,11 @@ mod tests {
             "image default: user uploads off"
         );
         assert_eq!(env.get("SIGNUPS_ALLOWED").map(String::as_str), Some("true"));
+        assert_eq!(
+            env.get("ENABLE_DB_WAL").map(String::as_str),
+            Some("true"),
+            "WAL is pinned: the backup promise depends on it"
+        );
 
         let file = [("ORG_ATTACHMENT_LIMIT".to_string(), "1024".to_string())];
         let env = child_env(granted_env(std::iter::empty(), &file, "8081"));

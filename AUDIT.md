@@ -696,7 +696,9 @@ Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document)
   instead of spinning; the `StagedFile` doc no longer claims panic-time cleanup under `panic = "abort"`; a relative
   `TAILSCALE_STATE_FILE` refuses the boot (it anchors the identity and the derived `--statedir`); and an interrupted
   download resumes with a ranged retry (three bounded attempts, progress kept in the `.part` file) instead of
-  restarting from zero on a slow link.
+  restarting from zero on a slow link. `ENABLE_DB_WAL=true` is pinned in the image defaults (Containerfile and the
+  supervisor's `IMAGE_DEFAULTS`), so the "backups never pause the vault" promise cannot be invalidated by an
+  upstream default change.
 - Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
   `cargo test --locked` → **172 passed, 0 failed**, 6 consecutive runs.
 

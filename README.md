@@ -99,7 +99,7 @@ SUPERVISOR_DB_BACKUP=true
 # SUPERVISOR_DB_BACKUP_KEEP=3           # backups to keep
 ```
 
-- A backup is a clean point-in-time copy (`VACUUM INTO`) taken while the vault runs; it doesn't pause or lock the vault (WAL mode, Vaultwarden's default).
+- A backup is a clean point-in-time copy (`VACUUM INTO`) taken while the vault runs; it doesn't pause or lock the vault (the image keeps WAL mode on, so the copy never blocks the vault).
 - Backups land under `db/` with a timestamp, and the oldest are deleted beyond `KEEP`. An unchanged database isn't re-uploaded. If the container dies mid-backup you lose one cycle, never gain a broken backup.
 - A graceful stop takes one more backup after the vault exits, so a normal redeploy carries the latest sessions and devices. Give the orchestrator time to drain (compose's `stop_grace_period`).
 - `SUPERVISOR_DB_BACKUP_RESTORE=true` loads the newest backup at boot, but only into a database it can prove is empty — if the newest copy is damaged it tries the next one, and it never overwrites existing data. If it can't tell (an unreadable database, a bucket it can't list), it refuses to start rather than guess.
