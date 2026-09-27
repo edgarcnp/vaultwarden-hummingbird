@@ -1,28 +1,35 @@
-//! The periodic backup cycle (sweep -> dump -> push -> prune).
+//! The periodic backup cycle (sweep -> dump -> push -> manifest -> prune).
 
 use crate::config::DbBackupConfig;
 use crate::util::log;
 use crate::util::make_private;
 
-use super::lineage;
+use super::lineage::{self, Known, Verdict};
+use super::manifest::{Entry, Manifest};
 use super::prune::prune;
 use super::staging::sweep_staging;
 use super::timestamp::timestamp;
-use super::tools::{client, list_objects};
+use super::tools::{client, list_objects, load_manifest, store_manifest};
 use super::unchanged;
 
-/// One periodic backup cycle: sweep staging, dump, push, prune. Runs on
-/// the maintenance reactor thread; never fatal, aborting early on a stop
-/// request.
+/// One periodic backup cycle: sweep staging, dump, push, publish the
+/// manifest, prune. Runs on the maintenance reactor thread; never fatal,
+/// aborting early on a stop request.
 ///
-/// Two guards run before anything is staged: an empty database has
-/// nothing to lose (and backing one up would let a wiped /data poison
-/// the bucket), and a database that cannot prove it owns the bucket's
-/// newest dump is refused (a stale or foreign DB must not shadow good
-/// backups). A bucket-listing failure also skips the run: pushing without
-/// the lineage check would be guessing. A dump byte-identical to the
-/// bucket's newest backup is not re-uploaded (`unchanged`), so a quiet
-/// vault mints no redundant objects.
+/// Ordering: the dump object is PUT before the manifest that names it, so
+/// a crash leaves at most an unreferenced object — never a manifest
+/// pointing at a missing one; and evicted objects are deleted only after
+/// the manifest that dropped them is published.
+///
+/// Guards run before anything is staged: an empty database has nothing to
+/// lose (and backing one up would let a wiped /data poison the bucket),
+/// and a database that cannot prove it owns the bucket's newest
+/// generation is refused (a stale or foreign DB must not shadow good
+/// backups). An absent manifest means the legacy layout: the name listing
+/// is converted into an equivalent in-memory manifest, and the first
+/// successful push persists it. A dump byte-identical to the newest
+/// backup is not re-uploaded (`unchanged`), so a quiet vault mints no
+/// redundant objects.
 pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     if abort() {
         return;
@@ -51,32 +58,43 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
             return;
         }
     };
-    let mut names = match list_objects(&s3, cfg, &abort) {
-        Ok(names) => names,
+    let mut manifest = match load_manifest(&s3, cfg, &abort) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => match list_objects(&s3, cfg, &abort) {
+            Ok(listed) => Manifest::from_listing(&listed),
+            Err(e) => {
+                log::err(&format!(
+                    "db backup: skipped: cannot list the bucket ({e}); refusing to back up \
+                     without knowing the bucket's newest backup — check credentials and \
+                     network; the next tick retries"
+                ));
+                return;
+            }
+        },
         Err(e) => {
             log::err(&format!(
-                "db backup: skipped: cannot list the bucket ({e}); refusing to back up \
-                 without knowing the bucket's newest backup — check credentials and \
-                 network; the next tick retries"
+                "db backup: skipped: cannot read the manifest ({e}); refusing to push \
+                 without knowing the bucket's history — check credentials and that the \
+                 manifest object is readable; the next tick retries"
             ));
             return;
         }
     };
-    let known = lineage::read(&cfg.db_path);
-    if matches!(
-        lineage::verdict(known.as_deref(), names.last().map(String::as_str)),
-        lineage::Verdict::Refuse
-    ) {
-        log::err(
+    // The local lineage: current sidecars hold a generation; a pre-manifest
+    // sidecar holds an object name, resolved against the manifest now.
+    let known = resolve_known(lineage::read(&cfg.db_path), &manifest);
+    if matches!(lineage::verdict(known, manifest.latest()), Verdict::Refuse) {
+        log::err(&format!(
             "db backup: the bucket holds a newer backup than this database's lineage; \
              refusing to shadow it — boot with SUPERVISOR_DB_BACKUP_RESTORE=true to \
-             adopt it, or clear the bucket to start a new generation",
-        );
+             adopt generation {}, or clear the bucket to start a new generation",
+            manifest.latest(),
+        ));
         return;
     }
     let ts = timestamp();
     let staged = format!("{}/{}-{ts}.{}", cfg.staging, cfg.db_label(), cfg.db_ext());
-    let object = object_key(cfg, &ts);
+    let name = object_name(cfg, &ts);
 
     if !sweep_staging(&cfg.staging) {
         return;
@@ -92,21 +110,19 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     let _ = make_private(&staged);
     let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
     // Skip a redundant upload only while this lineage still owns the
-    // bucket's newest object: if that object was deleted externally, the
-    // push below heals continuity instead of skipping over the gap.
-    let bucket_newest = names.last().map(String::as_str);
-    if bucket_newest.is_some()
-        && bucket_newest == known.as_deref()
-        && unchanged::is_repeat(&staged, &cfg.db_path)
-    {
+    // newest generation: if that object was deleted externally, the push
+    // below heals continuity instead of skipping over the gap.
+    if upload_is_redundant(
+        known,
+        manifest.latest(),
+        unchanged::is_repeat(&staged, &cfg.db_path),
+    ) {
         let _ = std::fs::remove_file(&staged);
         log::info("db backup: dump is identical to the newest backup; upload skipped");
         return;
     }
-    // The object name is timestamped and unique, so the destination can
-    // never exist and no existence check is wasted on it: uploads are
-    // unconditional PUTs to fresh keys.
-    if let Err(e) = s3.put(&object, &staged, &abort) {
+    let key = format!("{}{name}", cfg.prefix());
+    if let Err(e) = s3.put(&key, &staged, &abort) {
         log::err(&format!(
             "db backup: push failed ({e}); previous backups are intact, the next tick \
              retries (if it repeats, check the bucket credentials and network)"
@@ -114,20 +130,63 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         let _ = std::fs::remove_file(&staged);
         return;
     }
-    let object_name = object.rsplit('/').next().unwrap_or(&object);
-    lineage::write(&cfg.db_path, object_name);
-    unchanged::retain(&staged, &cfg.db_path);
-    log::info(&format!("db backup: pushed {object} ({size} bytes)"));
-    // The listing predates the push: add the new object so keep-N counts it.
-    names.push(object_name.to_string());
-    prune(&s3, cfg, names, &abort);
+    let generation = manifest.next_generation();
+    manifest.push(Entry {
+        generation,
+        name: name.clone(),
+        size,
+    });
+    let evicted = manifest.retain(cfg.keep);
+    match store_manifest(&s3, cfg, &manifest, &abort) {
+        Ok(()) => {
+            lineage::write(&cfg.db_path, generation);
+            unchanged::retain(&staged, &cfg.db_path);
+            log::info(&format!(
+                "db backup: pushed {key} ({size} bytes, generation {generation})"
+            ));
+            prune(&s3, cfg, &evicted, &abort);
+        }
+        Err(e) => {
+            // The dump we just pushed is now unreferenced: remove it so a
+            // manifest-write outage cannot accumulate orphans, and leave
+            // the lineage where it was so the next tick retries.
+            log::err(&format!(
+                "db backup: pushed {key} but cannot publish the manifest ({e}); removing \
+                 the unreferenced dump and retrying next tick — check that the access \
+                 key may write the manifest object"
+            ));
+            let _ = std::fs::remove_file(&staged);
+            if let Err(d) = s3.delete(&key, &abort) {
+                log::err(&format!(
+                    "db backup: cannot remove the unreferenced dump {key} ({d}); restore \
+                     and prune ignore it"
+                ));
+            }
+        }
+    }
 }
 
-/// The bucket key for a dump: `<prefix><label>-<ts>.<ext>`. The prefix
-/// already ends with `/` — an extra separator would hide the object from
-/// every `db/`-relative listing (prune, restore, lineage).
-fn object_key(cfg: &DbBackupConfig, ts: &str) -> String {
-    format!("{}{}-{ts}.{}", cfg.prefix(), cfg.db_label(), cfg.db_ext())
+/// The dump's bare object name (`sqlite-<timestamp>.sqlite3`).
+fn object_name(cfg: &DbBackupConfig, ts: &str) -> String {
+    format!("{}-{ts}.{}", cfg.db_label(), cfg.db_ext())
+}
+
+/// The lineage's known generation: a legacy name resolves through the
+/// manifest; a name that is not there (foreign, or pruned) stays unproven.
+fn resolve_known(recorded: Option<Known>, manifest: &Manifest) -> Option<u64> {
+    match recorded {
+        Some(Known::Generation(generation)) => Some(generation),
+        Some(Known::LegacyName(name)) => manifest.find_name(&name).map(|entry| entry.generation),
+        None => None,
+    }
+}
+
+/// Whether the fresh dump may skip its upload: only while this lineage
+/// owns the newest generation and the bytes are unchanged. A stale
+/// lineage, an unproven one, or an externally deleted newest object all
+/// force a push, so continuity heals instead of skipping over a gap.
+fn upload_is_redundant(known: Option<u64>, latest: u64, dump_unchanged: bool) -> bool {
+    latest > 0 && known == Some(latest) && dump_unchanged
 }
 
 #[cfg(test)]
@@ -140,7 +199,7 @@ mod tests {
     use super::*;
 
     /// A missing database is empty: the tick skips before anything is
-    /// staged (and before any bucket listing — nothing to back up).
+    /// staged (and before any bucket call — nothing to back up).
     #[test]
     fn tick_skips_a_missing_database() {
         let cfg = support::cfg();
@@ -167,6 +226,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The full object key never doubles the separator between the backup
+    /// prefix and the dump name.
     #[test]
     fn object_key_never_doubles_the_slash() {
         for remote in ["r2:bucket", "r2:bucket/sub"] {
@@ -179,12 +240,62 @@ mod tests {
             )
             .expect("valid test remote");
             let cfg = support::cfg_with_sync(sync);
-            let key = object_key(&cfg, "20260911T182850Z");
+            let key = format!("{}{}", cfg.prefix(), object_name(&cfg, "20260911T182850Z"));
             assert_eq!(
                 key,
                 format!("{}sqlite-20260911T182850Z.sqlite3", cfg.prefix())
             );
             assert!(!key.contains("//"), "no doubled separator allowed: {key}");
         }
+    }
+
+    /// Skip decisions: only a lineage that owns the newest generation and
+    /// byte-identical dump bytes skips. A stale or unproven lineage, or an
+    /// empty bucket, always pushes (healing continuity).
+    #[test]
+    fn skip_requires_current_lineage_and_identical_bytes() {
+        assert!(upload_is_redundant(Some(3), 3, true));
+        assert!(
+            !upload_is_redundant(Some(3), 3, false),
+            "changed bytes push"
+        );
+        assert!(
+            !upload_is_redundant(Some(2), 3, true),
+            "a stale lineage must push, not skip over a newer backup"
+        );
+        assert!(
+            !upload_is_redundant(None, 3, true),
+            "unproven lineage pushes"
+        );
+        assert!(
+            !upload_is_redundant(Some(0), 0, true),
+            "an empty bucket needs its first push"
+        );
+    }
+
+    /// A pre-manifest sidecar name resolves through the manifest; a name
+    /// that is not there stays unproven (never guessed).
+    #[test]
+    fn legacy_names_resolve_through_the_manifest() {
+        let manifest = Manifest::from_listing(&[
+            ("sqlite-1.sqlite3".to_string(), 1),
+            ("sqlite-2.sqlite3".to_string(), 2),
+        ]);
+        assert_eq!(
+            resolve_known(Some(Known::Generation(7)), &manifest),
+            Some(7)
+        );
+        assert_eq!(
+            resolve_known(
+                Some(Known::LegacyName("sqlite-2.sqlite3".into())),
+                &manifest
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            resolve_known(Some(Known::LegacyName("foreign.sqlite3".into())), &manifest),
+            None
+        );
+        assert_eq!(resolve_known(None, &manifest), None);
     }
 }

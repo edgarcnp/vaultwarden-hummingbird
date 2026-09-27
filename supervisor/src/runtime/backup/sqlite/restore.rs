@@ -35,10 +35,13 @@ pub(crate) fn is_empty(path: &str) -> anyhow::Result<bool> {
 /// then import via atomic no-replace publication. `link(2)` fails with
 /// `AlreadyExists` if anything created the live path meanwhile — unlike
 /// `rename(2)`, which would silently replace it — so the never-overwrite
-/// invariant is enforced by the kernel, not by a check. The 0600 mode is
-/// applied to the staged inode before linking, so the live path never
-/// exists with wider permissions. Both paths sit on the same data volume,
-/// so the hard link is always possible (same constraint `rename` had).
+/// invariant is enforced by the kernel, not by a check. A live path that
+/// exists but is *provably empty* (the same predicate [`is_empty`] uses)
+/// is cleared first: it holds no data, and the no-replace link cannot
+/// publish over it. The 0600 mode is applied to the staged inode before
+/// linking, so the live path never exists with wider permissions. Both
+/// paths sit on the same data volume, so the hard link is always possible
+/// (same constraint `rename` had).
 pub(crate) fn import(staged: &str, path: &str) -> bool {
     let check = match rusqlite::Connection::open_with_flags(
         staged,
@@ -58,6 +61,31 @@ pub(crate) fn import(staged: &str, path: &str) -> bool {
     if let Err(e) = make_private(staged) {
         log::err(&format!("db restore: cannot secure staged dump: {e}"));
         return false;
+    }
+    // A tableless live file would fail the link with EEXIST and jam the
+    // boot in a retry loop; it is provably empty (no user tables), so
+    // clearing it loses nothing. If this dies in between, the next boot
+    // sees an absent database and retries; a non-empty file is never
+    // touched.
+    if Path::new(path).exists() {
+        match is_empty(path) {
+            Ok(true) => {
+                if let Err(e) = std::fs::remove_file(path) {
+                    log::err(&format!("db restore: cannot clear the empty live DB: {e}"));
+                    return false;
+                }
+            }
+            Ok(false) => {
+                log::err("db restore: live DB is not empty; not overwriting");
+                return false;
+            }
+            Err(e) => {
+                log::err(&format!(
+                    "db restore: cannot verify the live DB is empty ({e}); not overwriting"
+                ));
+                return false;
+            }
+        }
     }
     match std::fs::hard_link(staged, path) {
         Ok(()) => {
@@ -206,6 +234,36 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert!(!staged.exists(), "staging name is unlinked after publish");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live DB that is provably empty (tableless, the state the restore
+    /// gate accepted) is replaced: it holds no data, and refusing would
+    /// jam boot in an EEXIST retry loop.
+    #[test]
+    fn import_replaces_a_provably_empty_live_db() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-sqle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("staged.sqlite3");
+        let conn = rusqlite::Connection::open(&staged).unwrap();
+        conn.execute_batch("CREATE TABLE restored (v TEXT); INSERT INTO restored VALUES ('new');")
+            .unwrap();
+        drop(conn);
+        let live = dir.join("live.sqlite3");
+        rusqlite::Connection::open(&live).unwrap(); // tableless, no user data
+
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()));
+
+        let conn = rusqlite::Connection::open_with_flags(
+            &live,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let v: String = conn
+            .query_row("SELECT v FROM restored LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, "new");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

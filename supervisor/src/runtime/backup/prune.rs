@@ -1,28 +1,27 @@
-//! Keep-N pruning of the per-backend dumps in the bucket.
+//! Generation pruning: delete the objects of the manifest entries evicted
+//! beyond keep-N. Runs after the manifest write that dropped them, so a
+//! crash can only leave unreferenced objects — never a manifest pointing
+//! at a deleted one.
 
 use crate::config::DbBackupConfig;
 use crate::s3::Client;
 use crate::util::log;
 
-/// Delete the oldest per-backend dumps beyond keep-N. The listing is the
-/// caller's (tick already fetched it for the lineage guard); a stale view
-/// here can only mean an extra kept object — never a wrong deletion,
-/// since only strictly-oldest names are removed.
+use super::manifest::Entry;
+
 pub(super) fn prune(
     client: &Client,
     cfg: &DbBackupConfig,
-    mut names: Vec<String>,
+    evicted: &[Entry],
     abort: &impl Fn() -> bool,
 ) {
-    let prefix = cfg.prefix();
-    if names.len() <= cfg.keep {
-        return;
-    }
-    names.sort();
-    for name in &names[..names.len() - cfg.keep] {
-        let key = format!("{prefix}{name}");
+    for entry in evicted {
+        let key = format!("{}{}", cfg.prefix(), entry.name);
         match client.delete(&key, abort) {
-            Ok(()) => log::info(&format!("db backup: pruned {key}")),
+            Ok(()) => log::info(&format!(
+                "db backup: pruned {key} (generation {})",
+                entry.generation
+            )),
             Err(e) => log::err(&format!(
                 "db backup: prune delete failed ({e}); the bucket keeps one extra \
                  backup (check that the access key may delete)"
@@ -37,17 +36,11 @@ mod tests {
     use super::super::tools;
     use super::*;
 
-    /// Pruning below keep-N is a no-op and never touches the client.
+    /// No evicted entries means no deletes and no panics.
     #[test]
-    fn prune_noop_at_or_below_keep() {
+    fn prune_noop_without_evictions() {
         let cfg = support::cfg();
         let s3 = tools::client(&cfg).expect("test client builds");
-        prune(
-            &s3,
-            &cfg,
-            vec!["sqlite-1.sqlite3".into(), "sqlite-2.sqlite3".into()],
-            &|| false,
-        );
-        // nothing to assert beyond "no panic": deletes only fire above keep
+        prune(&s3, &cfg, &[], &|| false);
     }
 }

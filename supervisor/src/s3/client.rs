@@ -152,6 +152,65 @@ impl Client {
         Ok(())
     }
 
+    /// Upload a small in-memory object (the DB manifest): [`Self::put`]
+    /// takes a file, but the manifest is text built in memory.
+    pub fn put_bytes(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        abort: impl Fn() -> bool,
+    ) -> anyhow::Result<()> {
+        if abort() {
+            bail!("aborted");
+        }
+        let url = self
+            .bucket
+            .put_object(Some(&self.credentials), key)
+            .sign(SIGN_EXPIRE);
+        let response = self
+            .agent
+            .put(url.as_str())
+            .header("Content-Length", bytes.len().to_string())
+            .send(bytes)
+            .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
+        checked("upload", key, response)?;
+        Ok(())
+    }
+
+    /// Fetch a small text object; `Ok(None)` when the key does not exist
+    /// (404), so "absent" is distinguishable from a failed fetch. The
+    /// body is size-capped like every other read.
+    pub fn get_optional_text(
+        &self,
+        key: &str,
+        max_bytes: u64,
+        abort: impl Fn() -> bool,
+    ) -> anyhow::Result<Option<String>> {
+        if abort() {
+            bail!("aborted");
+        }
+        let url = self
+            .bucket
+            .get_object(Some(&self.credentials), key)
+            .sign(SIGN_EXPIRE);
+        let response = match self.agent.get(url.as_str()).call() {
+            Ok(response) => checked("download", key, response)?,
+            Err(ureq::Error::StatusCode(404)) => return Ok(None),
+            Err(e) => return Err(anyhow!("download of {key} failed: {}", http_err(&e))),
+        };
+        let mut text = String::new();
+        response
+            .into_body()
+            .into_reader()
+            .take(max_bytes + 1)
+            .read_to_string(&mut text)
+            .map_err(|e| anyhow!("download of {key}: {e}"))?;
+        if text.len() as u64 > max_bytes {
+            bail!("download of {key}: exceeds the {max_bytes}-byte cap");
+        }
+        Ok(Some(text))
+    }
+
     /// Download `key` into `path` atomically. Bytes land in a sibling temp
     /// file (same filesystem) bounded by `max_bytes` and, when the listing
     /// provided one, checked against `expected_size`; only a complete
