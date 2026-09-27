@@ -687,10 +687,16 @@ Committed as `2f35690` (supervisor), `b31d009` (docs), `fdb5a11` (this document)
   path-prefixed endpoint keeps its prefix instead of being silently dropped by the bucket join.
 - **Dependency:** `sha2` is promoted from a transitive (already compiled for rusty-s3) to a direct dependency; no
   new package enters the tree.
-- Tests: 168 total — known SHA-256 vectors, manifest/cache round-trips and rejects, hash-mismatch download refusal,
-  multipart part flow and abort-on-failure, region/path cases.
+- Tests: 172 total — known SHA-256 vectors, manifest/cache round-trips and rejects, hash-mismatch download refusal,
+  multipart part flow and abort-on-failure, region/path cases, and the cleanup pass below.
+- **Cleanup pass (same phase):** `make_private` failures are now handled — a staged dump that cannot be restricted
+  refuses to push, and the sidecar/retained-copy cases log loudly; the accept loop backs off on EMFILE/ENFILE
+  instead of spinning; the `StagedFile` doc no longer claims panic-time cleanup under `panic = "abort"`; a relative
+  `TAILSCALE_STATE_FILE` refuses the boot (it anchors the identity and the derived `--statedir`); and an interrupted
+  download resumes with a ranged retry (three bounded attempts, progress kept in the `.part` file) instead of
+  restarting from zero on a slow link.
 - Verification: `cargo fmt --check` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0),
-  `cargo test --locked` → **168 passed, 0 failed**, 6 consecutive runs.
+  `cargo test --locked` → **172 passed, 0 failed**, 6 consecutive runs.
 
 Deliberately not done: typed `SecretString` wrappers (the no-`Debug` + sanitized-log invariant already holds and no
 defect depends on it) and per-arch tag cleanup after publish (cosmetic; the tags are harmless).
