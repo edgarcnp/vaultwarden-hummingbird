@@ -49,6 +49,15 @@
         "prCreation": "immediate",
         "vulnerabilityFixStrategy": "lowest"
     },
+    "customDatasources": {
+        "tailscale-stable": {
+            "defaultRegistryUrlTemplate": "https://pkgs.tailscale.com/stable/?mode=json",
+            "format": "json",
+            "transformTemplates": [
+                "{\"releases\":[{\"version\":TarballsVersion,\"changelogUrl\":$join([\"https://github.com/tailscale/tailscale/releases/tag/v\",TarballsVersion])}],\"sourceUrl\":\"https://github.com/tailscale/tailscale\"}"
+            ]
+        }
+    },
     "customManagers": [
         {
             "customType": "regex",
@@ -76,16 +85,15 @@
         },
         {
             "customType": "regex",
-            "description": "tailscale pin (ARG strips the upstream v prefix)",
+            "description": "tailscale pin (pkgs.tailscale.com stable, not GitHub tags)",
             "fileMatch": [
                 "^Containerfile$"
             ],
             "matchStrings": [
                 "ARG TAILSCALE_VERSION=(?<currentValue>\\S+)"
             ],
-            "datasourceTemplate": "github-tags",
-            "depNameTemplate": "tailscale/tailscale",
-            "extractVersionTemplate": "^v(?<version>.*)$"
+            "datasourceTemplate": "custom.tailscale-stable",
+            "depNameTemplate": "tailscale/tailscale"
         }
     ]
 }
