@@ -1,15 +1,17 @@
 # The container image: build the real Containerfile and run the
 # fail-closed smoke suite (scripts/smoke-image.sh) on changes to the build
-# context. Pull requests are where a Containerfile change is validated
-# before merge; releases are built and checked by publish at tag time; a
-# manual dispatch covers ad-hoc validation of main. Main pushes are
-# deliberately not built here: the PR run already tested the same content,
-# and rebuilding it on every push just burns CI.
+# context. Main pushes are the validation point: one build per merged
+# change, instead of a ~15-minute build on every PR revision. Releases are
+# built and smoke-tested again by publish at tag time (both arches), so
+# this workflow does not run on tags; a manual dispatch covers ad-hoc
+# validation.
 name: Image
 
 on:
   workflow_dispatch:
-  pull_request:
+  push:
+    branches:
+      - main
     paths:
       - Containerfile
       - .containerignore

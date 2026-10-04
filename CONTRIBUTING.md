@@ -112,7 +112,7 @@ The fail-closed paths need no credentials, and they're worth exercising whenever
 scripts/smoke-image.sh                    # defaults to vaultwarden-hummingbird:local
 ```
 
-It runs the image networkless and asserts: non-root user with an exec healthcheck, the one-shot `--healthcheck` refusal, the missing-authkey refusal, a bare upstream key in the dotenv file, an unknown supervisor key, a relative `TAILSCALE_STATE_FILE`, and the Tailscale fail-closed chain (tailscaled starts, the CLI fails, no vault runs). The Image workflow runs the same script on pull requests that change the build context; releases are built and smoke-tested again by publish at tag time.
+It runs the image networkless and asserts: non-root user with an exec healthcheck, the one-shot `--healthcheck` refusal, the missing-authkey refusal, a bare upstream key in the dotenv file, an unknown supervisor key, a relative `TAILSCALE_STATE_FILE`, and the Tailscale fail-closed chain (tailscaled starts, the CLI fails, no vault runs). The Image workflow runs the same script on main pushes that change the build context; releases are built and smoke-tested again by publish at tag time.
 
 ## Releases
 
@@ -121,7 +121,7 @@ Cutting a release is just a tag. Push a `v*` tag (or run `publish.yml` by hand) 
 ## Opening a pull request
 
 1. Fork and make a branch.
-2. Run the checks from the sections above. If you touched the Containerfile, CI builds and smoke-tests the image; building it locally too is still the fastest way to see the whole thing run.
+2. Run the checks from the sections above. If you touched the Containerfile, build and smoke-test it locally before merging: the Image workflow validates it on main after merge, not on the PR.
 3. If you edited the version pins in the Containerfile, keep those `ARG` lines byte-for-byte as they were (Renovate finds them with regexes) and run `scripts/update-pins.sh` so the digests match.
 4. If user-visible behavior changed, update README.md in the same PR.
 5. Open the PR with a short note on what changed and why.
