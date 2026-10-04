@@ -29,7 +29,7 @@ impl Limiter {
     /// connection instead of queueing it).
     pub(super) fn try_acquire(&self) -> Option<Permit> {
         self.active
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n < self.max).then_some(n + 1)
             })
             .ok()
