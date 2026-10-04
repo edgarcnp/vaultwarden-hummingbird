@@ -10,8 +10,9 @@ ARG VW_VERSION=1.37.2
 ARG WEB_VAULT_VERSION=v2026.7.0
 ARG TAILSCALE_VERSION=1.102.4
 
-# UPSTREAM CHECKSUMS — sha256 digests of the release artifacts; Renovate has
-# no manager for these ARGs, so update each by hand alongside its version.
+# UPSTREAM CHECKSUMS — sha256 digests of the release artifacts. No datasource
+# tracks these ARGs; scripts/update-pins.sh owns them (Renovate runs it after
+# each version bump, CI recomputes them), so never hand-edit a digest.
 
 # vaultwarden source tarball; bump with VW_VERSION.
 ARG VW_SHA256=d607cc00066f7ea62b27a3c198e0259955fd5591adabccb8d3414d1f3d91ecd7
@@ -24,7 +25,7 @@ ARG TAILSCALE_SHA256_ARM64=9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c289
 # BASE IMAGES — digest-pinned: a rebuild uses the exact same base, and the
 # floating tag's CVE patches arrive through Renovate's digest-update PRs
 # (the Dockerfile manager tracks these tags). Never hand-edit a digest:
-# Renovate owns them, like the artifact checksums below. The runtime uses
+# Renovate owns them, like the artifact checksums above. The runtime uses
 # the -openssl variant (ships libssl/libcrypto, so the runtime needs no
 # hand-copied OpenSSL from the builder).
 
