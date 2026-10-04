@@ -6,7 +6,7 @@
 # UPSTREAM VERSIONS — Renovate-managed: its regexes match these exact ARG
 # lines, never reformat them.
 
-ARG VW_VERSION=1.37.2
+ARG VW_VERSION=1.37.3
 ARG WEB_VAULT_VERSION=v2026.7.0
 ARG TAILSCALE_VERSION=1.102.4
 
@@ -15,7 +15,7 @@ ARG TAILSCALE_VERSION=1.102.4
 # each version bump, CI recomputes them), so never hand-edit a digest.
 
 # vaultwarden source tarball; bump with VW_VERSION.
-ARG VW_SHA256=d607cc00066f7ea62b27a3c198e0259955fd5591adabccb8d3414d1f3d91ecd7
+ARG VW_SHA256=64a3cd2117e82f226c01a9eb2d3a59b5629b527438d1f9cd0a85c9883c7a9b39
 # web-vault tarball; bump with WEB_VAULT_VERSION.
 ARG WEB_VAULT_SHA256=002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c300570
 # per-arch tarballs; bump with TAILSCALE_VERSION.
@@ -29,8 +29,8 @@ ARG TAILSCALE_SHA256_ARM64=9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c289
 # the -openssl variant (ships libssl/libcrypto, so the runtime needs no
 # hand-copied OpenSSL from the builder).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:0f9a492d629538e829ef604f2291aa4d5ed8c170129e8ee3cb06efe63574159e
-ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:23f35b6f892f48d97b686326618fa515e0c313666f5b0a3788e206f5ae44a257
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:35d169964eb50c2f8ef40b70854cc10d60b013f79b9c8ce95eb0dcfca1a01b08
+ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:f3e0afd0eb63bcd0a3a25e2157725e40e98cc1bdb6aafa783a1ca5e94f6b6fc9
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
 # --build-arg (compose passes VAULTWARDEN_WEB_VAULT through from the env).

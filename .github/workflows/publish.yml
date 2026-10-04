@@ -163,8 +163,8 @@ jobs:
       - name: Install syft (pinned)
         run: |
           curl -fsSL --max-time 300 --retry 3 -o /tmp/syft.tgz \
-            "https://github.com/anchore/syft/releases/download/v1.52.0/syft_1.52.0_linux_amd64.tar.gz"
-          echo "caeedb81fb0491615f1ebd1761e4145d41ee86dd2cc7bf80669f9f5ad9d6133d  /tmp/syft.tgz" | sha256sum -c -
+            "https://github.com/anchore/syft/releases/download/v1.54.0/syft_1.54.0_linux_amd64.tar.gz"
+          echo "54a87372498168b2d033e876fd41fa4e8035b872699e525a57046e1f2f09c860  /tmp/syft.tgz" | sha256sum -c -
           tar -xzf /tmp/syft.tgz -C /tmp syft
 
       - name: Generate the SPDX SBOM

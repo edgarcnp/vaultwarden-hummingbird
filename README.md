@@ -48,7 +48,7 @@ Keys come in three groups:
 
 - `TAILSCALE_*` — how the container joins your tailnet (hostname, auth key, and friends).
 - `SUPERVISOR_*` — this image's extras: state sync and backups (below).
-- `VAULTWARDEN_*` — Vaultwarden's own settings with a prefix. `VAULTWARDEN_SIGNUPS_ALLOWED` becomes `SIGNUPS_ALLOWED` inside. Vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.2/.env.template) lists everything it understands.
+- `VAULTWARDEN_*` — Vaultwarden's own settings with a prefix. `VAULTWARDEN_SIGNUPS_ALLOWED` becomes `SIGNUPS_ALLOWED` inside. Vaultwarden's [`.env.template`](https://github.com/dani-garcia/vaultwarden/blob/1.37.3/.env.template) lists everything it understands.
 
 The file is strict on purpose: a key outside those three prefixes stops the boot and names the offender, and so does an unknown `SUPERVISOR_*`/`TAILSCALE_*` key (that's a typo — the supervisor's keys are a closed set). An unreadable file refuses the boot too, rather than start with settings missing. Unknown `VAULTWARDEN_*` keys pass through to the vault, which ignores what it doesn't know. Strictness is about the file; values handed in as container environment are filtered rather than rejected.
 
