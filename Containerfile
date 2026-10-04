@@ -8,7 +8,7 @@
 
 ARG VW_VERSION=1.37.3
 ARG WEB_VAULT_VERSION=v2026.7.0
-ARG TAILSCALE_VERSION=1.102.4
+ARG TAILSCALE_VERSION=1.104.0
 
 # UPSTREAM CHECKSUMS — sha256 digests of the release artifacts. No datasource
 # tracks these ARGs; scripts/update-pins.sh owns them (Renovate runs it after
