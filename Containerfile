@@ -6,7 +6,7 @@
 # UPSTREAM VERSIONS — Renovate-managed: its regexes match these exact ARG
 # lines, never reformat them.
 
-ARG VW_VERSION=1.37.3
+ARG VW_VERSION=1.37.4
 ARG WEB_VAULT_VERSION=v2026.7.0
 ARG TAILSCALE_VERSION=1.102.4
 
