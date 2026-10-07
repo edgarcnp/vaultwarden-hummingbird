@@ -163,15 +163,15 @@ jobs:
       - name: Install syft (pinned)
         run: |
           curl -fsSL --max-time 300 --retry 3 -o /tmp/syft.tgz \
-            "https://github.com/anchore/syft/releases/download/v1.54.0/syft_1.54.0_linux_amd64.tar.gz"
-          echo "54a87372498168b2d033e876fd41fa4e8035b872699e525a57046e1f2f09c860  /tmp/syft.tgz" | sha256sum -c -
+            "https://github.com/anchore/syft/releases/download/v1.54.1/syft_1.54.1_linux_amd64.tar.gz"
+          echo "c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47  /tmp/syft.tgz" | sha256sum -c -
           tar -xzf /tmp/syft.tgz -C /tmp syft
 
       - name: Generate the SPDX SBOM
         run: /tmp/syft /tmp/image.tar -o spdx-json=sbom.spdx.json
 
       - name: Upload the SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-spdx-${{ github.ref_name }}
           path: sbom.spdx.json
