@@ -30,7 +30,7 @@ ARG TAILSCALE_SHA256_ARM64=60d60109e33d097318c66adc1f1b4e78e528fa1c0357e8bfe82af
 # hand-copied OpenSSL from the builder).
 
 ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:9a5e7f428d41261f8cbc97f3bc60d863d3fd5eb2449eba95cc063b895675cb0e
-ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:63ee017519dd918294cce39f4957322c13bc7ac6f206a389bb670c8bf6e34111
+ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:3c8ae34f0e9d7cb41839e4f64f753934820d1f1eabf83216b310cfca7c19c07b
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
 # --build-arg (compose passes VAULTWARDEN_WEB_VAULT through from the env).
