@@ -32,7 +32,7 @@ The published port only answers `/alive` — 200 when the vault is up, 503 when 
 curl -i http://127.0.0.1:8080/alive
 ```
 
-Each release publishes new images. Pin an exact version tag for a stable deployment, or follow `:latest`.
+Each release publishes new images. Only the three newest releases stay on the registry — older versions are pruned after every release, tags included — so pin one of those, or follow `:latest`.
 
 ## How it works
 

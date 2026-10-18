@@ -5,6 +5,11 @@ name: Publish
 
 on:
   workflow_dispatch:
+    inputs:
+      prune_dry_run:
+        description: Run the retention prune as a dry run (delete nothing)
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -190,3 +195,36 @@ jobs:
           subject-digest: ${{ needs.manifest.outputs.digest }}
           sbom-path: sbom.spdx.json
           push-to-registry: true
+
+  # ghcr.io keeps every package version forever, and the tag list is what users
+  # see: each release leaves four versions behind (the manifest list, two
+  # per-arch manifests and the attestation index). Retention happens here so
+  # the registry holds a release window rather than a growing history. The
+  # script decides from the tags alone and refuses to touch anything it cannot
+  # attribute to an older release - `latest`, a manual dispatch's `main`,
+  # untagged versions - so pruning can never half-delete a release.
+  #
+  # needs: manifest, not the attestation jobs: deleting the *old* releases'
+  # attestations is independent of minting the new one.
+  prune:
+    name: prune
+    needs: manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Keep the three newest releases
+        env:
+          # Deleting package versions needs admin on the package, which the
+          # repository whose workflow publishes it holds by default.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only a dispatch can set this: a tag push has no inputs, so the
+          # release path always deletes.
+          DRY_RUN: ${{ github.event.inputs.prune_dry_run }}
+        run: |
+          args=(--keep 3)
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          scripts/prune-image-versions.sh "${args[@]}"
