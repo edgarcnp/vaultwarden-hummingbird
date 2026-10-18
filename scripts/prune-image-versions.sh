@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Retention for the ghcr.io package: keep the newest N releases, delete the
-# older versions (manifest list, per-arch manifests, attestation index).
+# Retention for the ghcr.io package: keep the newest N releases and delete the
+# older ones - manifest list, per-arch manifests, attestation index, and the
+# untagged attestation payloads a pruned release leaves behind.
 #
 # ghcr.io has no retention setting - a package version lives until something
 # deletes it - and no "drop the image, keep the tag" operation either: a tag
@@ -13,12 +14,14 @@
 # manifest list>`. The newest list also carries `:latest`, which therefore
 # never falls into the prune set.
 #
-# Safety: only versions whose tags are *all* in the computed prune set are
-# deleted, so a tag the script cannot attribute - a manual dispatch's `main`,
-# a hand-pushed image - keeps its version from being touched. Untagged
-# versions are reported and left alone too. GitHub refuses to delete a public
-# package version with more than 5,000 downloads (documented API limit): that
-# is reported as a warning, any other failure fails the run.
+# Safety: a version carrying tags is deleted only when *all* of them are in the
+# computed prune set, so a tag the script cannot attribute - a manual
+# dispatch's `main`, a hand-pushed image - keeps its version. An untagged
+# version goes only when no live index points at it: that is what collects the
+# attestation payloads of a pruned release while the kept releases keep
+# theirs. GitHub refuses to delete a public package version with more than
+# 5,000 downloads (documented API limit): reported as a warning, any other
+# failure fails the run.
 #
 # Pruning a version also deletes its attestations, so `gh attestation verify`
 # stops working for the pruned releases: keep enough releases that a verifier
@@ -147,6 +150,16 @@ manifest_digest() { # manifest_digest TAG -> the digest a tag points at
     tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2; exit }'
 }
 
+index_children() { # index_children REF -> child digests (sha256: stripped), one per line
+  local bearer
+  bearer=$(registry_token) || return 1
+  curl -fsS --max-time 60 \
+    -H "Authorization: Bearer $bearer" \
+    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+    "$registry_url/v2/$owner/$package/manifests/$1" |
+    jq -r '.manifests[]?.digest | sub("^sha256:"; "")'
+}
+
 if [ -n "$versions_file" ]; then
   if [ ! -f "$versions_file" ]; then
     echo "prune: no such versions file: $versions_file" >&2
@@ -202,11 +215,6 @@ if [ "$total_releases" -eq 0 ]; then
   echo "prune: $image has no release tags (X.Y.Z); nothing to prune"
   exit 0
 fi
-if [ "$total_releases" -le "$keep" ]; then
-  echo "prune: $image has $total_releases release(s), nothing older than the newest $keep"
-  exit 0
-fi
-
 kept=$(tail -n "$keep" <<<"$releases")
 pruned=$(head -n "-$keep" <<<"$releases") # GNU head: all but the last $keep
 
@@ -227,55 +235,106 @@ done <<<"$pruned"
 
 prune_json=$(jq -R -s 'split("\n") | map(select(length > 0))' "$prune_tags")
 
-plan=$(
-  jq --argjson prune "$prune_json" '
-    [ .[]
-      | { id, tags: (.metadata.container.tags // []) }
-      | select((.tags | length) > 0)
-      | select([.tags[] as $t | ($prune | index($t)) != null] | all)
-    ]' "$tmpdir/versions.json"
-)
+tagged_plan="$tmpdir/tagged-plan.tsv"
+jq -r --argjson prune "$prune_json" '
+    .[]
+    | { id, tags: (.metadata.container.tags // []) }
+    | select((.tags | length) > 0)
+    | select([.tags[] as $t | ($prune | index($t)) != null] | all)
+    | [.id, (.tags | join(" "))] | @tsv' "$tmpdir/versions.json" >"$tagged_plan"
 skipped=$(
   jq --argjson prune "$prune_json" '
     [ .[]
       | { id, tags: (.metadata.container.tags // []) }
-      | select((.tags | length) == 0
-               or ([.tags[] as $t | ($prune | index($t)) != null] | all | not))
+      | select((.tags | length) > 0)
+      | select([.tags[] as $t | ($prune | index($t)) != null] | all | not)
     ]' "$tmpdir/versions.json"
 )
 
-echo "prune: $image"
-echo "prune: keeping $(grep -c . <<<"$kept") release(s): $(tr '\n' ' ' <<<"$kept" | sed 's/ $//')"
-echo "prune: pruning $(grep -c . <<<"$pruned") older release(s): $(tr '\n' ' ' <<<"$pruned" | sed 's/ $//')"
-jq -r '.[] | "prune: skipping version \(.id) (tags: \(.tags | join(" ") | if . == "" then "none" else . end))"' <<<"$skipped"
+# --- untagged versions -------------------------------------------------------
+# A pruned release leaves its attestation payloads behind: the sigstore bundles
+# carry no tag, so the tag pass cannot see them and ghcr keeps them forever.
+# They are collected here - every version without tags that no live index
+# points at. What a kept release needs stays: the children of its tagged
+# sha256-<digest> index, and the index GitHub pushes in front of it, are what
+# `gh attestation verify` reads.
+protected="$tmpdir/protected.txt"
+: >"$protected"
+while read -r tag; do
+  [ -n "$tag" ] || continue
+  case $tag in
+    sha256-* | [0-9]*) : ;;
+    *) continue ;; # per-arch tags, `latest`, a dispatch's `main`: nothing to protect
+  esac
+  # An index this run deletes protects nothing, so a rehearsal sees exactly
+  # what the run would do.
+  grep -qxF "$tag" "$prune_tags" && continue
+  index_children "$tag" >>"$protected" ||
+    echo "prune: warning: could not read the children of $tag; its payloads stay" >&2
+done < <(jq -r '.[].metadata.container.tags[]?' "$tmpdir/versions.json" | sort -u)
+sort -u -o "$protected" "$protected"
+
+untagged_plan="$tmpdir/untagged-plan.tsv"
+: >"$untagged_plan"
+while IFS=$'\t' read -r id name; do
+  [ -n "${id:-}" ] || continue
+  # Without a digest for a name there is nothing to attribute: leave it alone.
+  if ! [[ $name =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "prune: warning: untagged version $id has no digest name ('$name'); left alone" >&2
+    continue
+  fi
+  grep -qxF "${name#sha256:}" "$protected" && continue
+  # An index in front of a protected child belongs to a kept attestation.
+  kids=$(index_children "$name") || kids=
+  if [ -n "$kids" ] && printf '%s\n' "$kids" | grep -qxF -f "$protected"; then
+    continue
+  fi
+  printf '%s\t%s\n' "$id" "$name" >>"$untagged_plan"
+done < <(jq -r '.[] | select((.metadata.container.tags // []) | length == 0) | [.id, .name] | @tsv' "$tmpdir/versions.json")
 
 deleted=0
 refused=0
 failed=0
-while IFS=$'\t' read -r id tags; do
-  [ -n "${id:-}" ] || continue
-  if [ "$dry_run" = true ]; then
-    echo "prune: would delete version $id ($tags)"
-    deleted=$((deleted + 1))
-    continue
-  fi
-  status=$(curl -sS --max-time 60 -o "$tmpdir/response" -w '%{http_code}' -X DELETE \
-    -H "Authorization: Bearer $GH_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "$api_url${scope:-}/packages/container/$package/versions/$id") || status=000
-  if [[ $status = 2* ]]; then
-    echo "prune: deleted version $id ($tags)"
-    deleted=$((deleted + 1))
-  elif grep -qiE '5,?000 downloads' "$tmpdir/response"; then
-    # GitHub's documented refusal; the version stays and the run reports it.
-    echo "prune: refused version $id ($tags): $(head -c 200 "$tmpdir/response")" >&2
-    refused=$((refused + 1))
-  else
-    echo "prune: version $id ($tags) failed: HTTP $status: $(head -c 400 "$tmpdir/response")" >&2
-    failed=$((failed + 1))
-  fi
-done < <(jq -r '.[] | [.id, (.tags | join(" "))] | @tsv' <<<"$plan")
+delete_plan() { # delete_plan LABEL PLAN-FILE (id<TAB>description per line)
+  local label=$1 file=$2 id desc status
+  while IFS=$'\t' read -r id desc; do
+    [ -n "${id:-}" ] || continue
+    if [ "$dry_run" = true ]; then
+      echo "prune: would delete $label $id ($desc)"
+      deleted=$((deleted + 1))
+      continue
+    fi
+    status=$(curl -sS --max-time 60 -o "$tmpdir/response" -w '%{http_code}' -X DELETE \
+      -H "Authorization: Bearer $GH_TOKEN" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "$api_url${scope:-}/packages/container/$package/versions/$id") || status=000
+    if [[ $status = 2* ]]; then
+      echo "prune: deleted $label $id ($desc)"
+      deleted=$((deleted + 1))
+    elif grep -qiE '5,?000 downloads' "$tmpdir/response"; then
+      # GitHub's documented refusal; the version stays and the run reports it.
+      echo "prune: refused $label $id ($desc): $(head -c 200 "$tmpdir/response")" >&2
+      refused=$((refused + 1))
+    else
+      echo "prune: $label $id ($desc) failed: HTTP $status: $(head -c 400 "$tmpdir/response")" >&2
+      failed=$((failed + 1))
+    fi
+  done <"$file"
+}
+
+echo "prune: $image"
+echo "prune: keeping $(grep -c . <<<"$kept") release(s): $(tr '\n' ' ' <<<"$kept" | sed 's/ $//')"
+if [ -n "$pruned" ]; then
+  echo "prune: pruning $(grep -c . <<<"$pruned") older release(s): $(tr '\n' ' ' <<<"$pruned" | sed 's/ $//')"
+else
+  echo "prune: nothing older than the newest $keep"
+fi
+jq -r '.[] | "prune: keeping version \(.id) (tags: \(.tags | join(" ")))"' <<<"$skipped"
+echo "prune: selected $(grep -c . "$tagged_plan" || true) tagged and $(grep -c . "$untagged_plan" || true) untagged version(s)"
+
+delete_plan tagged "$tagged_plan"
+delete_plan untagged "$untagged_plan"
 
 if [ "$dry_run" = true ]; then
   echo "prune: dry run: $deleted version(s) would be deleted, $failed failed"
