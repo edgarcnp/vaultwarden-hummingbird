@@ -1,0 +1,52 @@
+# Manual retention run. publish.yml prunes as part of a release; this workflow
+# is for tidying the registry in between - after a policy change, or when a
+# prune left something behind - without building or publishing anything.
+# Same script, same rules: a released image is never half-deleted, kept
+# releases keep their attestation payloads, and the run is a dry run unless
+# you say otherwise.
+name: Prune
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: How many of the newest releases to keep
+        type: number
+        default: 3
+      dry_run:
+        description: Report the plan and delete nothing
+        type: boolean
+        default: true
+
+# Two prunes at once would race on the same versions, and a cancelled run can
+# leave half a release behind.
+concurrency:
+  group: prune
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    name: prune
+    runs-on: ubuntu-latest
+    permissions:
+      # Deleting package versions needs admin on the package, which the
+      # repository whose workflow publishes it holds by default.
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Keep the newest releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ inputs.keep }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(--keep "$KEEP")
+          # Anything but an explicit false stays a dry run: the default must
+          # never delete.
+          if [ "$DRY_RUN" != "false" ]; then args+=(--dry-run); fi
+          scripts/prune-image-versions.sh "${args[@]}"
