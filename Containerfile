@@ -8,7 +8,7 @@
 
 ARG VW_VERSION=1.37.4
 ARG WEB_VAULT_VERSION=v2026.7.0
-ARG TAILSCALE_VERSION=1.104.1
+ARG TAILSCALE_VERSION=1.104.2
 
 # UPSTREAM CHECKSUMS — sha256 digests of the release artifacts. No datasource
 # tracks these ARGs; scripts/update-pins.sh owns them (Renovate runs it after
@@ -19,8 +19,8 @@ ARG VW_SHA256=d31a3ef5456619cfe424f0586f4ecadd186e22513a93bbeab6bc2f09cda803a7
 # web-vault tarball; bump with WEB_VAULT_VERSION.
 ARG WEB_VAULT_SHA256=002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c300570
 # per-arch tarballs; bump with TAILSCALE_VERSION.
-ARG TAILSCALE_SHA256_AMD64=108d1d96ecf410d305571e173516f27038f870919a9b89c914a167c6d33a4528
-ARG TAILSCALE_SHA256_ARM64=f60294374967f3dfd8cf57bbbd474d6cfce32d123e3a8ddeab82a87940daa806
+ARG TAILSCALE_SHA256_AMD64=512f613ed7d04fc7282f7dc5bd76aa105aae28168fbb9357eb749ebcbc29f0ae
+ARG TAILSCALE_SHA256_ARM64=5776aaa901b5ef1916e66be5bb54b9f481cd399c9c28db123a8cab620efa237b
 
 # BASE IMAGES — digest-pinned: a rebuild uses the exact same base, and the
 # floating tag's CVE patches arrive through Renovate's digest-update PRs
@@ -29,8 +29,8 @@ ARG TAILSCALE_SHA256_ARM64=f60294374967f3dfd8cf57bbbd474d6cfce32d123e3a8ddeab82a
 # the -openssl variant (ships libssl/libcrypto, so the runtime needs no
 # hand-copied OpenSSL from the builder).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:c170d8fbd4245264ef0f1d234da2adb26df7df818e7e6e9be4a058189a70911e
-ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:c50e5da981b75c05b10ebb9ca9775481ad2822e28c9b8b4222de285098d529b2
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:cee080d2ff56345e3beaf3fa003e4f61163868d59fe311ae76616c13cbbc27c0
+ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:63f4a40bec465bffd8360c7e10006e363a1d45a833b65a1d9c631dc4a8366f30
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
 # --build-arg (compose passes VAULTWARDEN_WEB_VAULT through from the env).
