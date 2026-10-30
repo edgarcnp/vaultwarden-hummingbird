@@ -700,11 +700,24 @@ impl Client {
             // "unparseable".
             let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&body)
                 .map_err(|_| anyhow!("listing {prefix:?}: unparseable response"))?;
-            names.extend(parsed.contents.into_iter().map(|c| Listed {
-                key: c.key,
-                size: c.size,
-                last_modified: c.last_modified,
-            }));
+            // rusty-s3 reports the size as optional; a listed object
+            // without one cannot be size-checked on download nor
+            // reconciled against the manifest, so the listing is refused
+            // rather than given an invented size. A LastModified the
+            // provider omitted stays empty, which the reconciliation
+            // already treats as "cannot order this version".
+            let mut contents = Vec::with_capacity(parsed.contents.len());
+            for c in parsed.contents {
+                let Some(size) = c.size else {
+                    bail!("listing {prefix:?}: object {:?} has no size", c.key);
+                };
+                contents.push(Listed {
+                    key: c.key,
+                    size,
+                    last_modified: c.last_modified.unwrap_or_default(),
+                });
+            }
+            names.extend(contents);
             if names.len() > MAX_LIST_KEYS {
                 bail!("listing {prefix:?}: exceeded {MAX_LIST_KEYS} keys");
             }
@@ -1050,6 +1063,67 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"old", "target untouched");
         assert!(!dir.join("rsa_key.pem.part").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A listing carries each object's key, size, and timestamp: a
+    /// LastModified the provider omitted stays empty (the reconciliation
+    /// then refuses to order that version), and an object with no size is
+    /// refused rather than given an invented one — a pull could not check
+    /// it against the manifest.
+    #[test]
+    fn list_reads_sizes_and_refuses_a_sizeless_object() {
+        const COMPLETE: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>vw-state</Name>
+  <Prefix>db/</Prefix>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>db/sqlite-1.sqlite3</Key>
+    <LastModified>2026-01-01T00:00:00.000Z</LastModified>
+    <ETag>"etag"</ETag>
+    <Size>11</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+  <Contents>
+    <Key>db/sqlite-2.sqlite3</Key>
+    <ETag>"etag"</ETag>
+    <Size>0</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+</ListBucketResult>"#;
+        let client = local_client(fake_server("200 OK", "", COMPLETE));
+        let listed = client.list("db/", || false).expect("listing parses");
+        let seen: Vec<(&str, u64, &str)> = listed
+            .iter()
+            .map(|l| (l.key.as_str(), l.size, l.last_modified.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("db/sqlite-1.sqlite3", 11, "2026-01-01T00:00:00.000Z"),
+                ("db/sqlite-2.sqlite3", 0, ""),
+            ]
+        );
+
+        const SIZELESS: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>vw-state</Name>
+  <Prefix>db/</Prefix>
+  <IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>db/sqlite-1.sqlite3</Key>
+    <LastModified>2026-01-01T00:00:00.000Z</LastModified>
+    <ETag>"etag"</ETag>
+  </Contents>
+</ListBucketResult>"#;
+        let client = local_client(fake_server("200 OK", "", SIZELESS));
+        let err = client
+            .list("db/", || false)
+            .err()
+            .expect("a sizeless listing is refused")
+            .to_string();
+        assert!(err.contains("has no size"), "{err}");
     }
 
     /// An object over the size cap is refused before it can fill the data
