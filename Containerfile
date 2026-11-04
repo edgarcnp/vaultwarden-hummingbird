@@ -6,21 +6,21 @@
 # UPSTREAM VERSIONS — Renovate-managed: its regexes match these exact ARG
 # lines, never reformat them.
 
-ARG VW_VERSION=1.37.4
-ARG WEB_VAULT_VERSION=v2026.7.0
-ARG TAILSCALE_VERSION=1.104.4
+ARG VW_VERSION=1.37.5
+ARG WEB_VAULT_VERSION=v2026.10.1
+ARG TAILSCALE_VERSION=1.104.5
 
 # UPSTREAM CHECKSUMS — sha256 digests of the release artifacts. No datasource
 # tracks these ARGs; scripts/update-pins.sh owns them (Renovate runs it after
 # each version bump, CI recomputes them), so never hand-edit a digest.
 
 # vaultwarden source tarball; bump with VW_VERSION.
-ARG VW_SHA256=d31a3ef5456619cfe424f0586f4ecadd186e22513a93bbeab6bc2f09cda803a7
+ARG VW_SHA256=6be37dcc95b91a058ecbe614f1a7acff68ca8d23dc2c016cec18517c7173e4cc
 # web-vault tarball; bump with WEB_VAULT_VERSION.
-ARG WEB_VAULT_SHA256=002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c300570
+ARG WEB_VAULT_SHA256=354de9056c871e48db84975985e7d57c111ac6537bd4e4720488019e8638060f
 # per-arch tarballs; bump with TAILSCALE_VERSION.
-ARG TAILSCALE_SHA256_AMD64=624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
-ARG TAILSCALE_SHA256_ARM64=a1c249ce6bdebef62e1ae3b997595555bce2ae4709bf95a718e9ca7a129dad7e
+ARG TAILSCALE_SHA256_AMD64=720cbbccbfc03d8b55df72afc19e5a72e31b0f65934700aa6fa38074d4ad7bf7
+ARG TAILSCALE_SHA256_ARM64=e900b0e6e25023a1e504b2c237ce2a32ea0535e006f8c1a1097a490886493b6c
 
 # BASE IMAGES — digest-pinned: a rebuild uses the exact same base, and the
 # floating tag's CVE patches arrive through Renovate's digest-update PRs
@@ -29,7 +29,7 @@ ARG TAILSCALE_SHA256_ARM64=a1c249ce6bdebef62e1ae3b997595555bce2ae4709bf95a718e9c
 # the -openssl variant (ships libssl/libcrypto, so the runtime needs no
 # hand-copied OpenSSL from the builder).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:76116908bf373a90122fabbb5d3901862191dd55b0f4b49fcd1e0f608027d4a4
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:5062396309f344f443eb7f26cffd70108f83d852fe5b16cd44da3fe8ac68a4b0
 ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:79e013e632ca2acd397fdcae10c3c89658e58b059ee0f4364296e7d197b5bc70
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
