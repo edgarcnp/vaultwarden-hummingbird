@@ -29,7 +29,7 @@ ARG TAILSCALE_SHA256_ARM64=a1c249ce6bdebef62e1ae3b997595555bce2ae4709bf95a718e9c
 # the -openssl variant (ships libssl/libcrypto, so the runtime needs no
 # hand-copied OpenSSL from the builder).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:76116908bf373a90122fabbb5d3901862191dd55b0f4b49fcd1e0f608027d4a4
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:5062396309f344f443eb7f26cffd70108f83d852fe5b16cd44da3fe8ac68a4b0
 ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:79e013e632ca2acd397fdcae10c3c89658e58b059ee0f4364296e7d197b5bc70
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
