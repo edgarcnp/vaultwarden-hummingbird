@@ -8,7 +8,7 @@
 
 ARG VW_VERSION=1.37.5
 ARG WEB_VAULT_VERSION=v2026.10.1
-ARG TAILSCALE_VERSION=1.104.5
+ARG TAILSCALE_VERSION=1.104.7
 
 # UPSTREAM CHECKSUMS — sha256 digests of the release artifacts. No datasource
 # tracks these ARGs; scripts/update-pins.sh owns them (Renovate runs it after
@@ -19,8 +19,8 @@ ARG VW_SHA256=6be37dcc95b91a058ecbe614f1a7acff68ca8d23dc2c016cec18517c7173e4cc
 # web-vault tarball; bump with WEB_VAULT_VERSION.
 ARG WEB_VAULT_SHA256=354de9056c871e48db84975985e7d57c111ac6537bd4e4720488019e8638060f
 # per-arch tarballs; bump with TAILSCALE_VERSION.
-ARG TAILSCALE_SHA256_AMD64=720cbbccbfc03d8b55df72afc19e5a72e31b0f65934700aa6fa38074d4ad7bf7
-ARG TAILSCALE_SHA256_ARM64=e900b0e6e25023a1e504b2c237ce2a32ea0535e006f8c1a1097a490886493b6c
+ARG TAILSCALE_SHA256_AMD64=e56693ff74a64f2591b7e819c280635a100aae1ddfb0ef058fcd052b7cd8d16c
+ARG TAILSCALE_SHA256_ARM64=d6bed2720310b328b861f943d7b4016c5358a9bad60575eb51e8143b79068484
 
 # BASE IMAGES — digest-pinned: a rebuild uses the exact same base, and the
 # floating tag's CVE patches arrive through Renovate's digest-update PRs
@@ -29,8 +29,8 @@ ARG TAILSCALE_SHA256_ARM64=e900b0e6e25023a1e504b2c237ce2a32ea0535e006f8c1a1097a4
 # the -openssl variant (ships libssl/libcrypto, so the runtime needs no
 # hand-copied OpenSSL from the builder).
 
-ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:5062396309f344f443eb7f26cffd70108f83d852fe5b16cd44da3fe8ac68a4b0
-ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:79e013e632ca2acd397fdcae10c3c89658e58b059ee0f4364296e7d197b5bc70
+ARG BUILDER_IMAGE=registry.access.redhat.com/hi/rust:latest-builder@sha256:04303ce3a60df5fdb8d3f0effdc2b2f1946d8eb85e0ea58075a89c31c96757f3
+ARG RUNTIME_IMAGE=registry.access.redhat.com/hi/core-runtime:latest-openssl@sha256:ca112849205bb517e36da872657e63f9297f6d25fd30342e54517289a840a4af
 
 # BUILD KNOB — the authoritative doc for the build arg; override with
 # --build-arg (compose passes VAULTWARDEN_WEB_VAULT through from the env).
