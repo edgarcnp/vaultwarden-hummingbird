@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
 dotenvy = { version = "0.15.7", default-features = false }
 jiff = { version = "0.2.43", default-features = false, features = ["std"] }
-nix = { version = "0.31.3", default-features = false, features = ["signal"] }
+nix = { version = "0.32.0", default-features = false, features = ["signal"] }
 rusqlite = { version = "0.42.0", default-features = false, features = ["bundled"] }
 rusty-s3 = { version = "0.11.0", default-features = false, features = ["rustcrypto", "xml"] }
 sha2 = { version = "0.11.1", default-features = false }
