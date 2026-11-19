@@ -7,6 +7,15 @@ pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
 pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
 pub const VAULTWARDEN: &str = "/vaultwarden";
 
+// Process identities. The supervisor and tailscaled share the image UID;
+// the vault runs as a different UID in the shared data group so it cannot
+// read the supervisor's state volume, LocalAPI socket, or environment.
+pub const SUPERVISOR_STATE: &str = "/state";
+pub const SUPERVISOR_UID: u32 = 65532;
+pub const SUPERVISOR_GID: u32 = 65532;
+pub const VAULT_UID: u32 = 65533;
+pub const VAULT_GID: u32 = 65532;
+
 // Hard timeouts: a hung child must never block the vault.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
 pub const SERVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,6 +58,7 @@ pub const MAX_INTERVAL_SECS: u64 = 7 * 24 * 3600;
 /// could never read back (~75 bytes per entry).
 pub const MAX_BACKUP_KEEP: u64 = 1000;
 
-/// Local staging directory (on the data volume) for in-flight dumps and
-/// restore pulls; swept before each run and after each restore.
-pub const BACKUP_STAGING: &str = "/data/db-backups";
+/// Local staging directory on the supervisor-only state volume for
+/// in-flight dumps and restore pulls; swept before each run and after each
+/// restore.
+pub const BACKUP_STAGING: &str = "/state/db-backups";

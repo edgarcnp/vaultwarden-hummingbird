@@ -42,14 +42,14 @@ podman compose up -d    # or docker compose
 curl -i http://127.0.0.1:8080/alive
 ```
 
-`.env` is gitignored, so it won't leak. Just don't move it elsewhere.
+`.env` is gitignored, so it won't leak. It is mounted at `/state/.env`; the supervisor refuses a dotenv file outside `/state`, because the vault's separate uid could read it there.
 
 ### Build-time options
 
 `--build-arg` changes what gets baked into the image. Everything is documented in the Containerfile:
 
 - `VAULTWARDEN_WEB_VAULT=false` builds an API-only image, no web UI.
-- The database is SQLite on the data volume. There's no DB backend knob.
+- The database is SQLite on the data volume. There's no DB backend knob. The vault runs as `65533:65532`, so its files are group-accessible (`0660`/`0770`) to the supervisor; `/state` stays `0700` and supervisor-owned.
 - Renovate bumps the version ARGs and runs `scripts/update-pins.sh` to refresh the checksum digests. Never hand-edit a digest: if you bump a version yourself, run the script. CI recomputes the pins on every Containerfile change (and weekly), so a missing or stale digest is a red build.
 - The syft pin in `publish.yml` is manual (no Renovate datasource carries its digest); the Pins workflow re-downloads it, so a stale or replaced artifact is a red build. Bump the URL and its checksum together.
 - The Hummingbird base images are digest-pinned too; Renovate's Dockerfile manager owns those ARGs and opens digest-update PRs when Red Hat moves the floating tags. Don't hand-edit them either.
@@ -82,7 +82,8 @@ supervisor/src/
     ├── services/  tailscaled and vaultwarden themselves
     ├── gate/      the public-port health endpoint
     ├── backup/    sqlite backup and restore to S3
-    └── sync/      saving /data to S3 and back
+    ├── sync/      saving the two volumes to S3 and back
+    └── migrate.rs one-time move of the old /data state layout to /state
 ```
 
 ### House rules
@@ -90,7 +91,7 @@ supervisor/src/
 These shape most decisions in the codebase, so they're worth knowing before you start:
 
 - **When in doubt, refuse.** If Tailscale can't start, the container doesn't run the vault. Restore only into a database we're sure is empty. If a process's exit status is lost, treat it as a failure. Being down beats being quietly compromised or corrupted.
-- **Secrets stay out of sight.** No credentials on command lines or in log lines. Keys go into 0600 files or environment variables that get cleaned up afterwards.
+- **Secrets stay out of sight.** No credentials on command lines or in log lines. Keys go into 0600 files, a 0700 supervisor-only directory, or environment variables that get cleaned up afterwards.
 - **Nothing hangs.** Every external call (Tailscale, S3, database) has a timeout, and every parser has a size cap. Both are named `const`s near the code they guard.
 - **Tests share one process.** Don't touch the process environment in tests, and make temp paths unique. The existing test helpers show the pattern.
 
@@ -100,7 +101,10 @@ A full build gives you a container you can exercise for real:
 
 ```sh
 podman run --rm -it -p 127.0.0.1:8080:8080 \
-  --env-file .env \
+  -e SUPERVISOR_ENV_FILE=/state/.env \
+  -v "$PWD/.env:/state/.env:ro,z" \
+  --cap-drop=all --cap-add=SETUID --cap-add=SETGID --cap-add=KILL \
+  -v vw-data:/data -v vw-state:/state \
   vaultwarden-hummingbird:local
 
 podman healthcheck run <container>   # exit 0 means healthy

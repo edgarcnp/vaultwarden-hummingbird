@@ -68,12 +68,18 @@ impl SyncConfig {
     /// set. A path outside `/data` (or `mem:`) stays unsynced — the caller
     /// logs that it cannot be covered.
     pub fn set_state_file(&mut self, state: &str) {
-        // Only a normal, non-empty path under /data is covered by the sync
-        // root. A `/data/../etc` or control-character spelling is not.
+        // Only a normal, non-empty path under the state root is covered by
+        // the sync root. A `/state/../etc` or control-character spelling is
+        // not.
         self.state_file = state
-            .strip_prefix("/data/")
+            .strip_prefix("/state/")
             .filter(|rel| {
-                !rel.is_empty() && !rel.contains("..") && !rel.chars().any(char::is_control)
+                // A leading slash here would make `root.join(rel)` absolute
+                // and escape the state volume.
+                !rel.is_empty()
+                    && !rel.starts_with('/')
+                    && !rel.contains("..")
+                    && !rel.chars().any(char::is_control)
             })
             .map(str::to_string);
     }
@@ -178,6 +184,31 @@ mod tests {
                 .is_err(),
                 "{remote} must be rejected"
             );
+        }
+    }
+
+    /// A custom state file is stored under the state root; an extra leading
+    /// slash after `/state/` must not turn it into an absolute path.
+    #[test]
+    fn state_file_mapping_never_escapes_the_state_root() {
+        let mut cfg = SyncConfig::new(
+            "r2:vw-state".into(),
+            "id".into(),
+            "secret".into(),
+            "https://s3.example.invalid".into(),
+            Duration::from_secs(60),
+        )
+        .expect("valid config");
+        cfg.set_state_file("/state/tailscaled.state");
+        assert_eq!(cfg.state_file.as_deref(), Some("tailscaled.state"));
+        for state in [
+            "/state//etc/passwd",
+            "/state/../etc/passwd",
+            "/state/sub/../x",
+            "/state/a\nb",
+        ] {
+            cfg.set_state_file(state);
+            assert_eq!(cfg.state_file, None, "{state} must not be mapped");
         }
     }
 

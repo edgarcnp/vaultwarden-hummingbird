@@ -20,6 +20,7 @@ mod s3;
 mod util;
 
 use config::Config;
+use nix::sys::stat::{Mode, umask};
 use runtime::gate_healthcheck;
 use util::log;
 
@@ -50,6 +51,12 @@ fn healthcheck() -> ! {
 }
 
 fn main() {
+    // Everything the supervisor creates under /data is shared with the
+    // vault through the data group (the vault runs a different UID). 0o007
+    // makes new files 0660 and directories 0770; explicit modes still
+    // override this (state sidecars are 0600, staging is 0700).
+    umask(Mode::from_bits_truncate(0o007));
+
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg.as_os_str() == std::ffi::OsStr::new("--healthcheck"))

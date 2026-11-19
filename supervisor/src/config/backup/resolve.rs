@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use super::super::consts::{
     BACKUP_INTERVAL_DEFAULT, BACKUP_KEEP_DEFAULT, BACKUP_STAGING, MAX_BACKUP_KEEP,
-    MAX_INTERVAL_SECS,
+    MAX_INTERVAL_SECS, SUPERVISOR_STATE,
 };
 use super::super::dburl;
 use super::super::env::{parse_count, parse_flag};
@@ -118,6 +118,7 @@ pub(crate) fn resolve_backup(
         keep: keep as usize,
         restore,
         staging: BACKUP_STAGING.to_string(),
+        state_dir: SUPERVISOR_STATE.to_string(),
     })
 }
 

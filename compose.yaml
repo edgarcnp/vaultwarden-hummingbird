@@ -1,5 +1,6 @@
 # Local runner (podman compose / docker compose). One config file (.env,
-# from .env.example), mounted read-only; the supervisor distributes it:
+# from .env.example), mounted read-only at /state/.env (supervisor-only);
+# the supervisor distributes it:
 # SUPERVISOR_*/TAILSCALE_* (and the VAULTWARDEN_PORT knob) stay with PID 1,
 # VAULTWARDEN_* reach vaultwarden under the stripped upstream name. The
 # file is strict — only the three namespaces are accepted, anything else
@@ -30,10 +31,18 @@ services:
       timeout: 10s
       start_period: 30s
       retries: 3
-    # Least privilege: no capabilities, no privilege escalation, read-only
-    # rootfs. Writable paths: /data (volume) + /tmp (tmpfs).
+    # Least privilege: all capabilities dropped, then only the three the
+    # supervisor needs. SETUID/SETGID let it start the vault as 65533:65532
+    # (a different uid from PID 1); KILL lets it signal that uid. The vault
+    # itself gets no capabilities across the uid change, and no-new-privileges
+    # keeps the restriction across exec. Writable paths: /data (vault
+    # volume), /state (supervisor volume), /tmp (tmpfs).
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - KILL
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -43,13 +52,18 @@ services:
     # tailnet-only via tailscale serve.
     ports:
       - "127.0.0.1:8080:8080"
-    # .env is the supervisor-owned dotenv file; vw-data persists /data
-    # (vault DB + tailscaled state) across redeploys.
+    # .env is the supervisor-owned dotenv file. It lives under /state
+    # (0700, owner 65532): the vault's uid cannot traverse the directory,
+    # so it cannot read the auth key or S3 credentials. vw-data persists
+    # the vault's files; vw-state persists the node identity, cert cache,
+    # backup staging, and sync sidecars.
     volumes:
-      - ./.env:/config/.env:ro,z
+      - ./.env:/state/.env:ro,z
       - vw-data:/data
+      - vw-state:/state
     environment:
-      SUPERVISOR_ENV_FILE: /config/.env
+      SUPERVISOR_ENV_FILE: /state/.env
 
 volumes:
   vw-data:
+  vw-state:

@@ -1,22 +1,82 @@
-//! The durable /data set: which files sync to and from the bucket. It
-//! covers the machine's identity (`tailscaled.state`, `rsa_key*`,
-//! `certs/**`) plus the vault's user content that cannot be regenerated
-//! (`attachments/**`, and `sends/**` when Bitwarden Send is enabled).
+//! The durable set: which files sync to and from the bucket. It covers the
+//! machine's identity (`tailscaled.state`, `certs/**`) on the
+//! supervisor-only `/state` volume, plus the vault's own data (`rsa_key*`,
+//! `config.json`, `attachments/**`, and `sends/**`) on `/data`. Bucket keys
+//! are the historical names, independent of which local volume holds the
+//! file, so an existing bucket restores into either layout unchanged.
+//!
 //! Pure policy, no I/O against the bucket — both sync directions filter
 //! through it (what push may upload is exactly what pull may write), so
 //! the set lives in one auditable place.
 //!
 //! The bucket holds secrets and user data: whatever passes here is what
-//! a bucket writer could plant on the data volume, so keep the set to
-//! files that are safe to restore wholesale.
+//! a bucket writer could plant on a volume, so keep the set to files that
+//! are safe to restore wholesale.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::config::SUPERVISOR_STATE;
 use crate::util::fs::is_real_file;
 use crate::util::log;
 
-/// The recursive directory trees in the set, relative to the data root.
-const TREES: [&str; 3] = ["certs", "attachments", "sends"];
+/// Recursive trees on the vault data volume, as bucket-relative names.
+const DATA_TREES: [&str; 2] = ["attachments", "sends"];
+/// Recursive trees on the supervisor state volume. Tailscale's cert cache
+/// lives under its `--statedir`, which is the state file's parent.
+const STATE_TREES: [&str; 1] = ["certs"];
+
+/// The two local volumes behind one bucket namespace. One is the vault's
+/// writable data volume; the other is the supervisor-only state volume.
+#[derive(Clone, Debug)]
+pub(super) struct Roots {
+    pub(super) data: PathBuf,
+    pub(super) state: PathBuf,
+}
+
+impl Roots {
+    pub(super) fn production() -> Self {
+        Self {
+            data: PathBuf::from("/data"),
+            state: PathBuf::from(SUPERVISOR_STATE),
+        }
+    }
+
+    /// A single scratch directory for both roles (tests).
+    #[cfg(test)]
+    pub(super) fn one(root: &Path) -> Self {
+        Self {
+            data: root.to_path_buf(),
+            state: root.to_path_buf(),
+        }
+    }
+
+    /// Which volume owns a bucket-relative path.
+    fn owns_state(&self, rel: &str, state_file: Option<&str>) -> bool {
+        state_file == Some(rel) || rel == "tailscaled.state" || rel.starts_with("certs/")
+    }
+
+    pub(super) fn root_of(&self, rel: &str, state_file: Option<&str>) -> &Path {
+        if self.owns_state(rel, state_file) {
+            &self.state
+        } else {
+            &self.data
+        }
+    }
+
+    pub(super) fn local(&self, rel: &str, state_file: Option<&str>) -> PathBuf {
+        self.root_of(rel, state_file).join(rel)
+    }
+
+    /// Exact mode for a downloaded file. Identity and cert material stays
+    /// owner-only; vault data is group read/write for the other uid.
+    pub(super) fn mode(&self, rel: &str, state_file: Option<&str>) -> u32 {
+        if self.owns_state(rel, state_file) {
+            0o600
+        } else {
+            0o660
+        }
+    }
+}
 
 /// Whether a bucket-relative path is inside the durable set. Traversal
 /// and absolute paths never pass, in any position; neither does a `.part`
@@ -43,28 +103,33 @@ pub(super) fn is_synced_file(rel: &str, state_file: Option<&str>) -> bool {
         return true;
     }
     match rel.split_once('/') {
-        Some((dir, _)) => TREES.contains(&dir),
+        Some((dir, _)) => DATA_TREES.contains(&dir) || STATE_TREES.contains(&dir),
         None => false,
     }
 }
 
-/// The files in the durable set, as bucket-relative paths, under `root`
-/// (production passes `/data`; tests pass a scratch directory).
-pub(super) fn local_synced_files(root: &Path, state_file: Option<&str>) -> Vec<String> {
+/// The files in the durable set, as bucket-relative paths, across both
+/// local volumes (production) or a single scratch directory (tests).
+pub(super) fn local_synced_files(roots: &Roots, state_file: Option<&str>) -> Vec<String> {
     let mut files = Vec::new();
-    if is_real_file(&root.join("tailscaled.state").to_string_lossy()) {
+    if is_real_file(&roots.state.join("tailscaled.state").to_string_lossy()) {
         files.push("tailscaled.state".to_string());
-    }
-    if is_real_file(&root.join("config.json").to_string_lossy()) {
-        files.push("config.json".to_string());
     }
     if let Some(state) = state_file
         && state != "tailscaled.state"
-        && is_real_file(&root.join(state).to_string_lossy())
+        && is_real_file(&roots.state.join(state).to_string_lossy())
     {
         files.push(state.to_string());
     }
-    if let Ok(entries) = std::fs::read_dir(root) {
+    for tree in STATE_TREES {
+        walk_dir(&roots.state.join(tree), tree, state_file, &mut |path| {
+            files.push(path)
+        });
+    }
+    if is_real_file(&roots.data.join("config.json").to_string_lossy()) {
+        files.push("config.json".to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir(&roots.data) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else {
@@ -79,8 +144,8 @@ pub(super) fn local_synced_files(root: &Path, state_file: Option<&str>) -> Vec<S
             }
         }
     }
-    for tree in TREES {
-        walk_dir(&root.join(tree), tree, state_file, &mut |path| {
+    for tree in DATA_TREES {
+        walk_dir(&roots.data.join(tree), tree, state_file, &mut |path| {
             files.push(path)
         });
     }
@@ -91,7 +156,7 @@ pub(super) fn local_synced_files(root: &Path, state_file: Option<&str>) -> Vec<S
     files
 }
 
-/// Recursively collect files under `dir`, as paths relative to /data that
+/// Recursively collect files under `dir`, as bucket-relative paths that
 /// pass the durable-set predicate.
 fn walk_dir(dir: &Path, rel: &str, state_file: Option<&str>, out: &mut impl FnMut(String)) {
     let entries = match std::fs::read_dir(dir) {
@@ -121,16 +186,22 @@ fn walk_dir(dir: &Path, rel: &str, state_file: Option<&str>, out: &mut impl FnMu
     }
 }
 
-/// Remove `.part` staging leftovers under the data root (flat) and inside
-/// the synced trees (recursively); returns how many were removed. A
-/// transfer that died mid-pull leaves one, and it must never be resumed
-/// against different content, so each boot starts clean. Staging
-/// directories outside the synced trees (backup dumps) are not touched.
-pub(super) fn clear_partials(root: &Path, state_file: Option<&str>) -> usize {
+/// Remove `.part` staging leftovers at both roots and inside the synced
+/// trees (recursively); returns how many were removed. A transfer that
+/// died mid-pull leaves one, and it must never be resumed against
+/// different content, so each boot starts clean. Staging directories
+/// outside the synced trees (backup dumps) are not touched.
+pub(super) fn clear_partials(roots: &Roots, state_file: Option<&str>) -> usize {
     let mut removed = 0;
-    clear_flat(root, &mut removed);
-    for tree in TREES {
-        clear_recursive(&root.join(tree), &mut removed);
+    clear_flat(&roots.data, &mut removed);
+    if roots.state != roots.data {
+        clear_flat(&roots.state, &mut removed);
+    }
+    for tree in DATA_TREES {
+        clear_recursive(&roots.data.join(tree), &mut removed);
+    }
+    for tree in STATE_TREES {
+        clear_recursive(&roots.state.join(tree), &mut removed);
     }
     // A custom state file may live in a non-tree subdirectory; its parent
     // can still contain a `.part` from a dead transfer.
@@ -138,7 +209,7 @@ pub(super) fn clear_partials(root: &Path, state_file: Option<&str>) -> usize {
         && let Some(parent) = Path::new(state).parent()
         && !parent.as_os_str().is_empty()
     {
-        clear_recursive(&root.join(parent), &mut removed);
+        clear_recursive(&roots.state.join(parent), &mut removed);
     }
     removed
 }
@@ -272,25 +343,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The push enumeration is rooted at the data directory (tests use a
-    /// scratch dir): identity files, rsa_key*, and the trees; `.part`
-    /// leftovers are excluded.
+    /// The push enumeration covers both volumes: identity files, rsa_key*,
+    /// and the trees; `.part` leftovers are excluded.
     #[test]
     fn local_enumeration_covers_identity_keys_and_trees() {
-        let root = std::env::temp_dir().join(format!("vw-sup-syncroot-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("certs")).unwrap();
-        std::fs::create_dir_all(root.join("attachments")).unwrap();
-        std::fs::write(root.join("tailscaled.state"), b"x").unwrap();
-        std::fs::write(root.join("config.json"), b"{}").unwrap();
-        std::fs::write(root.join("rsa_key.pem"), b"x").unwrap();
-        std::fs::write(root.join("rsa_key.pub.pem"), b"x").unwrap();
-        std::fs::write(root.join("certs/c.crt"), b"x").unwrap();
-        std::fs::write(root.join("attachments/u1"), b"x").unwrap();
-        std::fs::write(root.join("attachments/u1.part"), b"x").unwrap();
-        std::fs::write(root.join("db.sqlite3"), b"x").unwrap();
+        let base = std::env::temp_dir().join(format!("vw-sup-syncroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let roots = Roots {
+            data: base.join("data"),
+            state: base.join("state"),
+        };
+        for root in [&roots.data, &roots.state] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        std::fs::create_dir_all(roots.state.join("certs")).unwrap();
+        std::fs::create_dir_all(roots.data.join("attachments")).unwrap();
+        std::fs::write(roots.state.join("tailscaled.state"), b"x").unwrap();
+        std::fs::write(roots.state.join("certs/c.crt"), b"x").unwrap();
+        std::fs::write(roots.data.join("config.json"), b"{}").unwrap();
+        std::fs::write(roots.data.join("rsa_key.pem"), b"x").unwrap();
+        std::fs::write(roots.data.join("rsa_key.pub.pem"), b"x").unwrap();
+        std::fs::write(roots.data.join("attachments/u1"), b"x").unwrap();
+        std::fs::write(roots.data.join("attachments/u1.part"), b"x").unwrap();
+        std::fs::write(roots.data.join("db.sqlite3"), b"x").unwrap();
         assert_eq!(
-            local_synced_files(&root, None),
+            local_synced_files(&roots, None),
             vec![
                 "attachments/u1",
                 "certs/c.crt",
@@ -300,11 +377,42 @@ mod tests {
                 "tailscaled.state",
             ]
         );
-        // a configured custom state file rides along
-        std::fs::write(root.join("node.state"), b"x").unwrap();
-        let files = local_synced_files(&root, Some("node.state"));
+        // a configured custom state file rides along from /state
+        std::fs::write(roots.state.join("node.state"), b"x").unwrap();
+        let files = local_synced_files(&roots, Some("node.state"));
         assert!(files.contains(&"node.state".to_string()), "{files:?}");
-        let _ = std::fs::remove_dir_all(&root);
+        // the vault's copy of the same name is not the identity
+        std::fs::write(roots.data.join("node.state"), b"x").unwrap();
+        let files = local_synced_files(&roots, Some("node.state"));
+        assert_eq!(
+            files.iter().filter(|f| *f == "node.state").count(),
+            1,
+            "{files:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Identity and certs live on the state volume, so a download there is
+    /// owner-only; vault data is shared with the vault's group.
+    #[test]
+    fn modes_follow_the_owning_volume() {
+        let roots = Roots {
+            data: PathBuf::from("/data"),
+            state: PathBuf::from("/state"),
+        };
+        assert_eq!(roots.mode("tailscaled.state", None), 0o600);
+        assert_eq!(roots.mode("certs/c.pem", None), 0o600);
+        assert_eq!(roots.mode("node.state", Some("node.state")), 0o600);
+        assert_eq!(roots.mode("rsa_key.pem", None), 0o660);
+        assert_eq!(roots.mode("attachments/u", None), 0o660);
+        assert_eq!(
+            roots.local("certs/c.pem", None),
+            PathBuf::from("/state/certs/c.pem")
+        );
+        assert_eq!(
+            roots.local("attachments/u", None),
+            PathBuf::from("/data/attachments/u")
+        );
     }
 
     /// Stale `.part` leftovers are removed at boot, flat at the root and
@@ -319,12 +427,13 @@ mod tests {
         std::fs::write(root.join("attachments/u.part"), b"x").unwrap();
         std::fs::write(root.join("attachments/sub/v.part"), b"x").unwrap();
         std::fs::write(root.join("certs/keep.crt"), b"x").unwrap();
-        assert_eq!(clear_partials(&root, None), 3);
+        let roots = Roots::one(&root);
+        assert_eq!(clear_partials(&roots, None), 3);
         assert!(!root.join("rsa_key.part").exists());
         assert!(!root.join("attachments/u.part").exists());
         assert!(!root.join("attachments/sub/v.part").exists());
         assert!(root.join("certs/keep.crt").exists());
-        assert_eq!(clear_partials(&root, None), 0);
+        assert_eq!(clear_partials(&roots, None), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -346,9 +455,10 @@ mod tests {
         symlink(&outside, root.join("attachments/alias-dir")).unwrap();
         symlink(&secret, root.join("attachments/stale.part")).unwrap();
 
-        let files = local_synced_files(&root, None);
+        let roots = Roots::one(&root);
+        let files = local_synced_files(&roots, None);
         assert!(files.is_empty(), "symlinks are not synced: {files:?}");
-        assert!(clear_partials(&root, None) >= 1);
+        assert!(clear_partials(&roots, None) >= 1);
         assert_eq!(std::fs::read(&secret).unwrap(), b"do-not-touch");
         assert!(!root.join("attachments/stale.part").exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -360,7 +470,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/node.state.part"), b"partial").unwrap();
-        assert_eq!(clear_partials(&root, Some("sub/node.state")), 1);
+        assert_eq!(
+            clear_partials(&Roots::one(&root), Some("sub/node.state")),
+            1
+        );
         assert!(!root.join("sub/node.state.part").exists());
         let _ = std::fs::remove_dir_all(&root);
     }

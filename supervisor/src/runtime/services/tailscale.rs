@@ -9,7 +9,8 @@ use crate::util::{StagedFile, log};
 
 /// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
 /// /dev/net/tun). `--statedir` (derived from the state file's dir, on the
-/// persistent volume) is required for `tailscale serve` HTTPS cert caching.
+/// supervisor-only state volume) is required for `tailscale serve` HTTPS
+/// cert caching.
 /// Environment is allow-listed ([`apply_env`]) — no supervisor secrets.
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Handle> {
     let mut cmd = Command::new(TAILSCALED);

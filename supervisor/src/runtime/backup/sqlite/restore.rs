@@ -1,15 +1,27 @@
 //! SQLite restore: emptiness gate (absent, or a valid database with no
 //! user tables) and import (integrity check on the staged copy, then a
 //! no-replace link into place). In-process via bundled rusqlite — no
-//! external tool. Same filesystem (data volume), so the link has no
-//! torn-copy window.
+//! external tool.
+//!
+//! The staged dump lives on the supervisor-only state volume while the
+//! live DB is on the vault's data volume, so they are different
+//! filesystems. Publication copies the verified bytes to a same-directory
+//! temp on the data volume, then `link(2)`s it into place: still atomic,
+//! still never replacing existing data, and no cross-device rename.
 
+use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::util::log;
 use crate::util::make_private;
+
+/// The live DB is shared with the vault through the data group: the vault
+/// runs a different uid and must be able to write its own database.
+const LIVE_MODE: u32 = 0o660;
+const COPY_CHUNK: usize = 64 * 1024;
 
 /// Emptiness per the never-overwrite invariant: the live file is absent,
 /// or a readable SQLite database with zero user tables (a freshly created
@@ -47,16 +59,15 @@ pub(crate) enum ImportError {
 }
 
 /// Integrity pre-check (`PRAGMA integrity_check` on the staged copy),
-/// then import via atomic no-replace publication. `link(2)` fails with
-/// `AlreadyExists` if anything created the live path meanwhile — unlike
-/// `rename(2)`, which would silently replace it — so the never-overwrite
-/// invariant is enforced by the kernel, not by a check. A live path that
-/// exists but is *provably empty* (the same predicate [`is_empty`] uses)
-/// is cleared first: it holds no data, and the no-replace link cannot
-/// publish over it. The 0600 mode is applied to the staged inode before
-/// linking, so the live path never exists with wider permissions. Both
-/// paths sit on the same data volume, so the hard link is always possible
-/// (same constraint `rename` had).
+/// then import via atomic no-replace publication. The verified bytes are
+/// copied to a temp beside the live path (same filesystem for the link),
+/// then `link(2)` fails with `AlreadyExists` if anything created the live
+/// path meanwhile — unlike `rename(2)`, which would silently replace it —
+/// so the never-overwrite invariant is enforced by the kernel, not by a
+/// check. A live path that exists but is *provably empty* (the same
+/// predicate [`is_empty`] uses) is cleared first: it holds no data, and
+/// the no-replace link cannot publish over it. The live file is 0660 so
+/// the vault's uid can write it through the shared data group.
 pub(crate) fn import(
     staged: &str,
     path: &str,
@@ -130,7 +141,16 @@ pub(crate) fn import(
             }
         }
     }
-    match std::fs::hard_link(staged, path) {
+    let tmp = match copy_beside(staged, path) {
+        Ok(tmp) => tmp,
+        Err(e) => {
+            log::err(&format!("db restore: cannot stage the dump on /data: {e}"));
+            return Err(ImportError::Local);
+        }
+    };
+    let published = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match published {
         Ok(()) => {
             // Unlink the staging name; failure only leaves a stale copy
             // for the next staging sweep, never a wrong live file.
@@ -163,6 +183,44 @@ pub(crate) fn import(
             Err(ImportError::Local)
         }
     }
+}
+
+/// Copy the verified staged dump to a fresh temp beside `path` (the live
+/// DB's filesystem), fsync it, and return the temp name. Publication by
+/// `link` then has no torn-copy window. A stale temp (a crash before the
+/// unlink) is removed, never followed.
+fn copy_beside(staged: &str, path: &str) -> std::io::Result<String> {
+    let tmp = format!("{path}.restore");
+    let _ = std::fs::remove_file(&tmp);
+    let mut input = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(staged)?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(LIVE_MODE)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&tmp)?;
+    let copied = (|| -> std::io::Result<()> {
+        let mut buffer = vec![0u8; COPY_CHUNK];
+        loop {
+            let n = input.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            output.write_all(&buffer[..n])?;
+        }
+        // The open mask is umask-dependent; make the exact mode explicit.
+        output.set_permissions(std::fs::Permissions::from_mode(LIVE_MODE))?;
+        output.sync_all()
+    })();
+    drop(output);
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(tmp)
 }
 
 #[cfg(test)]
@@ -280,7 +338,7 @@ mod tests {
         drop(conn);
 
         // Happy path for contrast: publication into an absent path works
-        // and lands 0600.
+        // and lands group-writable (the vault's uid is in the data group).
         let target = dir.join("fresh.sqlite3");
         assert!(
             import(staged.to_str().unwrap(), target.to_str().unwrap(), &|| {
@@ -290,8 +348,12 @@ mod tests {
         );
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        assert_eq!(mode, 0o660);
         assert!(!staged.exists(), "staging name is unlinked after publish");
+        assert!(
+            !dir.join("fresh.sqlite3.restore").exists(),
+            "no publication temp remains"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

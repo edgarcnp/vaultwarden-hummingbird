@@ -10,7 +10,7 @@
 //! signature is a credential).
 
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
@@ -245,6 +245,10 @@ pub struct Expect<'a> {
     pub sha256: Option<&'a str>,
     /// Absolute cap regardless of the expectations above.
     pub max_bytes: u64,
+    /// Exact mode of the published file. Identity/cert material is 0600;
+    /// vault data is 0660 so the vault's separate uid reaches it through
+    /// the shared data group.
+    pub mode: u32,
 }
 
 /// One listed object: its full key and size. The size feeds the state
@@ -551,8 +555,8 @@ impl Client {
     /// file (same filesystem) bounded by [`Expect`], and only a transfer
     /// that meets every expectation is renamed into place: a failed,
     /// truncated, or mismatched download leaves `path` untouched and
-    /// removes the temp. The published file is 0600: everything here is a
-    /// secret (identity, keys, attachments).
+    /// removes the temp. The published file takes [`Expect::mode`]: 0600
+    /// for identity/cert material, 0660 for vault data.
     pub fn get(
         &self,
         key: &str,
@@ -620,7 +624,7 @@ impl Client {
                     .create(true)
                     .truncate(start == 0)
                     .append(start > 0)
-                    .mode(0o600)
+                    .mode(expect.mode)
                     .custom_flags(nix::libc::O_NOFOLLOW)
                     .open(&tmp)
                     .map_err(|e| GetError::Local(format!("cannot create {tmp}: {e}")))?;
@@ -653,19 +657,23 @@ impl Client {
                     out.write_all(&buf[..n])
                         .map_err(|e| GetError::Local(format!("download of {key}: {e}")))?;
                 }
-                // A body that ends short of the declared length is not a
-                // usable object. The retry budget is already spent here, so
-                // classify it as definitively invalid and let a restore try
-                // the next older candidate.
+                // A body that ends short of the declared length is an
+                // interrupted transfer, not proof the object is invalid:
+                // keep the partial and resume within the attempt budget. A
+                // restore then refuses the boot instead of silently
+                // downgrading to an older backup.
                 if let Some(declared) = declared
                     && total - start != declared
                 {
-                    return Err(GetError::Invalid(format!(
+                    return Err(GetError::Transport(format!(
                         "download of {key}: body ended after {} of {declared} bytes",
                         total - start
                     )));
                 }
-                out.sync_all()
+                // The open mode is masked by the umask; the published file
+                // must have exactly the caller's mode.
+                out.set_permissions(std::fs::Permissions::from_mode(expect.mode))
+                    .and_then(|()| out.sync_all())
                     .map_err(|e| GetError::Local(format!("download of {key}: {e}")))?;
                 Ok(total)
             })();
@@ -1071,6 +1079,7 @@ mod tests {
             size,
             sha256: None,
             max_bytes: max,
+            mode: 0o600,
         }
     }
 
@@ -1091,6 +1100,55 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, GetError::Missing);
         assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Vault data must be group read/write so the vault's separate uid can
+    /// use it; identity material stays owner-only.
+    #[test]
+    fn get_publishes_the_requested_mode() {
+        let client = local_client(fake_server("200 OK", "", b"hello"));
+        let dir = scratch("get-mode");
+        let target = dir.join("attachment");
+        client
+            .get(
+                "state/attachments/a",
+                target.to_str().unwrap(),
+                Expect {
+                    size: Some(5),
+                    sha256: None,
+                    max_bytes: 1024,
+                    mode: 0o660,
+                },
+                || false,
+            )
+            .expect("download publishes");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o660);
+        assert!(!dir.join("attachment.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.part` symlink is not followed: the download fails locally
+    /// instead of writing through the link.
+    #[test]
+    fn get_refuses_a_symlinked_part_file() {
+        let client = local_client(fake_server("200 OK", "", b"hello"));
+        let dir = scratch("get-part-link");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("target.part")).unwrap();
+        let err = client
+            .get(
+                "state/target",
+                dir.join("target").to_str().unwrap(),
+                expect(Some(5), 1024),
+                || false,
+            )
+            .unwrap_err();
+        assert!(matches!(err, GetError::Local(_)), "{err}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1278,6 +1336,7 @@ mod tests {
                     size: Some(5),
                     sha256: Some(HELLO),
                     max_bytes: 1024,
+                    mode: 0o600,
                 },
                 || false,
             )
@@ -1298,6 +1357,7 @@ mod tests {
                     size: Some(5),
                     sha256: Some(&"0".repeat(64)),
                     max_bytes: 1024,
+                    mode: 0o600,
                 },
                 || false,
             )

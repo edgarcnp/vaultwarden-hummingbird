@@ -138,7 +138,7 @@ COPY --from=fetch /out/tailscaled /usr/local/bin/tailscaled
 COPY --from=vw-build /out-vaultwarden /vaultwarden
 # web-vault dir always exists (may be empty) so COPY succeeds
 COPY --from=fetch /out/web-vault /web-vault
-COPY --from=fetch --chown=65532:0 /data /data
+COPY --from=fetch --chown=65532:65532 /data /data
 
 # RUNTIME DEFAULTS — plain upstream names: the image-default layer, not
 # user config (that flows via the dotenv file). The child environment is
@@ -171,20 +171,31 @@ ENV DATA_FOLDER=/data \
 # own binaries. Remove the post-exploitation tools so the documented
 # "no shell" posture is true; this is the last RUN (the next RUN would need
 # the shell itself). The base image runs as 65532, so escalate only for
-# this build step; USER 65532:0 below restores the runtime identity.
+# this build step; USER 65532:65532 below restores the runtime identity.
+#
+# VOLUME LAYOUT — /data is the vault's writable volume (0770, group 65532):
+# the vault runs as 65533:65532 and reaches it through the shared group.
+# /state is supervisor-only (0700, owner 65532): tailscaled state/socket,
+# cert cache, backup staging, sync sidecars, and the dotenv file. The vault
+# cannot traverse it.
 USER 0
-RUN rm -f \
+RUN mkdir -p /state \
+ && chown 65532:65532 /data /state \
+ && chmod 0770 /data \
+ && chmod 0700 /state \
+ && rm -f \
         /usr/bin/bash /usr/bin/sh /usr/bin/openssl \
-        /usr/bin/base64 /usr/bin/cat /usr/bin/cp /usr/bin/dd \
-        /usr/bin/ls /usr/bin/mv /usr/bin/rm
+        /usr/bin/base64 /usr/bin/cat /usr/bin/chmod /usr/bin/chown \
+        /usr/bin/cp /usr/bin/dd /usr/bin/ls /usr/bin/mkdir /usr/bin/mv \
+        /usr/bin/rm
 
-# CONTAINER SHAPE — persistent data volume, the gate port, non-root
-# entrypoint (the supervisor).
+# CONTAINER SHAPE — two volumes (vault data + supervisor state), the gate
+# port, non-root entrypoint (the supervisor).
 
-VOLUME /data
+VOLUME /data /state
 EXPOSE 8080
 
-USER 65532:0
+USER 65532:65532
 ENTRYPOINT ["/entrypoint"]
 
 # HEALTHCHECK — the supervisor dials its own gate in one-shot mode

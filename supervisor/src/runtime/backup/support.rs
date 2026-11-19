@@ -7,18 +7,26 @@ use std::time::Duration;
 
 use crate::config::{DbBackupConfig, SyncConfig};
 
-/// Unique-ish staging dir per test invocation.
-pub(super) fn next_staging() -> String {
+/// Unique-ish scratch base per test invocation; the sidecars live directly
+/// in it and the staging dir below it.
+fn next_base() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("vw-sup-stage-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    dir.to_string_lossy().into_owned()
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
-/// A DbBackupConfig with a custom sync config and a unique staging dir.
+/// Unique-ish staging dir per test invocation.
+pub(super) fn next_staging() -> String {
+    next_base().join("staging").to_string_lossy().into_owned()
+}
+
+/// A DbBackupConfig with a custom sync config and unique scratch paths.
 pub(super) fn cfg_with_sync(sync: SyncConfig) -> DbBackupConfig {
+    let base = next_base();
     DbBackupConfig {
         sync,
         db_path: "/nonexistent/db.sqlite3".into(),
@@ -26,7 +34,8 @@ pub(super) fn cfg_with_sync(sync: SyncConfig) -> DbBackupConfig {
         interval: Duration::from_secs(43_200),
         keep: 3,
         restore: false,
-        staging: next_staging(),
+        staging: base.join("staging").to_string_lossy().into_owned(),
+        state_dir: base.to_string_lossy().into_owned(),
     }
 }
 

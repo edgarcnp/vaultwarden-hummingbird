@@ -13,14 +13,14 @@ use std::path::Path;
 use crate::util::fs::{read_capped, write_atomic};
 use crate::util::log;
 
-/// Sidecar next to the live database holding the newest manifest
-/// generation this lineage has produced (after a push) or adopted (after
-/// a restore import).
-pub(super) fn sidecar_path(db_path: &str) -> String {
-    match Path::new(db_path).parent() {
-        Some(dir) => dir.join("db-backups.state").to_string_lossy().into_owned(),
-        None => "db-backups.state".to_string(),
-    }
+/// On the supervisor-only state volume (not the vault-writable data
+/// volume): the sidecar records the newest manifest generation this
+/// lineage has produced (after a push) or adopted (after a restore).
+pub(super) fn sidecar_path(state_dir: &str) -> String {
+    Path::new(state_dir)
+        .join("db-backups.state")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// What the sidecar records.
@@ -34,10 +34,10 @@ pub(super) enum Known {
 }
 
 /// The recorded lineage, if any.
-pub(super) fn read(db_path: &str) -> Option<Known> {
+pub(super) fn read(state_dir: &str) -> Option<Known> {
     // The sidecar is a generation or a legacy object name; 1 KiB is ample.
     // A symlink or an oversized/corrupt file is "no usable lineage".
-    let text = read_capped(&sidecar_path(db_path), 1024).ok()?;
+    let text = read_capped(&sidecar_path(state_dir), 1024).ok()?;
     let value = text.trim();
     if value.is_empty() {
         return None;
@@ -51,18 +51,18 @@ pub(super) fn read(db_path: &str) -> Option<Known> {
 /// Record the newest generation for this lineage. Best-effort: a failed
 /// write is logged loudly — the next push refuses (missing continuity)
 /// rather than guess, and RESTORE=true adoption can re-establish it.
-pub(super) fn write(db_path: &str, generation: u64) {
-    write_text(db_path, &format!("{generation}\n"));
+pub(super) fn write(state_dir: &str, generation: u64) {
+    write_text(state_dir, &format!("{generation}\n"));
 }
 
 /// Record a legacy object name (pre-manifest bucket): resolved against
 /// the listing on the next tick.
-pub(super) fn write_name(db_path: &str, name: &str) {
-    write_text(db_path, &format!("{name}\n"));
+pub(super) fn write_name(state_dir: &str, name: &str) {
+    write_text(state_dir, &format!("{name}\n"));
 }
 
-fn write_text(db_path: &str, text: &str) {
-    let path = sidecar_path(db_path);
+fn write_text(state_dir: &str, text: &str) {
+    let path = sidecar_path(state_dir);
     // Atomic replace: a symlink at the sidecar path is replaced, never
     // followed, and the 0600 mode is exact.
     if let Err(e) = write_atomic(&path, text.as_bytes(), 0o600) {
@@ -105,7 +105,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vw-sup-lin-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("db.sqlite3").to_string_lossy().into_owned()
+        dir.to_string_lossy().into_owned()
     }
 
     #[test]
@@ -124,31 +124,31 @@ mod tests {
 
     #[test]
     fn sidecar_round_trips_generations_and_legacy_names() {
-        let db = scratch("roundtrip");
-        assert!(read(&db).is_none(), "no sidecar yet");
-        write(&db, 12);
-        assert!(matches!(read(&db), Some(Known::Generation(12))));
-        write(&db, 13);
-        assert!(matches!(read(&db), Some(Known::Generation(13))));
+        let dir = scratch("roundtrip");
+        assert!(read(&dir).is_none(), "no sidecar yet");
+        write(&dir, 12);
+        assert!(matches!(read(&dir), Some(Known::Generation(12))));
+        write(&dir, 13);
+        assert!(matches!(read(&dir), Some(Known::Generation(13))));
 
         // A pre-manifest sidecar (a bare object name) still parses; the
         // caller resolves it against the manifest.
-        write_name(&db, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
-        match read(&db) {
+        write_name(&dir, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
+        match read(&dir) {
             Some(Known::LegacyName(name)) => {
                 assert_eq!(name, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
             }
             _ => panic!("expected a legacy name"),
         }
-        let _ = std::fs::remove_dir_all(Path::new(&db).parent().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn write_failure_is_loud_but_nonfatal() {
         // parent dir does not exist: write logs, read stays None
-        let db = "/nonexistent-vw-sup-lin/db.sqlite3";
-        write(db, 1);
-        write_name(db, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
-        assert!(read(db).is_none());
+        let dir = "/nonexistent-vw-sup-lin";
+        write(dir, 1);
+        write_name(dir, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
+        assert!(read(dir).is_none());
     }
 }

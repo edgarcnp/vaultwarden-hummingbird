@@ -22,8 +22,12 @@ pub struct DbBackupConfig {
     pub keep: usize,
     /// boot-time restore into an empty DB (SUPERVISOR_DB_BACKUP_RESTORE)
     pub restore: bool,
-    /// local staging dir on the data volume for in-flight dumps/pulls
+    /// local staging dir on the supervisor state volume for in-flight
+    /// dumps/pulls
     pub staging: String,
+    /// supervisor-only directory for the lineage and retained-dump
+    /// sidecars; never on the vault-writable data volume
+    pub state_dir: String,
 }
 
 impl DbBackupConfig {

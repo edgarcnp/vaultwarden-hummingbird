@@ -75,7 +75,9 @@ impl FileConfig {
                 };
             }
         }
-        let raw = match std::fs::read_to_string(path) {
+        // No-follow and capped: a symlink planted at the path must not
+        // redirect the supervisor onto a vault-writable file.
+        let raw = match crate::util::fs::read_capped(path, MAX_FILE_BYTES) {
             Ok(raw) => raw,
             Err(e) => {
                 return Self {
@@ -289,6 +291,21 @@ not a valid line
     /// A configured-but-unreadable file is fatal, never a silent fallback
     /// to env-only defaults: losing the whole config surface quietly is
     /// the opposite of what the strict file is for.
+    /// A symlink at the dotenv path is refused, never followed.
+    #[test]
+    fn a_symlinked_file_is_fatal() {
+        use std::os::unix::fs::symlink;
+
+        let target = write_tmp("TAILSCALE_AUTHKEY=secret\n");
+        let link = format!("{target}.link");
+        let _ = std::fs::remove_file(&link);
+        symlink(&target, &link).unwrap();
+        let cfg = FileConfig::load_from(Some(&link));
+        assert!(cfg.fatal.is_some(), "a symlink must not be followed");
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+    }
+
     #[test]
     fn unreadable_file_is_fatal() {
         let cfg = FileConfig::load_from(Some("/nonexistent/.env"));

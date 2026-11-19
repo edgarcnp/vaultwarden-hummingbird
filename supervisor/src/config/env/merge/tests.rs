@@ -11,6 +11,19 @@ fn mk(vars: &[(&str, &str)]) -> Config {
     mk_with_file(vars, FileConfig::default())
 }
 
+/// Like [`mk`], but a refusal is the expected result rather than a panic.
+fn mk_opt(vars: &[(&str, &str)]) -> Option<Config> {
+    let map: BTreeMap<String, String> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    Config::build(FileConfig::default(), move |k| match map.get(k) {
+        Some(v) => Some(v.clone()),
+        None if k == "TAILSCALE_AUTHKEY" => Some("test-key".to_string()),
+        None => None,
+    })
+}
+
 fn mk_with_file(vars: &[(&str, &str)], file: FileConfig) -> Config {
     let map: BTreeMap<String, String> = vars
         .iter()
@@ -199,8 +212,8 @@ fn defaults_and_merge_order() {
     let cfg = mk(&[]);
     assert_eq!(cfg.port, "8080");
     assert_eq!(cfg.vault_port.as_deref(), Some("8081"));
-    assert_eq!(cfg.socket, "/tmp/tailscaled.sock");
-    assert_eq!(cfg.state, "/data/tailscaled.state");
+    assert_eq!(cfg.socket, "/state/tailscaled.sock");
+    assert_eq!(cfg.state, "/state/tailscaled.state");
     assert_eq!(cfg.hostname, "vaultwarden-hummingbird");
     assert_eq!(cfg.authkey.as_deref(), Some("test-key"));
     assert!(cfg.serve && cfg.userspace);
@@ -440,6 +453,21 @@ fn empty_env_service_falls_back_to_the_file() {
     assert_eq!(cfg.service.as_deref(), Some("svc:file-svc"));
 }
 
+/// The dotenv file carries the auth key and S3 credentials; it must be on
+/// the supervisor-only volume, not somewhere the vault can read it.
+#[test]
+fn the_dotenv_must_live_on_the_state_volume() {
+    assert!(env_file_isolated("/state/.env"));
+    assert!(env_file_isolated("/state/config/.env"));
+    assert!(!env_file_isolated("/config/.env"));
+    assert!(!env_file_isolated("state/.env"));
+    assert!(!env_file_isolated("/state-evil/.env"));
+    // A textual prefix is not enough: this resolves onto the vault volume.
+    assert!(!env_file_isolated("/state/../data/.env"));
+    // A `.` component is normalized away and stays under the state root.
+    assert!(env_file_isolated("/state/./.env"));
+}
+
 /// The state file anchors the node identity and the `--statedir` derived
 /// from it: a relative path refuses the boot, an absolute one passes.
 #[test]
@@ -463,8 +491,8 @@ fn state_file_must_be_absolute() {
     assert_eq!(cfg.state, "mem:");
 }
 
-/// A custom state file under /data is wired into the sync set, so state
-/// sync still carries the node identity; one outside /data cannot be
+/// A custom state file under /state is wired into the sync set, so state
+/// sync still carries the node identity; one outside /state cannot be
 /// covered (the boot succeeds, loudly).
 #[test]
 fn custom_state_files_are_wired_into_sync() {
@@ -476,9 +504,9 @@ fn custom_state_files_are_wired_into_sync() {
     ];
 
     let mut vars = SYNC.to_vec();
-    vars.push(("TAILSCALE_STATE_FILE", "/data/node.state"));
+    vars.push(("TAILSCALE_STATE_FILE", "/state/node.state"));
     let cfg = mk(&vars);
-    assert_eq!(cfg.state, "/data/node.state");
+    assert_eq!(cfg.state, "/state/node.state");
     assert_eq!(
         cfg.sync
             .as_ref()
@@ -486,6 +514,15 @@ fn custom_state_files_are_wired_into_sync() {
             .state_file
             .as_deref(),
         Some("node.state")
+    );
+
+    // A state file that collides with a vault data key would shadow it in
+    // the bucket: refuse the boot rather than merge two different files.
+    let mut vars = SYNC.to_vec();
+    vars.push(("TAILSCALE_STATE_FILE", "/state/config.json"));
+    assert!(
+        mk_opt(&vars).is_none(),
+        "a colliding state name must refuse"
     );
 
     let mut vars = SYNC.to_vec();

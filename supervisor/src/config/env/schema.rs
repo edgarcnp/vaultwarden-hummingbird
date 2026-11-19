@@ -42,12 +42,12 @@ static KNOBS: &[Knob] = &[
     Knob {
         name: "TAILSCALE_STATE_FILE",
         policy: FilePolicy::File,
-        default: Some(Default::Str("/data/tailscaled.state")),
+        default: Some(Default::Str("/state/tailscaled.state")),
     },
     Knob {
         name: "TAILSCALE_SOCKET",
         policy: FilePolicy::File,
-        default: Some(Default::Str("/tmp/tailscaled.sock")),
+        default: Some(Default::Str("/state/tailscaled.sock")),
     },
     Knob {
         name: "TAILSCALE_HOSTNAME",
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(string_default("VAULTWARDEN_PORT"), "8080");
         assert_eq!(
             string_default("TAILSCALE_STATE_FILE"),
-            "/data/tailscaled.state"
+            "/state/tailscaled.state"
         );
     }
 

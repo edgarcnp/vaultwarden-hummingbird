@@ -83,7 +83,7 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     };
     // The local lineage: current sidecars hold a generation; a pre-manifest
     // sidecar holds an object name, resolved against the manifest now.
-    let known = resolve_known(lineage::read(&cfg.db_path), &manifest);
+    let known = resolve_known(lineage::read(&cfg.state_dir), &manifest);
     if matches!(lineage::verdict(known, manifest.latest()), Verdict::Refuse) {
         log::err(&format!(
             "db backup: the bucket holds a newer backup than this database's lineage; \
@@ -157,7 +157,7 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     if upload_is_redundant(
         known,
         manifest.latest(),
-        unchanged::is_repeat(&staged, &cfg.db_path),
+        unchanged::is_repeat(&staged, &cfg.state_dir),
     ) {
         let _ = std::fs::remove_file(&staged);
         log::info("db backup: dump is identical to the newest backup; upload skipped");
@@ -180,8 +180,8 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     let evicted = manifest.retain(cfg.keep);
     match store_manifest(&s3, cfg, &manifest, &abort) {
         Ok(()) => {
-            lineage::write(&cfg.db_path, generation);
-            unchanged::retain(&staged, &cfg.db_path);
+            lineage::write(&cfg.state_dir, generation);
+            unchanged::retain(&staged, &cfg.state_dir);
             log::info(&format!(
                 "db backup: pushed {key} ({size} bytes, generation {generation})"
             ));

@@ -1,17 +1,17 @@
-//! /data state sync (opt-in via SUPERVISOR_S3_*): pulls /data durable
-//! files at boot, pushes shortly after the vault starts, on a cadence, and
-//! at shutdown — so node identity, vaultwarden signing keys, and user
-//! content survive ephemeral redeploys (also keeps distance from Let's
-//! Encrypt's 5-certs-per-week limit). The bucket holds secrets: keep it
-//! private, one container per bucket/path. Every failure is non-fatal;
-//! worst case is a fresh node registration, one client re-login, or one
-//! cert re-issuance.
+//! State sync (opt-in via SUPERVISOR_S3_*): pulls durable files at boot,
+//! pushes shortly after the vault starts, on a cadence, and at shutdown —
+//! so node identity, vaultwarden signing keys, and user content survive
+//! ephemeral redeploys (also keeps distance from Let's Encrypt's
+//! 5-certs-per-week limit). The bucket holds secrets: keep it private, one
+//! container per bucket/path. Every failure is non-fatal; worst case is a
+//! fresh node registration, one client re-login, or one cert re-issuance.
 //!
 //! The scope is the durable set ([`super::synced`], `tailscaled.state`,
-//! `rsa_key*`, `certs/**`, `attachments/**`, `sends/**`) — enforced on BOTH
-//! directions: pushes upload exactly that set, pulls refuse any key outside
-//! it (a bucket anyone can write to must not be able to plant arbitrary
-//! files on the data volume).
+//! `rsa_key*`, `config.json`, `certs/**`, `attachments/**`, `sends/**`)
+//! spread over two local volumes with historical bucket names. It is
+//! enforced on BOTH directions: pushes upload exactly that set, pulls
+//! refuse any key outside it (a bucket anyone can write to must not be able
+//! to plant arbitrary files on either volume).
 //!
 //! Content, not size: the bucket-side manifest ([`super::manifest`])
 //! records each synced file's size and SHA-256, so a push uploads a file
@@ -47,7 +47,7 @@ use crate::util::log;
 
 use super::cache::Cache;
 use super::manifest::{Entry, MANIFEST_NAME, MAX_MANIFEST_BYTES, Manifest};
-use super::synced::{clear_partials, is_synced_file, local_synced_files};
+use super::synced::{Roots, clear_partials, is_synced_file, local_synced_files};
 
 /// Build the client for one sync run; a construction failure is a
 /// failed run (logged, non-fatal).
@@ -94,10 +94,20 @@ fn store_manifest(
     client.put_bytes(&manifest_key(cfg), rendered.as_bytes(), abort)
 }
 
-/// Whether a bucket key should be written locally: only when nothing is
-/// there yet, so an existing local file is never overwritten by the bucket.
+/// Whether a real file or directory occupies the local path. A symlink is
+/// not a local copy: the pull may replace the link itself (the atomic
+/// rename never writes through it), which keeps a vault-planted link from
+/// permanently blocking a disaster-recovery pull.
+fn local_present(target: &Path) -> bool {
+    std::fs::symlink_metadata(target)
+        .is_ok_and(|meta| meta.file_type().is_file() || meta.file_type().is_dir())
+}
+
+/// Whether a bucket key should be written locally: only when nothing real
+/// is there yet, so an existing local file is never overwritten by the
+/// bucket.
 fn should_pull(target: &Path) -> bool {
-    !target.exists()
+    !local_present(target)
 }
 
 /// The content-addressed bucket key for one synced file's current
@@ -209,7 +219,7 @@ fn write_repair(root: &Path, rels: &BTreeSet<String>) {
 fn remote_only_files(
     client: &Client,
     cfg: &SyncConfig,
-    root: &Path,
+    roots: &Roots,
     abort: &impl Fn() -> bool,
 ) -> Option<Vec<String>> {
     let listed = client.list(cfg.prefix(), abort).ok()?;
@@ -225,7 +235,7 @@ fn remote_only_files(
         if rel == MANIFEST_NAME || !is_synced_file(rel, cfg.state_file.as_deref()) {
             continue;
         }
-        if !root.join(rel).exists() {
+        if !local_present(&roots.local(rel, cfg.state_file.as_deref())) {
             missing.push(rel.to_string());
         }
     }
@@ -247,7 +257,7 @@ fn remote_only_files(
 /// Returns how many files were recovered. A failed listing only costs this
 /// pass; it never fails the pull.
 fn reconcile_objects(
-    root: &Path,
+    roots: &Roots,
     client: &Client,
     cfg: &SyncConfig,
     manifest: Option<&Manifest>,
@@ -288,12 +298,12 @@ fn reconcile_objects(
         if abort() {
             break;
         }
-        let local = root.join(&rel);
-        if local.exists() {
+        let local = roots.local(&rel, cfg.state_file.as_deref());
+        if local_present(&local) {
             continue;
         }
         let rel_parent = Path::new(&rel).parent().unwrap_or_else(|| Path::new(""));
-        if create_real_dirs(root, rel_parent).is_err() {
+        if create_real_dirs(roots.root_of(&rel, cfg.state_file.as_deref()), rel_parent).is_err() {
             continue;
         }
         let key = format!("{}{}", cfg.prefix(), object_key(&rel, &version.sha256));
@@ -301,6 +311,7 @@ fn reconcile_objects(
             size: Some(version.size),
             sha256: Some(&version.sha256),
             max_bytes: MAX_SYNC_OBJECT_BYTES,
+            mode: roots.mode(&rel, cfg.state_file.as_deref()),
         };
         let local = local.to_string_lossy().into_owned();
         match client.get(&key, &local, expect, abort) {
@@ -320,7 +331,7 @@ fn reconcile_objects(
 
     // Verify every referenced object against the listing (presence and
     // size; content is only checked when a pull downloads it).
-    let mut repair = read_repair(root);
+    let mut repair = read_repair(&roots.state);
     if let Some(manifest) = manifest {
         for (rel, entry) in manifest.iter() {
             if abort() {
@@ -338,7 +349,7 @@ fn reconcile_objects(
                 repair.remove(rel);
                 continue;
             }
-            if root.join(rel).exists() {
+            if local_present(&roots.local(rel, cfg.state_file.as_deref())) {
                 log::err(&format!(
                     "state sync: the bucket no longer holds the current copy of {}; \
                      re-uploading it on the next push",
@@ -353,7 +364,7 @@ fn reconcile_objects(
             }
         }
     }
-    write_repair(root, &repair);
+    write_repair(&roots.state, &repair);
     recovered
 }
 
@@ -365,8 +376,9 @@ struct Target {
     sha256: Option<String>,
 }
 
-/// Pull synced files from the bucket into /data. Called at boot, before
-/// tailscaled is spawned, so a restored state file wins over nothing.
+/// Pull synced files from the bucket into their local volumes. Called at
+/// boot, before tailscaled is spawned, so a restored state file wins over
+/// nothing.
 ///
 /// The pull only fills gaps: a bucket key whose local file already exists
 /// is left untouched. On an ephemeral volume nothing is there, so the whole
@@ -375,17 +387,17 @@ struct Target {
 /// local files. Only keys inside the synced set are written, and every
 /// manifest entry is hash-verified before it is published.
 pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
-    restore_state_at(Path::new("/data"), cfg, abort)
+    restore_state_at(&Roots::production(), cfg, abort)
 }
 
-/// [`restore_state`] with an explicit data root (tests use a scratch dir).
-fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
+/// [`restore_state`] with explicit roots (tests use a scratch directory).
+fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;
     };
     // A partial left by a dead transfer must not be resumed against
     // different content; every boot starts clean.
-    let cleared = clear_partials(root, cfg.state_file.as_deref());
+    let cleared = clear_partials(roots, cfg.state_file.as_deref());
     if cleared > 0 {
         log::info(&format!(
             "state sync: removed {cleared} stale partial download(s)"
@@ -462,17 +474,21 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
             ok = false;
             continue;
         }
-        let local = root.join(&target.rel).to_string_lossy().into_owned();
+        let local_path = roots.local(&target.rel, cfg.state_file.as_deref());
+        let local = local_path.to_string_lossy().into_owned();
         if !should_pull(Path::new(&local)) {
             kept += 1;
             continue;
         }
         // Reject a symlinked parent component: a bucket-controlled path must
-        // never redirect a supervisor write outside the data root.
+        // never redirect a supervisor write outside its volume.
         let rel_parent = Path::new(&target.rel)
             .parent()
             .unwrap_or_else(|| Path::new(""));
-        if let Err(e) = create_real_dirs(root, rel_parent) {
+        if let Err(e) = create_real_dirs(
+            roots.root_of(&target.rel, cfg.state_file.as_deref()),
+            rel_parent,
+        ) {
             log::err(&format!(
                 "state sync: cannot create the parent of {}: {e}",
                 log::sanitize(&target.rel)
@@ -484,6 +500,7 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
             size: target.size,
             sha256: target.sha256.as_deref(),
             max_bytes: MAX_SYNC_OBJECT_BYTES,
+            mode: roots.mode(&target.rel, cfg.state_file.as_deref()),
         };
         // Manifest entries name content-addressed objects; an entry a
         // bucket inherited from before the layout still lives at the old
@@ -528,7 +545,7 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
     // Recover objects the manifest does not name (a crash between the PUT
     // and the manifest write, or an unreadable manifest), and note any
     // referenced object the bucket no longer holds.
-    pulled += reconcile_objects(root, &client, cfg, manifest.as_ref(), &abort);
+    pulled += reconcile_objects(roots, &client, cfg, manifest.as_ref(), &abort);
     if ok && pulled + kept > 0 {
         log::info(&format!(
             "state sync: pull ok ({}, {pulled} new, {kept} kept)",
@@ -538,23 +555,23 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
     ok
 }
 
-/// Push synced files from /data to the bucket. Called after `up` (fresh
-/// state), shortly after the vault starts (the RSA key only exists once
+/// Push synced files to the bucket. Called after `up` (fresh state),
+/// shortly after the vault starts (the RSA key only exists once
 /// vaultwarden has run), on the periodic cadence, and at shutdown.
 /// Uploads only files whose content differs from the manifest (a hash,
 /// not just a size), then rewrites the manifest; entries for files no
 /// longer present locally are kept, so the bucket stays a complete
 /// disaster-recovery source.
 pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
-    sync_state_at(Path::new("/data"), cfg, abort)
+    sync_state_at(&Roots::production(), cfg, abort)
 }
 
-/// [`sync_state`] with an explicit data root (tests use a scratch dir).
-fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
+/// [`sync_state`] with explicit roots (tests use a scratch directory).
+fn sync_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let Some(client) = build(cfg) else {
         return false;
     };
-    let files = local_synced_files(root, cfg.state_file.as_deref());
+    let files = local_synced_files(roots, cfg.state_file.as_deref());
     if files.is_empty() {
         log::info("state sync: no synced files to push yet");
         return true;
@@ -579,7 +596,7 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
     // path keys in that state: a changed local file could overwrite a newer
     // bucket copy. Skip the push until a complete pull/manifest exists.
     if !manifest_loaded {
-        match remote_only_files(&client, cfg, root, &abort) {
+        match remote_only_files(&client, cfg, roots, &abort) {
             Some(missing) if missing.is_empty() => {}
             Some(missing) => {
                 log::err(&format!(
@@ -600,15 +617,18 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
         }
     }
     let mut manifest = bucket_manifest;
-    let mut repair = read_repair(root);
-    let mut cache = Cache::load(root);
+    let mut repair = read_repair(&roots.state);
+    let mut cache = Cache::load(&roots.state);
     let mut pushed = 0usize;
     let mut failed = false;
     for rel in &files {
         if abort() {
             return false;
         }
-        let path = root.join(rel).to_string_lossy().into_owned();
+        let path = roots
+            .local(rel, cfg.state_file.as_deref())
+            .to_string_lossy()
+            .into_owned();
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(e) => {
@@ -715,8 +735,8 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
     // re-upload) and record the rest for the next push.
     let present: BTreeSet<&String> = files.iter().collect();
     repair.retain(|rel| present.contains(rel));
-    write_repair(root, &repair);
-    cache.save(root);
+    write_repair(&roots.state, &repair);
+    cache.save(&roots.state);
     !failed
 }
 
@@ -763,7 +783,70 @@ mod tests {
             should_pull(&dir.join("rsa_key.pub.pem")),
             "a missing file must be pulled"
         );
+        // A symlink is not a local copy: a pull may replace the link
+        // (never writing through it) instead of being blocked forever.
+        let link = dir.join("alias");
+        std::os::unix::fs::symlink(&present, &link).unwrap();
+        assert!(should_pull(&link));
+        assert!(!local_present(&link));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bucket keys are historical names, but the local write must go to
+    /// the volume that owns the file: identity/certs on `/state` (0600),
+    /// vault data on `/data` (0660, group-shared with the vault uid).
+    #[test]
+    fn a_pull_routes_each_key_to_its_volume() {
+        let base = std::env::temp_dir().join(format!("vw-sup-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let roots = Roots {
+            data: base.join("data"),
+            state: base.join("state"),
+        };
+        for root in [&roots.data, &roots.state] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let sha = |bytes: &[u8]| {
+            let probe = base.join("probe");
+            std::fs::write(&probe, bytes).unwrap();
+            let sha = sha256_file(probe.to_str().unwrap()).unwrap();
+            std::fs::remove_file(&probe).unwrap();
+            sha
+        };
+        let state_sha = sha(b"state");
+        let data_sha = sha(b"attach");
+        let manifest = format!("v1\n{state_sha} 5 tailscaled.state\n{data_sha} 6 attachments/u\n");
+        let state_key = format!("/vw/objects/tailscaled.state/{state_sha}");
+        let data_key = format!("/vw/objects/attachments/u/{data_sha}");
+        let (endpoint, _seen) = fake_bucket(move |line| {
+            let path = req_path(line);
+            if line.starts_with("GET") && path.ends_with("/manifest") {
+                (200, manifest.clone().into_bytes())
+            } else if line.starts_with("GET") && path == state_key {
+                (200, b"state".to_vec())
+            } else if line.starts_with("GET") && path == data_key {
+                (200, b"attach".to_vec())
+            } else {
+                (404, Vec::new())
+            }
+        });
+
+        assert!(restore_state_at(&roots, &sync_cfg(&endpoint), || false));
+
+        assert_eq!(
+            std::fs::read(roots.state.join("tailscaled.state")).unwrap(),
+            b"state"
+        );
+        assert_eq!(
+            std::fs::read(roots.data.join("attachments/u")).unwrap(),
+            b"attach"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&roots.state.join("tailscaled.state")), 0o600);
+        assert_eq!(mode(&roots.data.join("attachments/u")), 0o660);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Objects are content-addressed under their synced path: a changed
@@ -894,7 +977,7 @@ mod tests {
         std::fs::write(root.join("rsa_key"), b"new").unwrap();
 
         assert!(
-            !sync_state_at(&root, &sync_cfg(&endpoint), || false),
+            !sync_state_at(&Roots::one(&root), &sync_cfg(&endpoint), || false),
             "a failed manifest write fails the run"
         );
 
@@ -946,7 +1029,11 @@ mod tests {
             }
         });
 
-        assert!(restore_state_at(&root, &sync_cfg(&endpoint), || false));
+        assert!(restore_state_at(
+            &Roots::one(&root),
+            &sync_cfg(&endpoint),
+            || false
+        ));
         assert_eq!(
             std::fs::read(root.join("rsa_key")).unwrap(),
             b"data",
@@ -1061,7 +1148,7 @@ mod tests {
             }
         });
         assert!(
-            !sync_state_at(&root, &sync_cfg(&endpoint), || false),
+            !sync_state_at(&Roots::one(&root), &sync_cfg(&endpoint), || false),
             "a degraded bucket must refuse the push"
         );
         let seen = seen.lock().unwrap().clone();
@@ -1119,7 +1206,11 @@ mod tests {
                 (404, Vec::new())
             }
         });
-        assert!(restore_state_at(&root, &sync_cfg(&endpoint), || false));
+        assert!(restore_state_at(
+            &Roots::one(&root),
+            &sync_cfg(&endpoint),
+            || false
+        ));
         assert_eq!(std::fs::read(root.join("attachments/x")).unwrap(), content);
         let seen = seen.lock().unwrap().clone();
         assert!(
@@ -1155,14 +1246,14 @@ mod tests {
         let cfg = sync_cfg(&endpoint);
 
         // Boot: the manifest names rsa_key; the bucket holds no such object.
-        assert!(restore_state_at(&root, &cfg, || false));
+        assert!(restore_state_at(&Roots::one(&root), &cfg, || false));
         assert!(
             read_repair(&root).contains("rsa_key"),
             "a repairable file is recorded"
         );
 
         // Push: the repair bypasses the manifest match and re-uploads.
-        assert!(sync_state_at(&root, &cfg, || false));
+        assert!(sync_state_at(&Roots::one(&root), &cfg, || false));
         assert!(read_repair(&root).is_empty(), "the repair is consumed");
         let seen = seen.lock().unwrap().clone();
         assert!(

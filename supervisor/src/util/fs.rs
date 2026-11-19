@@ -105,6 +105,14 @@ pub fn open_nofollow(path: &str) -> io::Result<File> {
 /// Read a local sidecar with a hard byte cap (a corrupt/hostile sidecar must
 /// not be able to exhaust PID 1's memory). A symlink is rejected.
 pub fn read_capped(path: &str, max: u64) -> io::Result<String> {
+    let out = read_capped_bytes(path, max)?;
+    String::from_utf8(out)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{path} is not UTF-8")))
+}
+
+/// [`read_capped`] for binary files (the tailscaled identity is not
+/// guaranteed to be UTF-8).
+pub fn read_capped_bytes(path: &str, max: u64) -> io::Result<Vec<u8>> {
     let mut file = open_nofollow(path)?;
     let mut out = Vec::new();
     Read::by_ref(&mut file)
@@ -116,8 +124,7 @@ pub fn read_capped(path: &str, max: u64) -> io::Result<String> {
             format!("{path} exceeds the {max}-byte read cap"),
         ));
     }
-    String::from_utf8(out)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{path} is not UTF-8")))
+    Ok(out)
 }
 
 /// Write `bytes` to `path` atomically:
@@ -296,6 +303,18 @@ mod tests {
         std::fs::write(&path, b"abcdef").unwrap();
         assert_eq!(read_capped(path.to_str().unwrap(), 6).unwrap(), "abcdef");
         assert!(read_capped(path.to_str().unwrap(), 5).is_err());
+        assert_eq!(
+            read_capped_bytes(path.to_str().unwrap(), 6).unwrap(),
+            b"abcdef"
+        );
+        assert!(read_capped_bytes(path.to_str().unwrap(), 5).is_err());
+        // Binary data (a tailscaled state file need not be UTF-8).
+        std::fs::write(&path, [0xff, 0x00]).unwrap();
+        assert_eq!(
+            read_capped_bytes(path.to_str().unwrap(), 2).unwrap(),
+            [0xff, 0x00]
+        );
+        assert!(read_capped(path.to_str().unwrap(), 2).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

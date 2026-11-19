@@ -4,16 +4,27 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
-use crate::config::{VAULTWARDEN, is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
-use crate::runtime::{EnvGrant, Handle, spawn};
+use crate::config::{
+    VAULT_GID, VAULT_UID, VAULTWARDEN, is_supervisor_consumed, is_supervisor_key, vaultwarden_key,
+};
+use crate::runtime::{Credentials, EnvGrant, Handle, spawn_as};
+
+/// The vault's identity: a dedicated UID in the shared data group. It can
+/// write `/data` (0770, group 65532) but cannot traverse the supervisor's
+/// `/state` (0700), read the LocalAPI socket, or reach PID 1's environment.
+const VAULT_CREDENTIALS: Credentials = Credentials {
+    uid: VAULT_UID,
+    gid: VAULT_GID,
+    umask: 0o007,
+};
 
 /// vaultwarden in the foreground with a *granted* environment (see
-/// [`granted_env`]). Spawn failure returns `None`; the caller tears down
-/// and exits 1.
+/// [`granted_env`]) and the dedicated vault identity. Spawn failure
+/// returns `None`; the caller tears down and exits 1.
 pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Handle> {
     let mut cmd = Command::new(VAULTWARDEN);
     granted_env(env::vars_os(), extra_env, vault_port).apply(&mut cmd);
-    spawn(&mut cmd)
+    spawn_as(&mut cmd, VAULT_CREDENTIALS)
 }
 
 /// Where the image bakes the web vault (WEB_VAULT_FOLDER in the

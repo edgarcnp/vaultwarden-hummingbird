@@ -20,12 +20,21 @@ You need a [Tailscale](https://tailscale.com) account, with MagicDNS and HTTPS c
    cp .env.example .env    # fill in TAILSCALE_AUTHKEY and VAULTWARDEN_DOMAIN
    podman run --rm \
      -p 127.0.0.1:8080:8080 \
-     --env-file .env \
+     -e SUPERVISOR_ENV_FILE=/state/.env \
+     -v "$PWD/.env:/state/.env:ro,z" \
+     --cap-drop=all --cap-add=SETUID --cap-add=SETGID --cap-add=KILL \
+     -v vw-data:/data -v vw-state:/state \
      ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
    ```
 
-   `--env-file` keeps the auth key out of the host process list; prefer it
-   over `-e` for secrets.
+   The file is mounted under `/state`, which the vault's uid cannot
+   traverse; prefer this over `--env-file`, which leaves the secrets in the
+   container environment. It must be readable by container uid `65532`
+   (mode `0644` is safe here: the `0700` parent blocks the vault, and
+   `0600` can fail under some runtimes' uid mapping). The two named volumes
+   persist the vault and the supervisor's identity/state; without the
+   capabilities the supervisor cannot start the vault under its separate
+   uid.
 
 3. From a device on your tailnet, open that `https://…ts.net` address and create your account.
 
@@ -43,9 +52,11 @@ Tailscale is the only way in. The vault listens on loopback and never leaves the
 
 No Tailscale, no vault. The container refuses to start without an auth key, a valid local `TAILSCALE_STATE_FILE`, or S3 state sync that can supply the node identity, and if Tailscale dies later it shuts down instead of running a vault nobody can reach. Your orchestrator restarts it; a short outage beats a silent one.
 
+The container keeps two volumes and two identities. `/data` (0770, group `65532`) holds the vault: its database, signing key, `config.json`, attachments, and Sends. `/state` (0700, owner `65532`) is supervisor-only: the tailscaled identity and socket, the certificate cache, backup staging, sync sidecars, and the dotenv file. The supervisor and tailscaled run as `65532:65532`; the vault runs as `65533:65532`, so a compromised vault cannot traverse `/state`, read the LocalAPI socket, or inspect PID 1's environment. The supervisor holds only `SETUID`/`SETGID` (to start the vault) and `KILL` (to stop it); the vault has no capabilities.
+
 ## Configuration
 
-Copy [`.env.example`](.env.example) to `.env`, fill in what it asks for, and give it to the container: mount it (compose does this for you), pass it with `--env-file`, or paste the values into your platform's environment settings.
+Copy [`.env.example`](.env.example) to `.env`, fill in what it asks for, and mount that file at `/state/.env` (compose does this). `--env-file` or your platform's environment settings also work, but put the secrets in the container environment instead of the supervisor-only volume; a dotenv file mounted anywhere outside `/state` is refused at boot.
 
 Keys come in three groups:
 
@@ -63,6 +74,8 @@ Three rules that save confusion:
 
 Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and rename `ROCKET_PORT`/`VAULTWARDEN_ROCKET_PORT` to `VAULTWARDEN_PORT`.
 
+Coming from the single-volume layout? Update the mounts and capabilities in your run command or compose file: `.env` moves to `/state/.env` (a dotenv file elsewhere now refuses the boot), add a `vw-state:/state` volume, and add `SETUID`/`SETGID`/`KILL` after `cap_drop: ALL`. On the first boot the supervisor moves the old `tailscaled.state`, `certs/` cache, and backup lineage from `/data` to `/state`, deletes the old staging/cache files, and makes the vault's existing files group-accessible; a failed copy leaves the source in place and refuses the boot. Old-layout identity and cert files must be owned by uid `65532` — a foreign-owned file is refused rather than adopted. Bucket key names are unchanged, so an existing state-sync bucket restores into either layout. Rolling back to the old single-volume image needs the identity back on `/data`: move `/state/tailscaled.state` and `/state/certs/` there (or let the old image restore them from the bucket); the old image does not mount `/state`.
+
 ### Tailscale options
 
 - `TAILSCALE_SERVE` (default `true`) — publish the vault over tailnet HTTPS. Needs MagicDNS and HTTPS certificates; set `false` to run without the `*.ts.net` address.
@@ -70,11 +83,13 @@ Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and renam
 - `TAILSCALE_SERVICE` — advertise the vault as a Tailscale Service; needs a tag-based auth key and approval in the console.
 - `TAILSCALE_USERSPACE` (default `true`) — userspace networking, no privileges. `false` switches to TUN mode: slightly faster, needs `NET_ADMIN` and `/dev/net/tun`.
 
-## Keeping /data across redeploys
+## Keeping data across redeploys
 
-If `/data` is a real volume, you're done.
+If `/data` and `/state` are real volumes, you're done. Keep them together: `/state` holds the node identity that `/data`'s vault belongs to.
 
-If your platform wipes `/data` on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default. The key needs object read/write **and list** (`ListObjectsV2`) for first-run, restore, and reconciliation; bucket create/head are never called.
+Named volumes inherit the image's ownership and modes. If you bind-mount host directories instead, they must be owned by uid/gid `65532` (and labeled `:Z` on an SELinux host); otherwise the supervisor refuses to boot rather than run with a state directory the vault could write.
+
+If your platform wipes them on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default. The key needs object read/write **and list** (`ListObjectsV2`) for first-run, restore, and reconciliation; bucket create/head are never called.
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -86,7 +101,7 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 
 - At boot it restores what is missing, but never overwrites a newer local file.
 - It saves after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The final save is budgeted (two minutes; fifteen seconds after a second stop signal) so a slow bucket can't hold the container open.
-- It saves the tailnet identity, the vault's RSA signing key, your admin `config.json`, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/data` to ride along; the container says so at boot when it doesn't.
+- It saves the tailnet identity, the vault's RSA signing key, your admin `config.json`, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/state` to ride along; the container says so at boot when it doesn't.
 - Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. Uploads are content-addressed, so an interrupted push can never replace the copy the last good manifest names, and a new file whose manifest write was interrupted is recovered on the next boot. A quiet node costs one manifest read per push and at most one listing per boot (a legacy bucket may list twice), not a round of uploads.
 - A push is refused while the bucket cannot be proven complete (for example after a partial restore): the fallback path-key layout is never written, because it could overwrite a newer bucket copy. Deletions are not propagated yet; a deleted file can be restored from the bucket until the tombstone/GC policy lands. Keep the bucket private (it holds secrets and your files) and run one container against it.
 
@@ -103,7 +118,7 @@ SUPERVISOR_DB_BACKUP=true
 ```
 
 - A backup is a clean point-in-time copy (`VACUUM INTO`) taken while the vault runs; it doesn't pause or lock the vault (the image keeps WAL mode on, so the copy never blocks the vault).
-- Backups land under `db/` with a timestamp, and the oldest are deleted beyond `KEEP`. An unchanged database isn't re-uploaded. The last pushed dump is kept locally beside the DB (as `db-backups.last`) for the unchanged comparison; it is never uploaded and costs one extra database-sized file on `/data`. If the container dies mid-backup you lose one cycle, never gain a broken backup.
+- Backups land under `db/` with a timestamp, and the oldest are deleted beyond `KEEP`. An unchanged database isn't re-uploaded. The last pushed dump is kept as `db-backups.last` on `/state` for the unchanged comparison; it is never uploaded and costs one extra database-sized file on the state volume. If the container dies mid-backup you lose one cycle, never gain a broken backup.
 - A graceful stop takes one more backup after the vault exits, so a normal redeploy carries the latest sessions and devices. Give the orchestrator time to drain (compose's `stop_grace_period`).
 - `SUPERVISOR_DB_BACKUP_RESTORE=true` loads the newest backup at boot, but only into a database it can prove is empty — if the newest copy is missing or fails its integrity/size/hash check it tries the next one, and it never overwrites existing data. A transport or local failure refuses the boot instead of silently downgrading the volume; an unusable S3 configuration also refuses (it never boots fresh behind a requested restore). If it can't tell (an unreadable database, a bucket it can't list), it refuses to start rather than guess.
 - Prefer to restore by hand? Stop the vault and replace `/data/db.sqlite3` with the dump.
@@ -131,7 +146,7 @@ The container checks that a downloaded backup is a parseable database, but it ca
 
 - **The container exits immediately.** Almost always Tailscale: check the auth key and look for `refusing to run the vault without Tailscale`. With `TAILSCALE_SERVE=true` (default), a failed serve exits the same way — enable MagicDNS and HTTPS certificates, or set `TAILSCALE_SERVE=false`.
 - **`/alive` returns 503.** The vault isn't answering, usually the database; its error is in the container logs.
-- **`db backup: … skipped/failed`.** That cycle didn't run and nothing was lost; the next one retries. The message names what to check: S3 settings, free space on `/data`, or `refusing to shadow it` (the bucket holds a newer backup — the message says how to adopt it).
+- **`db backup: … skipped/failed`.** That cycle didn't run and nothing was lost; the next one retries. The message names what to check: S3 settings, free space on `/state` (dump staging), or `refusing to shadow it` (the bucket holds a newer backup — the message says how to adopt it).
 
 ## Building it yourself
 

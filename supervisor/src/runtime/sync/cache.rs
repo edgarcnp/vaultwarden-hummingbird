@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use crate::util::fs::{read_capped, write_atomic};
 
-/// On the data root, outside the synced set (the allowlist enumerates
-/// concrete paths, and a dotfile is not one of them).
+/// On the supervisor state root, outside the synced set (the allowlist
+/// enumerates concrete paths, and a dotfile is not one of them).
 const CACHE_NAME: &str = ".sync-cache";
 /// A corrupt/hostile cache must not exhaust PID 1's memory.
 const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;

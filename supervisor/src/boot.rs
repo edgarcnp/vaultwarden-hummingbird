@@ -25,9 +25,9 @@
 
 use crate::config::{AUTH_TIMEOUT, Config, DAEMON_WAIT, SERVE_TIMEOUT};
 use crate::runtime::{
-    Handle, RestoreOutcome, adopt_lineage, install_signal_handlers, restore_if_empty,
-    restore_state, shutdown, spawn_tailscaled, start_vw, stopping, sync_state, tailscale_serve,
-    tailscale_up, take_stop,
+    Handle, RestoreOutcome, adopt_lineage, install_signal_handlers, migrate_layout,
+    restore_if_empty, restore_state, shutdown, spawn_tailscaled, start_vw, stopping, sync_state,
+    tailscale_serve, tailscale_up, take_stop,
 };
 use crate::util::{log, net};
 
@@ -217,6 +217,12 @@ impl Boot {
 pub fn run() -> ! {
     if !install_signal_handlers() {
         log::err("cannot register stop signals; refusing to run without graceful shutdown");
+        std::process::exit(1);
+    }
+    // Before config resolution: the identity gate reads the state file,
+    // and the vault must never start while old-layout secrets still sit on
+    // its volume.
+    if !migrate_layout() {
         std::process::exit(1);
     }
     let Some(cfg) = Config::from_env() else {
