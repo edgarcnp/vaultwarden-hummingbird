@@ -19,10 +19,13 @@ Containerfile      the image: fetch -> supervisor -> vaultwarden -> runtime
 compose.yaml       local runner (podman/docker compose)
 .env.example       the user-facing config template (strict: 3 key prefixes)
 scripts/           update-pins.sh (recompute checksum ARGs), smoke-image.sh
-                   (image fail-closed suite), prune-image-versions.sh (retention)
+                   (image fail-closed suite), prune-image-versions.sh (retention),
+                   lint-extra.sh (actionlint/shellcheck/hadolint),
+                   verify-pins.sh (image/checksum/action pin shape)
 .github/workflows/ supervisor.yml (lint/test/build), image.yml (Containerfile
-                   build + entrypoint smoke), pins.yml (CI digest recheck),
-                   publish.yml (release images), prune.yml (manual retention)
+                   build + entrypoint smoke), lint-extra.yml (static checks +
+                   cargo audit), pins.yml (CI digest recheck), publish.yml
+                   (release images), prune.yml (manual retention)
 supervisor/        the Rust crate — module map below
 ```
 
@@ -66,7 +69,14 @@ cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-CI (`supervisor.yml`) runs exactly those checks — lint, then test, then build. If they pass locally, CI will pass. Keep the `--locked` flag: the lockfile is committed on purpose, and a drifted one should fail the build.
+CI (`supervisor.yml`) runs exactly those checks — lint, then test, then build; `lint-extra.yml` adds `cargo audit` and the script/Containerfile linters. If they pass locally, CI will pass. Keep the `--locked` flag: the lockfile is committed on purpose, and a drifted one should fail the build.
+
+The extra static checks run without installing anything globally:
+
+```sh
+scripts/verify-pins.sh    # image digests, artifact checksums, action SHAs
+scripts/lint-extra.sh     # actionlint, shellcheck, hadolint (pinned downloads)
+```
 
 ### Where things live
 
@@ -75,14 +85,14 @@ supervisor/src/
 ├── main.rs        startup and the --healthcheck mode
 ├── boot.rs        the boot phase machine
 ├── config/        reading .env and environment into a Config
-├── s3/            the minimal S3 client (RemoteSpec + put/get/list/delete)
+├── s3/            transport policy + the put/get/list/delete client
 ├── util/          shared helpers (logging, bounded waits, staged files)
 └── runtime/
     ├── process/   starting and stopping child programs, env grants
     ├── services/  tailscaled and vaultwarden themselves
     ├── gate/      the public-port health endpoint
     ├── backup/    sqlite backup and restore to S3
-    ├── sync/      saving the two volumes to S3 and back
+    ├── sync/      pull (`state`), push/tombstones/GC (`push`), policy, cache
     └── migrate.rs one-time move of the old /data state layout to /state
 ```
 

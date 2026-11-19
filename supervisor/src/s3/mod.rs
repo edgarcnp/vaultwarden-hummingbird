@@ -9,8 +9,8 @@
 
 mod client;
 mod remote;
+mod transport;
 
-pub use client::{
-    Client, Expect, GetError, Listed, MAX_DB_OBJECT_BYTES, MAX_SYNC_OBJECT_BYTES, validate_ca_file,
-};
+pub use client::{Client, Expect, GetError, Listed, MAX_DB_OBJECT_BYTES, MAX_SYNC_OBJECT_BYTES};
 pub use remote::{BucketStyle, RemoteSpec};
+pub use transport::validate_ca_file;

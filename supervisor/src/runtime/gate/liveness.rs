@@ -34,7 +34,7 @@ impl Liveness {
     /// result becomes the new window). Both directions are cheap: the
     /// probe is a loopback roundtrip under [`PROBE_TIMEOUT`].
     pub(super) fn alive(&self) -> bool {
-        let mut cached = self.verdict.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cached = crate::util::lock_ignoring_poison(&self.verdict);
         if let Some((at, ok)) = *cached
             && at.elapsed() < self.ttl
         {

@@ -1,0 +1,55 @@
+# Extra static checks that do not need the image: supply-chain pins,
+# actionlint, shellcheck, hadolint, and the Rust advisory database.
+name: Lint (extra)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: lint-extra-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Scripts and Containerfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify supply-chain pins
+        run: scripts/verify-pins.sh
+
+      - name: actionlint, shellcheck, hadolint
+        run: scripts/lint-extra.sh
+
+  audit:
+    name: Cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: supervisor
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache cargo-audit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin
+          key: cargo-audit-0.23.0
+
+      # Pinned tool version: a floating audit binary would change the gate
+      # without a repository change.
+      - name: Install cargo-audit (pinned)
+        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --version 0.23.0 --locked
+
+      - name: cargo audit
+        run: cargo audit --deny warnings

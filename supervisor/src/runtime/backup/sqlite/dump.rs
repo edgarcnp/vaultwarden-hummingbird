@@ -43,7 +43,7 @@ pub(crate) fn dump(path: &str, staged: &str, abort: &(impl Fn() -> bool + Sync))
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
-        let result = conn.execute_batch(&format!("VACUUM INTO '{}'", staged.replace('\'', "''")));
+        let result = conn.execute("VACUUM INTO ?1", [staged]).map(|_| ());
         done.store(true, Ordering::Relaxed);
         result
     });

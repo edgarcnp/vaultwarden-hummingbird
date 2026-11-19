@@ -146,7 +146,7 @@ jobs:
           push-to-registry: true
 
   sbom:
-    name: sbom
+    name: sbom/${{ matrix.arch }}
     needs: manifest
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -155,16 +155,28 @@ jobs:
       attestations: write
       id-token: write
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
     steps:
-      # The SBOM describes the released amd64 image, resolved by the
-      # manifest digest (multi-arch builds share the layer set covered
-      # here for the platform the scan picks).
-      - name: Pull the released image by digest
+      # Each arch gets its own SBOM and attestation, bound to that
+      # platform manifest's digest (not the index): a verifier can check
+      # the exact image it pulls.
+      - name: Pull the released platform image
+        id: platform
         run: |
           IMAGE="${{ needs.manifest.outputs.image }}"
           DIGEST="${{ needs.manifest.outputs.digest }}"
-          podman pull --platform linux/amd64 "docker://${IMAGE}@${DIGEST}"
+          podman pull --platform "${{ matrix.platform }}" "docker://${IMAGE}@${DIGEST}"
           podman tag "${IMAGE}@${DIGEST}" sbom-scan:local
+          per=$(podman image inspect --format '{{.Digest}}' sbom-scan:local)
+          test -n "$per"
+          echo "digest=$per" >> "$GITHUB_OUTPUT"
           podman save --format oci-archive -o /tmp/image.tar sbom-scan:local
 
       # syft is fetched from its pinned release and verified against the
@@ -182,17 +194,29 @@ jobs:
       - name: Upload the SBOM artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: sbom-spdx-${{ github.ref_name }}
+          name: sbom-spdx-${{ matrix.arch }}-${{ github.ref_name }}
           path: sbom.spdx.json
           if-no-files-found: error
 
       # push-to-registry reads credentials from the Docker config, which
       # podman login does not populate; the attestation is bound to the
-      # exact manifest digest, so the SBOM cannot be detached from it.
+      # exact platform digest, so the SBOM cannot be detached from it.
       - name: Docker login to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Attest the SBOM for the released digest
+      - name: Attest the SBOM for the platform digest
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ needs.manifest.outputs.image }}
+          subject-digest: ${{ steps.platform.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
+
+      # Keep an attestation on the release's index digest too: a verifier
+      # checking the tag (the common `gh attestation verify` form) still
+      # finds an SBOM, while the platform-scoped one above names the exact
+      # image.
+      - name: Attest the SBOM for the release index
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-name: ${{ needs.manifest.outputs.image }}

@@ -8,7 +8,7 @@ rust-version = "1.95"
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
 dotenvy = { version = "0.15.7", default-features = false }
 jiff = { version = "1.0.1", default-features = false, features = ["std"] }
-nix = { version = "0.32.0", default-features = false, features = ["signal", "dir", "user"] }
+nix = { version = "0.32.0", default-features = false, features = ["signal", "dir", "user", "poll"] }
 rusqlite = { version = "0.43.0", default-features = false, features = ["bundled"] }
 rusty-s3 = { version = "0.12.0", default-features = false, features = ["rustcrypto", "xml"] }
 sha2 = { version = "0.11.1", default-features = false }

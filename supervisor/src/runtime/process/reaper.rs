@@ -65,7 +65,7 @@ fn registry() -> &'static Mutex<HashMap<Pid, Entry>> {
 /// Registry lock for [`insert_locked`]: held by [`super::child::spawn`]
 /// across `spawn(2)` + registration, closing the spawn-vs-reap window.
 pub(crate) fn registry_lock() -> MutexGuard<'static, HashMap<Pid, Entry>> {
-    registry().lock().unwrap_or_else(|e| e.into_inner())
+    crate::util::lock_ignoring_poison(registry())
 }
 
 /// Register a freshly spawned child. Caller holds [`registry_lock`] and
@@ -88,7 +88,7 @@ pub(crate) fn insert_locked(reg: &mut HashMap<Pid, Entry>, pid: Pid, pidfd: Arc<
 
 impl Waiter {
     fn deliver(&self, status: WaitStatus) {
-        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+        *crate::util::lock_ignoring_poison(&self.slot) = Some(status);
         self.cv.notify_all();
     }
 }
@@ -98,14 +98,14 @@ impl Handle {
     /// `None` while it is still running (or before delivery). Reads do
     /// not consume: teardown may check a status the watch loop saw first.
     pub fn status(&self) -> Option<WaitStatus> {
-        *self.waiter.slot.lock().unwrap_or_else(|e| e.into_inner())
+        *crate::util::lock_ignoring_poison(&self.waiter.slot)
     }
 
     /// Block until the status is delivered or `timeout` passes. The
     /// poll-slice shape keeps stop requests and deadlines observable.
     pub fn wait(&self, timeout: Duration) -> Option<WaitStatus> {
         let deadline = Instant::now() + timeout;
-        let mut slot = self.waiter.slot.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = crate::util::lock_ignoring_poison(&self.waiter.slot);
         loop {
             if let Some(status) = *slot {
                 return Some(status);
@@ -139,9 +139,7 @@ pub(crate) fn start() {
 /// One reaper pass: reap pidfd-ready children, then sweep strays.
 /// The only `waitpid` call sites in the process live here.
 fn tick() {
-    let entries: Vec<(Pid, Arc<PidFd>)> = registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let entries: Vec<(Pid, Arc<PidFd>)> = crate::util::lock_ignoring_poison(registry())
         .iter()
         .map(|(pid, e)| (*pid, Arc::clone(&e.pidfd)))
         .collect();
@@ -180,7 +178,7 @@ fn tick() {
     // pidfd is registered (which would misreport a successful child as a
     // failed spawn).
     loop {
-        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let mut reg = crate::util::lock_ignoring_poison(registry());
         match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
             // Nothing reapable right now (children exist, none exited).
             Ok(WaitStatus::StillAlive) => break,
@@ -221,11 +219,7 @@ fn run() {
         // (notably through the shutdown persist phase, after both
         // long-running children were reaped). The sleep delays reaping of
         // a child registered meanwhile by at most one POLL slice.
-        if registry()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-        {
+        if crate::util::lock_ignoring_poison(registry()).is_empty() {
             std::thread::sleep(POLL);
         }
     }
@@ -234,7 +228,7 @@ fn run() {
 /// Idle flag: false for the duration of a reaper pass, true after a full
 /// clean pass. [`quiesce`] waits on it.
 fn set_idle(idle: bool) {
-    *IDLE.lock().unwrap_or_else(|e| e.into_inner()) = idle;
+    *crate::util::lock_ignoring_poison(&IDLE) = idle;
     if idle {
         IDLE_CV.notify_all();
     }
@@ -248,7 +242,7 @@ static IDLE_CV: Condvar = Condvar::new();
 /// too. Bounded by `timeout`.
 pub(crate) fn quiesce(timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
-    let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut idle = crate::util::lock_ignoring_poison(&IDLE);
     loop {
         if *idle {
             return true;

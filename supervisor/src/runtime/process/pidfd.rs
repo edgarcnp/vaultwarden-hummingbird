@@ -5,10 +5,11 @@
 //! exit — so a missed or partial poll can only cost latency, never a
 //! lost status.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
 use nix::libc;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use super::child::Pid;
 
@@ -40,22 +41,21 @@ impl PidFd {
     /// waitpid is the authority, and ECHILD there simply means the sweep
     /// already reaped and delivered this child.
     pub fn ready_indices(fds: &[RawFd], timeout: Duration) -> Vec<usize> {
-        let mut pollfds: Vec<libc::pollfd> = fds
+        let mut pollfds: Vec<PollFd> = fds
             .iter()
-            .map(|&fd| libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
+            .map(|&fd| {
+                // SAFETY: the caller keeps the PidFd Arcs alive for the
+                // whole call (they own these raw descriptors); the
+                // BorrowedFd never escapes this function.
+                let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+                PollFd::new(borrowed, PollFlags::POLLIN)
             })
             .collect();
         if pollfds.is_empty() {
             return Vec::new();
         }
-        let ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-        // SAFETY: pollfds is a valid, non-empty array of pollfd for the
-        // duration of the call; poll(2) does not retain it.
-        let n = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, ms) };
-        if n <= 0 {
+        let timeout = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::NONE);
+        if poll(pollfds.as_mut_slice(), timeout).unwrap_or(0) <= 0 {
             // Timeout, EINTR, or error: the reaper's sweep covers
             // correctness, so treat as "nothing ready".
             return Vec::new();
@@ -63,7 +63,7 @@ impl PidFd {
         pollfds
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.revents != 0)
+            .filter(|(_, p)| p.revents().is_some_and(|flags| !flags.is_empty()))
             .map(|(i, _)| i)
             .collect()
     }

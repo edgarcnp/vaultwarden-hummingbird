@@ -11,7 +11,8 @@ on:
     paths:
       - Containerfile
       - scripts/update-pins.sh
-      - .github/workflows/publish.yml
+      - scripts/verify-pins.sh
+      - .github/workflows/**
   schedule:
     - cron: "0 5 * * 1" # weekly, Monday 05:00 UTC
 
@@ -30,6 +31,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify image, checksum, and action pins
+        run: scripts/verify-pins.sh
 
       - name: Recompute the pins
         run: scripts/update-pins.sh

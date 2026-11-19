@@ -45,6 +45,9 @@ ARG VAULTWARDEN_WEB_VAULT=true
 # release origin can no longer swap artifact + checksum together).
 
 FROM ${BUILDER_IMAGE} AS fetch
+# hadolint DL4006: the RUN chains below use pipes; fail the chain when any
+# side of a pipe fails.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # TARGETARCH is BuildKit-predefined; uname fallback for non-BuildKit builders
 ARG TARGETARCH
 ARG VW_VERSION
@@ -55,6 +58,7 @@ ARG VAULTWARDEN_WEB_VAULT
 ARG TAILSCALE_VERSION
 ARG TAILSCALE_SHA256_AMD64
 ARG TAILSCALE_SHA256_ARM64
+# hadolint ignore=DL3041
 RUN dnf -y install tar gzip && dnf clean all
 WORKDIR /fetch
 RUN mkdir -p /out /out/web-vault /data
@@ -100,8 +104,11 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 # truncates the chain.
 
 FROM ${BUILDER_IMAGE} AS vw-build
+# hadolint DL4006: pipeline failures must fail the build step.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG TARGETARCH
 ARG VW_VERSION
+# hadolint ignore=DL3041
 RUN dnf -y install tar gzip tzdata openssl-devel && dnf clean all
 WORKDIR /build
 COPY --from=fetch /fetch/vw.tar.gz .
