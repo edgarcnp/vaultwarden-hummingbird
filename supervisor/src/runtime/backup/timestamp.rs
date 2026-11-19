@@ -45,7 +45,7 @@ mod tests {
             "suffix is hex"
         );
         let dt = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%S", &ts[..15]).expect("round-trips");
-        let parsed = dt.to_zoned(jiff::tz::TimeZone::UTC).expect("UTC");
+        let parsed = dt.to_zoned_datetime(jiff::tz::TimeZone::UTC).expect("UTC");
         let drift = (parsed.timestamp().as_second() - Timestamp::now().as_second()).abs();
         assert!(drift <= 5, "timestamp drifted {drift}s from the clock");
     }
