@@ -27,13 +27,13 @@ pub(crate) fn state_file(root: &Path, value: &str) -> bool {
     if value == "mem:" {
         return true;
     }
-    under_root(root, value) && Path::new(value).parent() == Some(root)
+    value.trim() == value && under_root(root, value) && Path::new(value).parent() == Some(root)
 }
 
 /// The LocalAPI socket: any normal path under the state root. It need not
 /// be a direct child.
 pub(crate) fn socket(root: &Path, value: &str) -> bool {
-    under_root(root, value) && Path::new(value) != root
+    value.trim() == value && under_root(root, value) && Path::new(value) != root
 }
 
 /// The direct-child name of a valid state file, for the sync manifest.
@@ -56,10 +56,11 @@ pub(crate) fn state_rel<'a>(root: &Path, value: &'a str) -> Option<&'a str> {
 /// staging/prefix, the content-addressed object namespace, and the durable
 /// vault keys.
 pub(crate) fn reserved_state_name(rel: &str) -> bool {
-    if rel.is_empty() || rel.contains('/') || rel.chars().any(char::is_control) {
+    if rel.is_empty() || rel.trim() != rel || rel.contains('/') || rel.chars().any(char::is_control)
+    {
         return true;
     }
-    if rel.starts_with('.') {
+    if rel.starts_with('.') || crate::util::fs::is_partial_name(rel) {
         return true;
     }
     matches!(
@@ -98,6 +99,7 @@ mod tests {
             "/custom/node.state",
             "node.state",
             "/state/node\n.state",
+            "/state/node.state ",
         ] {
             assert!(!state_file(Path::new(ROOT), path), "{path}");
         }

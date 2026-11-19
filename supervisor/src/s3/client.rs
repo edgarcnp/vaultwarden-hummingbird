@@ -7,9 +7,11 @@
 //! transfer bodies by a larger fixed budget so large objects can sync.
 //! `abort` is checked before each request and per download chunk, so a stop
 //! request is honored promptly. Errors never carry the presigned URL (its
-//! signature is a credential).
+//! signature is a credential). Partial downloads use the supervisor-only
+//! `.vw-part` suffix, leaving user files that happen to end in `.part`
+//! untouched.
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::time::Duration;
 
@@ -45,7 +47,7 @@ const MULTIPART_XML_CAP: u64 = 64 * 1024;
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
 
 /// How many bytes of a previous attempt a download may resume from: the
-/// `.part` size, unless it already reached the expected size (a stale or
+/// supervisor temp size, unless it already reached the expected size (a stale or
 /// foreign leftover must never be appended to).
 fn resumed_offset(tmp: &str, expected: Option<u64>) -> u64 {
     let len = std::fs::metadata(tmp).map(|meta| meta.len()).unwrap_or(0);
@@ -94,7 +96,7 @@ pub enum GetError {
     /// The request failed in a way that may be transient (network, 5xx,
     /// redirect, permission).
     Transport(String),
-    /// A local filesystem failure (`.part` creation, write, fsync, rename).
+    /// A local filesystem failure (`.vw-part` creation, write, fsync, rename).
     Local(String),
     /// A stop request interrupted the transfer.
     Aborted,
@@ -215,16 +217,37 @@ impl Client {
     /// Upload a file as `key`. Content-Length is set explicitly: S3
     /// rejects chunked PUT bodies. Files at or above
     /// [`MULTIPART_THRESHOLD`] go through the multipart path, so each part
-    /// gets its own body budget.
+    /// gets its own body budget. The path is opened once, without following
+    /// a final symlink; the same handle is hashed and uploaded by callers
+    /// that need content identity.
     pub fn put(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");
         }
-        let size = std::fs::metadata(path)
+        let mut file = crate::util::fs::open_nofollow(path)
+            .map_err(|e| anyhow!("cannot open {path} for upload: {e}"))?;
+        let size = file
+            .metadata()
             .map_err(|e| anyhow!("cannot size {path}: {e}"))?
             .len();
+        self.put_file(key, &mut file, size, abort)
+    }
+
+    /// Upload an already-open file. The caller owns the handle for hashing
+    /// and for the post-upload stat check, so a path swap cannot change the
+    /// inode between the two operations.
+    pub fn put_file(
+        &self,
+        key: &str,
+        file: &mut std::fs::File,
+        size: u64,
+        abort: impl Fn() -> bool,
+    ) -> anyhow::Result<()> {
+        if abort() {
+            bail!("aborted");
+        }
         if size >= MULTIPART_THRESHOLD {
-            return self.put_multipart(key, path, size, PART_SIZE, abort);
+            return self.put_multipart(key, file, size, PART_SIZE, abort);
         }
         let response = retrying(|| {
             if abort() {
@@ -233,26 +256,18 @@ impl Client {
                     "aborted",
                 )));
             }
-            // A retry reopens the file: the request consumes the handle.
-            // O_NOFOLLOW: a sync source replaced by a symlink must never be
-            // uploaded through the target.
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(path)
-                .map_err(ureq::Error::Io)?;
-            let length = file.metadata().map_err(ureq::Error::Io)?.len();
+            file.seek(SeekFrom::Start(0)).map_err(ureq::Error::Io)?;
             let url = self
                 .bucket
                 .put_object(Some(&self.credentials), key)
                 .sign(SIGN_EXPIRE);
             let mut body = AbortReader {
-                inner: file,
+                inner: &mut *file,
                 abort: &abort,
             };
             self.agent
                 .put(url.as_str())
-                .header("Content-Length", length.to_string())
+                .header("Content-Length", size.to_string())
                 .send(ureq::SendBody::from_reader(&mut body))
         })
         .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
@@ -267,7 +282,7 @@ impl Client {
     fn put_multipart(
         &self,
         key: &str,
-        path: &str,
+        file: &mut std::fs::File,
         size: u64,
         part_size: u64,
         abort: impl Fn() -> bool,
@@ -295,7 +310,7 @@ impl Client {
             .map_err(|_| anyhow!("creating the upload of {key}: unparseable response"))?
             .upload_id()
             .to_string();
-        let etags = match self.put_parts(key, path, size, part_size, &upload_id, &abort) {
+        let etags = match self.put_parts(key, file, size, part_size, &upload_id, &abort) {
             Ok(etags) => etags,
             Err(e) => {
                 self.abort_upload(key, &upload_id);
@@ -349,17 +364,12 @@ impl Client {
     fn put_parts(
         &self,
         key: &str,
-        path: &str,
+        file: &mut std::fs::File,
         size: u64,
         part_size: u64,
         upload_id: &str,
         abort: &impl Fn() -> bool,
     ) -> anyhow::Result<Vec<String>> {
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|e| anyhow!("cannot open {path} for upload: {e}"))?;
         let mut etags: Vec<String> = Vec::new();
         let mut offset: u64 = 0;
         while offset < size {
@@ -372,8 +382,9 @@ impl Client {
             let part_number = u16::try_from(etags.len() + 1).expect("MAX_PARTS fits in u16");
             let this = (size - offset).min(part_size);
             let mut chunk = vec![0u8; usize::try_from(this).expect("PART_SIZE fits in usize")];
-            file.read_exact(&mut chunk)
-                .map_err(|e| anyhow!("reading {path}: {e}"))?;
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.read_exact(&mut chunk))
+                .map_err(|e| anyhow!("reading {key}: {e}"))?;
             let response = retrying(|| {
                 let url = self
                     .bucket
@@ -510,7 +521,7 @@ impl Client {
         // partial transfer is kept and resumed with a Range request, so a
         // slow link makes progress across bounded attempts instead of
         // restarting from zero every time.
-        let tmp = format!("{path}.part");
+        let tmp = format!("{path}{}", crate::util::fs::PART_SUFFIX);
         let mut offset = resumed_offset(&tmp, expect.size);
         let mut attempt = 0;
         let staged: Result<u64, GetError> = loop {
@@ -655,7 +666,18 @@ impl Client {
                 }
             }
             std::fs::rename(&tmp, path)
-                .map_err(|e| GetError::Local(format!("cannot publish {path}: {e}")))
+                .map_err(|e| GetError::Local(format!("cannot publish {path}: {e}")))?;
+            // The file is complete and published; make the name durable
+            // too, or a crash can lose a successful pull.
+            if let Some(parent) = std::path::Path::new(path).parent()
+                && let Err(e) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
+            {
+                return Err(GetError::Local(format!(
+                    "cannot fsync {}: {e}",
+                    parent.to_string_lossy()
+                )));
+            }
+            Ok(())
         });
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);

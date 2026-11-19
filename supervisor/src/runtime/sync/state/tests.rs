@@ -493,8 +493,59 @@ fn a_mass_disappearance_is_not_a_deletion() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Even a single-file manifest is not emptied just because its file is
-/// absent: an unmounted volume looks exactly like that.
+/// Two of five files is still more than a quarter of the manifest; a lost
+/// `/data` volume can look like this even when `/state` identity survives.
+#[test]
+fn the_fraction_guard_refuses_a_large_partial_deletion() {
+    let root = std::env::temp_dir().join(format!("vw-sup-fraction-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("attachments")).unwrap();
+    let mut manifest = String::from("v1\n");
+    for i in 0..3 {
+        let name = format!("attachments/keep{i}");
+        let bytes = format!("keep{i}");
+        std::fs::write(root.join(&name), bytes.as_bytes()).unwrap();
+        manifest.push_str(&format!(
+            "{} {} {name}\n",
+            crate::util::hash::sha256_bytes(bytes.as_bytes()),
+            bytes.len()
+        ));
+    }
+    let mut missing = String::new();
+    for i in 0..2 {
+        manifest.push_str(&format!("{} 4 attachments/gone{i}\n", "a".repeat(64)));
+        missing.push_str(&format!("0 attachments/gone{i}\n"));
+    }
+    std::fs::write(root.join(".sync-missing"), missing).unwrap();
+    let (endpoint, seen) = fake_bucket(move |line| {
+        let path = req_path(line);
+        if line.starts_with("GET") && path.ends_with("/manifest") {
+            (200, manifest.clone().into_bytes())
+        } else if line.starts_with("GET") && path.ends_with("/tombstones") {
+            (404, Vec::new())
+        } else if line.starts_with("GET") && line.contains("list-type=2") {
+            (200, empty_listing())
+        } else if line.starts_with("PUT") {
+            (200, Vec::new())
+        } else {
+            (404, Vec::new())
+        }
+    });
+    assert!(sync_state_at(
+        &Roots::one(&root),
+        &sync_cfg(&endpoint),
+        || false
+    ));
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        !seen
+            .iter()
+            .any(|l| l.starts_with("PUT") && req_path(l).ends_with("/tombstones")),
+        "two of five must be refused as probable volume loss: {seen:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn a_sole_missing_file_is_not_a_deletion() {
     let root = std::env::temp_dir().join(format!("vw-sup-sole-{}", std::process::id()));
@@ -573,8 +624,45 @@ fn identity_files_are_never_tombstoned() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A legacy listing shares the prefix with DB backups; only the
-/// durable set is pulled.
+/// A same-size object with the wrong bytes is a hash failure. It must be
+/// recorded for a forced re-upload; the later presence/size reconciliation
+/// cannot see the difference and must not clear the repair.
+#[test]
+fn a_hash_mismatch_marks_the_path_for_repair() {
+    let root = std::env::temp_dir().join(format!("vw-sup-repairhash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let expected = crate::util::hash::sha256_bytes(b"AAAA");
+    let manifest = format!("v1\n{expected} 4 attachments/u\n");
+    let object_suffix = format!("objects/attachments/u/{expected}");
+    let (endpoint, _seen) = fake_bucket(move |line| {
+        let path = req_path(line);
+        if line.starts_with("GET") && path.ends_with("/manifest") {
+            (200, manifest.clone().into_bytes())
+        } else if line.starts_with("GET") && path.ends_with("/tombstones") {
+            (404, Vec::new())
+        } else if line.starts_with("GET") && path.ends_with(&object_suffix) {
+            (200, b"BBBB".to_vec())
+        } else if line.starts_with("GET") && line.contains("list-type=2") {
+            (200, empty_listing())
+        } else {
+            (404, Vec::new())
+        }
+    });
+    let cfg = sync_cfg(&endpoint);
+    assert!(
+        !restore_state_at(&Roots::one(&root), &cfg, || false),
+        "a hash mismatch must fail the pull"
+    );
+    let repair = read_repair(&root);
+    assert!(
+        repair.contains("attachments/u"),
+        "the path must be queued for repair: {repair:?}"
+    );
+    assert!(!root.join("attachments/u").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn a_legacy_listing_ignores_backup_objects() {
     let root = std::env::temp_dir().join(format!("vw-sup-shared-{}", std::process::id()));
@@ -688,13 +776,14 @@ fn a_restored_file_clears_its_tombstone() {
     let root = std::env::temp_dir().join(format!("vw-sup-trestore-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("rsa_key"), b"key").unwrap();
+    std::fs::create_dir_all(root.join("attachments")).unwrap();
+    std::fs::write(root.join("attachments/u"), b"key").unwrap();
     let (endpoint, reqs) = fake_bucket_capturing(move |line| {
         let path = req_path(line);
         if line.starts_with("GET") && path.ends_with("/manifest") {
             (200, b"v1\n".to_vec())
         } else if line.starts_with("GET") && path.ends_with("/tombstones") {
-            (200, b"v1\n0 rsa_key\n".to_vec())
+            (200, b"v1\n0 attachments/u\n".to_vec())
         } else if line.starts_with("GET") && line.contains("list-type=2") {
             (200, empty_listing())
         } else if line.starts_with("PUT") {
@@ -714,13 +803,12 @@ fn a_restored_file_clears_its_tombstone() {
         .find(|(line, _)| line.starts_with("PUT") && req_path(line).ends_with("/tombstones"))
         .expect("tombstone list rewritten");
     assert!(
-        !String::from_utf8_lossy(&tombstone.1).contains("rsa_key"),
+        !String::from_utf8_lossy(&tombstone.1).contains("attachments/u"),
         "the restored path leaves the tombstone list"
     );
     assert!(
-        reqs.iter().any(
-            |(line, _)| line.starts_with("PUT") && req_path(line).contains("/objects/rsa_key/")
-        ),
+        reqs.iter().any(|(line, _)| line.starts_with("PUT")
+            && req_path(line).contains("/objects/attachments/u/")),
         "the restored file is uploaded"
     );
     let _ = std::fs::remove_dir_all(&root);

@@ -9,21 +9,26 @@ use sha2::{Digest, Sha256};
 /// 64 KiB chunks: bounded memory, few syscalls per MiB.
 const CHUNK: usize = 64 * 1024;
 
-/// The lowercase hex SHA-256 of a file's contents.
-pub fn sha256_file(path: &str) -> std::io::Result<String> {
-    // A sync source may be replaced by a symlink after enumeration; never
-    // follow it (that would hash a supervisor-only file into the bucket).
-    let mut file = crate::util::fs::open_nofollow(path)?;
+/// The lowercase hex SHA-256 of a reader's contents.
+pub fn sha256_reader(reader: &mut impl Read) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let n = file.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
     }
     Ok(hex(&hasher.finalize()))
+}
+
+/// The lowercase hex SHA-256 of a file's contents.
+pub fn sha256_file(path: &str) -> std::io::Result<String> {
+    // A sync source may be replaced by a symlink after enumeration; never
+    // follow it (that would hash a supervisor-only file into the bucket).
+    let mut file = crate::util::fs::open_nofollow(path)?;
+    sha256_reader(&mut file)
 }
 
 /// The lowercase hex SHA-256 of an in-memory byte string.

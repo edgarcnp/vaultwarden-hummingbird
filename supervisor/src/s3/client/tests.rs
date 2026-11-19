@@ -283,11 +283,11 @@ fn get_publishes_the_requested_mode() {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o660);
-    assert!(!dir.join("attachment.part").exists());
+    assert!(!dir.join("attachment.vw-part").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A `.part` symlink is not followed: the download fails locally
+/// A `.vw-part` symlink is not followed: the download fails locally
 /// instead of writing through the link.
 #[test]
 fn get_refuses_a_symlinked_part_file() {
@@ -295,7 +295,7 @@ fn get_refuses_a_symlinked_part_file() {
     let dir = scratch("get-part-link");
     let victim = dir.join("victim");
     std::fs::write(&victim, b"keep").unwrap();
-    std::os::unix::fs::symlink(&victim, dir.join("target.part")).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join("target.vw-part")).unwrap();
     let err = client
         .get(
             "state/target",
@@ -330,7 +330,7 @@ fn get_publishes_complete_downloads_owner_only() {
     let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "pulled secrets must be owner-only");
     assert!(
-        !dir.join("rsa_key.pem.part").exists(),
+        !dir.join("rsa_key.pem.vw-part").exists(),
         "temp file must not linger"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -355,7 +355,7 @@ fn get_refuses_a_truncated_body_without_touching_the_target() {
         .unwrap_err();
     assert!(err.to_string().contains("expected 5"), "{err}");
     assert_eq!(std::fs::read(&target).unwrap(), b"old", "target untouched");
-    assert!(!dir.join("rsa_key.pem.part").exists());
+    assert!(!dir.join("rsa_key.pem.vw-part").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -437,7 +437,7 @@ fn get_refuses_an_object_over_the_cap() {
         .unwrap_err();
     assert!(err.to_string().contains("cap"), "{err}");
     assert!(!target.exists(), "nothing published");
-    assert!(!dir.join("db.sqlite3.part").exists());
+    assert!(!dir.join("db.sqlite3.vw-part").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -521,7 +521,7 @@ fn get_verifies_the_manifest_hash() {
         .unwrap_err();
     assert!(err.to_string().contains("sha256 mismatch"), "{err}");
     assert_eq!(std::fs::read(&target).unwrap(), b"old", "target untouched");
-    assert!(!dir.join("rsa_key.pem.part").exists());
+    assert!(!dir.join("rsa_key.pem.vw-part").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -639,8 +639,9 @@ fn multipart_upload_sends_parts_and_completes() {
     let dir = scratch("multipart");
     let file = dir.join("big.bin");
     std::fs::write(&file, vec![7u8; 20]).unwrap();
+    let mut file = std::fs::File::open(&file).unwrap();
     client
-        .put_multipart("state/big.bin", file.to_str().unwrap(), 20, 8, || false)
+        .put_multipart("state/big.bin", &mut file, 20, 8, || false)
         .expect("multipart upload completes");
     assert_eq!(*parts.lock().unwrap(), vec![1, 2, 3], "20 bytes at 8/part");
     assert_eq!(aborts.load(Ordering::SeqCst), 0);
@@ -665,8 +666,9 @@ fn multipart_upload_aborts_on_a_failed_part() {
     let dir = scratch("multipart-fail");
     let file = dir.join("big.bin");
     std::fs::write(&file, vec![7u8; 20]).unwrap();
+    let mut file = std::fs::File::open(&file).unwrap();
     let err = client
-        .put_multipart("state/big.bin", file.to_str().unwrap(), 20, 8, || false)
+        .put_multipart("state/big.bin", &mut file, 20, 8, || false)
         .unwrap_err();
     assert!(err.to_string().contains("HTTP 500"), "{err}");
     assert_eq!(*parts.lock().unwrap(), vec![1], "part 2 failed");
@@ -692,8 +694,9 @@ fn multipart_upload_aborts_on_a_200_error_body() {
     let dir = scratch("multipart-200-error");
     let file = dir.join("big.bin");
     std::fs::write(&file, vec![7u8; 20]).unwrap();
+    let mut file = std::fs::File::open(&file).unwrap();
     let err = client
-        .put_multipart("state/big.bin", file.to_str().unwrap(), 20, 8, || false)
+        .put_multipart("state/big.bin", &mut file, 20, 8, || false)
         .unwrap_err();
     assert!(err.to_string().contains("error body"), "{err}");
     assert_eq!(aborts.load(Ordering::SeqCst), 1, "the upload was aborted");
@@ -877,7 +880,7 @@ fn get_resumes_an_interrupted_download() {
         .expect("resumed download completes");
     assert_eq!(std::fs::read(&target).unwrap(), body);
     assert_eq!(*ranges.lock().unwrap(), vec!["bytes=10-".to_string()]);
-    assert!(!dir.join("rsa_key.pem.part").exists());
+    assert!(!dir.join("rsa_key.pem.vw-part").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -905,7 +908,10 @@ fn get_gives_up_after_the_attempt_budget() {
         "{err}"
     );
     assert!(!target.exists(), "nothing published");
-    assert!(!dir.join("rsa_key.pem.part").exists(), "partial cleaned up");
+    assert!(
+        !dir.join("rsa_key.pem.vw-part").exists(),
+        "partial cleaned up"
+    );
     assert_eq!(
         ranges.lock().unwrap().len(),
         MAX_DOWNLOAD_ATTEMPTS as usize - 1,

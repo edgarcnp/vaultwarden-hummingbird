@@ -518,6 +518,13 @@ fn state_file_must_live_directly_under_the_state_root() {
     let cfg = Config::build(file, lookup).expect("a direct /state child resolves");
     assert_eq!(cfg.state, "/state/node.state");
 
+    // A direct environment value keeps its whitespace; a trailing space is
+    // a different (and unsafe) identity name.
+    assert!(
+        mk_opt(&[("TAILSCALE_STATE_FILE", "/state/node.state ")]).is_none(),
+        "a trailing-space identity name must refuse"
+    );
+
     // `mem:` is Tailscale's in-memory state: accepted, no path check
     let cfg = mk(&[("TAILSCALE_STATE_FILE", "mem:")]);
     assert_eq!(cfg.state, "mem:");
@@ -532,6 +539,7 @@ fn socket_must_live_under_the_state_root() {
         "/custom/tailscaled.sock",
         "/state/../data/tailscaled.sock",
         "tailscaled.sock",
+        "/state/tailscaled.sock ",
     ] {
         assert!(
             mk_opt(&[("TAILSCALE_SOCKET", socket)]).is_none(),

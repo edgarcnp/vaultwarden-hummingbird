@@ -10,8 +10,20 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use nix::fcntl::{OFlag, openat};
+use nix::sys::stat::Mode;
+
+/// Suffix for supervisor partial downloads. User files may legitimately
+/// end in `.part`, so the supervisor uses a distinct name.
+pub const PART_SUFFIX: &str = ".vw-part";
+
+/// Whether `name` is a supervisor partial-download temp.
+pub fn is_partial_name(name: &str) -> bool {
+    name.ends_with(PART_SUFFIX)
+}
 
 /// Restrict `path` to owner-only (0600).
 pub fn make_private(path: &str) -> std::io::Result<()> {
@@ -92,6 +104,42 @@ pub fn create_real_dirs(root: &Path, rel_parent: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Open `root/rel` without following a symlink in any component. `root` is
+/// opened as a real directory (no final-link follow); each path component is
+/// then opened relative to the previous descriptor with `O_NOFOLLOW`. This is
+/// the upload-side counterpart of [`create_real_dirs`]: the vault can swap a
+/// directory for a symlink after enumeration, but the openat chain cannot be
+/// redirected.
+pub fn open_under(root: &Path, rel: &str) -> io::Result<File> {
+    const ROOT_FLAGS: i32 = nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC;
+    let mut current = OpenOptions::new()
+        .read(true)
+        .custom_flags(ROOT_FLAGS)
+        .open(root)?;
+    let mut parts = Path::new(rel).components().peekable();
+    if parts.peek().is_none() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"));
+    }
+    while let Some(part) = parts.next() {
+        let Component::Normal(name) = part else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains a non-normal component",
+            ));
+        };
+        let mut flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+        if parts.peek().is_some() {
+            flags |= OFlag::O_DIRECTORY;
+        } else {
+            // A race may replace a file with a FIFO; do not block in open.
+            flags |= OFlag::O_NONBLOCK;
+        }
+        let fd = openat(&current, Path::new(name), flags, Mode::empty())?;
+        current = File::from(fd);
+    }
+    Ok(current)
 }
 
 /// Open a file for reading without following a final symlink.
@@ -315,6 +363,35 @@ mod tests {
             [0xff, 0x00]
         );
         assert!(read_capped(path.to_str().unwrap(), 2).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The upload open is component-anchored: a symlinked root, parent, or
+    /// final file is refused, so a vault directory swap cannot redirect the
+    /// supervisor onto `/state` or `/proc`.
+    #[test]
+    fn open_under_refuses_every_symlink_component() {
+        use std::io::Read;
+
+        let dir = scratch("open-under");
+        std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::fs::write(dir.join("real/sub/file"), b"data").unwrap();
+        let mut opened = open_under(&dir, "real/sub/file").unwrap();
+        let mut out = String::new();
+        opened.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "data");
+
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"secret").unwrap();
+        symlink(&outside, dir.join("parent-link")).unwrap();
+        assert!(open_under(&dir, "parent-link/secret").is_err());
+        symlink(outside.join("secret"), dir.join("final-link")).unwrap();
+        assert!(open_under(&dir, "final-link").is_err());
+        assert!(open_under(&dir, "../outside/secret").is_err());
+        let linked_root = dir.join("root-link");
+        symlink(&outside, &linked_root).unwrap();
+        assert!(open_under(&linked_root, "secret").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

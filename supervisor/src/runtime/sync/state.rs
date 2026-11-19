@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::config::{SYNC_TIMEOUT, SyncConfig};
-use crate::s3::{Client, Expect, Listed, MAX_SYNC_OBJECT_BYTES};
+use crate::s3::{Client, Expect, GetError, Listed, MAX_SYNC_OBJECT_BYTES};
 use crate::util::fs::{create_real_dirs, read_capped, write_atomic};
 use crate::util::log;
 
@@ -392,7 +392,9 @@ fn reconcile_objects(
                     .get(legacy.as_str())
                     .is_some_and(|size| *size == entry.size);
             if held {
-                repair.remove(rel);
+                // A repair entry may record a hash failure the listing
+                // cannot see (same size); only a successful re-upload
+                // clears it.
                 continue;
             }
             if local_present(&roots.local(rel, cfg.state_file.as_deref())) {
@@ -527,6 +529,7 @@ fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -
     let mut pulled = 0usize;
     let mut kept = 0usize;
     let mut deleted = 0usize;
+    let mut invalid_pulls: BTreeSet<String> = BTreeSet::new();
     for target in targets {
         if tombstones.contains(&target.rel) {
             deleted += 1;
@@ -583,24 +586,32 @@ fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -
             Some(sha256) => format!("{}{}", cfg.prefix(), object_key(&target.rel, sha256)),
             None => legacy.clone(),
         };
-        let primary_result = client
-            .get(&primary, &local, expect, &abort)
-            .map_err(|e| anyhow::anyhow!("{e}"));
-        let result = match primary_result {
+        let mut invalid = false;
+        let result: Result<(), GetError> = match client.get(&primary, &local, expect, &abort) {
             Ok(()) => Ok(()),
-            Err(primary_err) if target.sha256.is_some() && primary != legacy => {
-                // Legacy fallback for entries a bucket inherited from
-                // before the layout change.
-                client
-                    .get(&legacy, &local, expect, &abort)
-                    .map_err(|legacy_err| {
-                        anyhow::anyhow!(
-                            "content-addressed key failed ({primary_err}); the legacy key \
-                             failed too ({legacy_err})"
-                        )
-                    })
+            Err(primary_err) => {
+                if matches!(primary_err, GetError::Invalid(_)) {
+                    invalid = true;
+                }
+                if target.sha256.is_some() && primary != legacy {
+                    // Legacy fallback for entries a bucket inherited from
+                    // before the layout change.
+                    match client.get(&legacy, &local, expect, &abort) {
+                        Ok(()) => Ok(()),
+                        Err(legacy_err) => {
+                            if matches!(legacy_err, GetError::Invalid(_)) {
+                                invalid = true;
+                            }
+                            Err(GetError::Transport(format!(
+                                "content-addressed key failed ({primary_err}); the legacy \
+                                 key failed too ({legacy_err})"
+                            )))
+                        }
+                    }
+                } else {
+                    Err(primary_err)
+                }
             }
-            Err(e) => Err(e),
         };
         match result {
             Ok(()) => {
@@ -608,10 +619,21 @@ fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -
                 log::info(&format!("state sync: pulled {}", target.rel));
             }
             Err(e) => {
+                // A hash/size failure means the bucket copy is not the one
+                // the manifest describes. Mark it for a forced re-upload;
+                // a presence/size-only reconciliation must not clear that.
+                if invalid {
+                    invalid_pulls.insert(target.rel.clone());
+                }
                 log::err(&format!("state sync: pull failed ({e}); continuing"));
                 ok = false;
             }
         }
+    }
+    if !invalid_pulls.is_empty() {
+        let mut repair = read_repair(&roots.state);
+        repair.extend(invalid_pulls);
+        write_repair(&roots.state, &repair);
     }
     // Recover objects the manifest does not name (a crash between the PUT
     // and the manifest write, or an unreadable manifest), and note any

@@ -78,10 +78,12 @@ impl SyncConfig {
     /// no empty name, no separator, no traversal, no control character.
     pub fn set_state_file_rel(&mut self, rel: &str) {
         let safe = !rel.is_empty()
+            && rel.trim() == rel
             && rel != "."
             && rel != ".."
             && !rel.contains('/')
-            && !rel.chars().any(char::is_control);
+            && !rel.chars().any(char::is_control)
+            && !crate::util::fs::is_partial_name(rel);
         self.state_file = safe.then(|| rel.to_string());
     }
 

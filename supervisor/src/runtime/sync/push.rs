@@ -1,7 +1,8 @@
 //! The push side of state sync: content-addressed uploads, the deletion
 //! lifecycle (tombstones and bounded object GC), the local repair list a
 //! boot reconciliation fills, and the bounded wait for vaultwarden's
-//! signing key before the first push. [`super::state`] carries the shared
+//! signing key before the first push. Hash and upload share one opened
+//! descriptor; a file that changes during the transfer is never committed. [`super::state`] carries the shared
 //! module doc: the durable set, the content-addressed layout, and the
 //! failure posture both directions keep.
 
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use crate::config::SyncConfig;
 use crate::s3::{Client, MAX_SYNC_OBJECT_BYTES};
-use crate::util::hash::sha256_file;
+use crate::util::hash::sha256_reader;
 use crate::util::log;
 
 use super::cache::Cache;
@@ -72,7 +73,16 @@ pub(super) fn sync_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() ->
     let Some(client) = build(cfg) else {
         return false;
     };
-    let files = local_synced_files(roots, cfg.state_file.as_deref());
+    let files = match local_synced_files(roots, cfg.state_file.as_deref(), &abort) {
+        Ok(files) => files,
+        Err(e) => {
+            log::err(&format!(
+                "state sync: cannot enumerate the synced set ({e}); refusing this push \
+                 so a partial scan cannot tombstone files"
+            ));
+            return false;
+        }
+    };
     let (bucket_manifest, manifest_loaded) = match load_manifest(&client, cfg, &abort) {
         Ok(Some(manifest)) => (manifest, true),
         Ok(None) => (Manifest::default(), false),
@@ -247,12 +257,28 @@ pub(super) fn sync_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() ->
         if abort() {
             return false;
         }
-        let path = roots
-            .local(rel, cfg.state_file.as_deref())
-            .to_string_lossy()
-            .into_owned();
-        let meta = match std::fs::metadata(&path) {
-            Ok(meta) => meta,
+        let root = roots.root_of(rel, cfg.state_file.as_deref());
+        let mut file = match crate::util::fs::open_under(root, rel) {
+            Ok(file) => file,
+            Err(e) => {
+                log::err(&format!(
+                    "state sync: cannot open {} for upload: {e}",
+                    log::sanitize(rel)
+                ));
+                failed = true;
+                continue;
+            }
+        };
+        let meta = match file.metadata() {
+            Ok(meta) if meta.is_file() => meta,
+            Ok(_) => {
+                log::err(&format!(
+                    "state sync: {} is not a regular file; not uploaded",
+                    log::sanitize(rel)
+                ));
+                failed = true;
+                continue;
+            }
             Err(e) => {
                 log::err(&format!(
                     "state sync: cannot size {}: {e}",
@@ -291,8 +317,9 @@ pub(super) fn sync_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() ->
             continue; // unchanged; nothing to upload
         }
         // Hash the bytes actually on disk before recording them: a stale
-        // cache entry must never become the recorded identity.
-        let hash = match sha256_file(&path) {
+        // cache entry must never become the recorded identity. The handle
+        // stays open for the upload, so a path swap cannot change the inode.
+        let hash = match sha256_reader(&mut file) {
             Ok(hash) => hash,
             Err(e) => {
                 log::err(&format!(
@@ -314,8 +341,27 @@ pub(super) fn sync_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() ->
         // Content-addressed and immutable: the previous copy keeps its own
         // key, so a failed manifest write can never destroy it.
         let key = format!("{}{}", cfg.prefix(), object_key(rel, &hash));
-        match client.put(&key, &path, &abort) {
+        match client.put_file(&key, &mut file, size, &abort) {
             Ok(()) => {
+                // The handle was opened before the hash and is used for the
+                // upload. If the file changed underneath, the object no
+                // longer matches the hash being recorded: never commit it.
+                let after = file.metadata();
+                let unchanged = after.as_ref().is_ok_and(|after| {
+                    after.len() == size
+                        && mtime_nanos(after) == mtime
+                        && ctime_nanos(after) == ctime
+                });
+                if !unchanged {
+                    log::err(&format!(
+                        "state sync: {} changed during upload; not committing it",
+                        log::sanitize(rel)
+                    ));
+                    // Do not delete the key: it may be a valid object from
+                    // an earlier push that the manifest still references.
+                    failed = true;
+                    continue;
+                }
                 manifest.insert(
                     rel.clone(),
                     Entry {
@@ -429,7 +475,10 @@ fn gc_objects(
                 None => deletable.contains(rel),
             }
         } else if let Some(rel) = key.strip_prefix(cfg.prefix()) {
-            if rel == MANIFEST_NAME || rel == TOMBSTONES_NAME {
+            if rel == MANIFEST_NAME
+                || rel == TOMBSTONES_NAME
+                || !is_synced_file(rel, cfg.state_file.as_deref())
+            {
                 continue;
             }
             deletable.contains(rel)
@@ -504,3 +553,6 @@ fn ctime_nanos(meta: &std::fs::Metadata) -> u64 {
         .saturating_mul(1_000_000_000)
         .saturating_add(nsec as u64)
 }
+
+#[cfg(test)]
+mod tests;

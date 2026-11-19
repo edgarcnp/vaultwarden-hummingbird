@@ -25,6 +25,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::util::fs::{read_capped, write_atomic};
 use crate::util::log;
 
+use super::synced::is_deletable;
+
 /// The bucket object holding the tombstone list (inside the sync prefix).
 pub(super) const TOMBSTONES_NAME: &str = "tombstones";
 pub(super) const MAX_TOMBSTONES_BYTES: u64 = 4 * 1024 * 1024;
@@ -81,6 +83,9 @@ impl Tombstones {
             );
             entries.insert(rel.to_string(), stamp);
         }
+        // Deletion policy is user data only. Ignore identity, cert, and
+        // backup keys even if a bucket writer or an older bug wrote them.
+        entries.retain(|rel, _| is_deletable(rel));
         Ok(Self { entries })
     }
 
@@ -97,7 +102,9 @@ impl Tombstones {
     }
 
     pub(super) fn insert(&mut self, rel: String) {
-        self.entries.insert(rel, now_unix());
+        if is_deletable(&rel) {
+            self.entries.insert(rel, now_unix());
+        }
     }
 
     pub(super) fn remove(&mut self, rel: &str) -> bool {
@@ -117,6 +124,9 @@ impl Tombstones {
         let mut deletable = Vec::new();
         let mut prunable = Vec::new();
         for (rel, stamp) in &self.entries {
+            if !is_deletable(rel) {
+                continue;
+            }
             if now.saturating_sub(*stamp) >= grace {
                 deletable.push(rel.clone());
             }
@@ -212,12 +222,46 @@ mod tests {
     fn tombstones_round_trip_including_spaces() {
         let mut list = Tombstones::default();
         list.insert("attachments/my file".into());
-        list.insert("rsa_key.pem".into());
+        list.insert("sends/my other file".into());
         let parsed = Tombstones::parse(&list.render()).expect("round trip");
         assert_eq!(parsed, list);
         assert!(parsed.contains("attachments/my file"));
         assert!(!parsed.contains("attachments/other"));
         assert_eq!(parsed.len(), 2);
+    }
+
+    /// The deletion lifecycle is only for user data. A bucket-written or
+    /// older-bug tombstone for the node identity, a signing key, a cert, or
+    /// a DB backup must be ignored, not consumed by pull or GC.
+    #[test]
+    fn identity_and_backup_tombstones_are_ignored() {
+        let parsed = Tombstones::parse(
+            "v1\n\
+             0 rsa_key.pem\n\
+             0 tailscaled.state\n\
+             0 certs/site.pem\n\
+             0 db/sqlite-1.sqlite3\n\
+             0 config.json\n\
+             0 attachments/u\n",
+        )
+        .expect("parse");
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.contains("config.json"));
+        assert!(parsed.contains("attachments/u"));
+        for rel in [
+            "rsa_key.pem",
+            "tailscaled.state",
+            "certs/site.pem",
+            "db/sqlite-1.sqlite3",
+        ] {
+            assert!(!parsed.contains(rel), "{rel} must be ignored");
+        }
+
+        let mut inserted = Tombstones::default();
+        inserted.insert("rsa_key.pem".into());
+        inserted.insert("attachments/u".into());
+        assert_eq!(inserted.len(), 1);
+        assert!(inserted.contains("attachments/u"));
     }
 
     #[test]
@@ -275,13 +319,16 @@ mod tests {
     fn gc_candidates_respect_grace_and_retention() {
         let mut list = Tombstones::default();
         let now = TOMBSTONE_RETENTION.as_secs() + 1;
-        list.entries.insert("old".into(), 0);
+        list.entries.insert("attachments/old".into(), 0);
         list.entries
-            .insert("grace".into(), now - TOMBSTONE_GRACE.as_secs());
-        list.entries
-            .insert("recent".into(), now - TOMBSTONE_GRACE.as_secs() + 1);
+            .insert("attachments/grace".into(), now - TOMBSTONE_GRACE.as_secs());
+        list.entries.insert(
+            "attachments/recent".into(),
+            now - TOMBSTONE_GRACE.as_secs() + 1,
+        );
+        list.entries.insert("rsa_key.pem".into(), 0);
         let (deletable, prunable) = list.gc_candidates(now);
-        assert_eq!(deletable, vec!["grace", "old"]);
-        assert_eq!(prunable, vec!["old"]);
+        assert_eq!(deletable, vec!["attachments/grace", "attachments/old"]);
+        assert_eq!(prunable, vec!["attachments/old"]);
     }
 }
