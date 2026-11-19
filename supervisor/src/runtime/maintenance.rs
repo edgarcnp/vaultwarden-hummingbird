@@ -66,7 +66,7 @@ impl Token {
 /// Periodic invocation; the token is the run's abort source.
 type RunFn = Box<dyn Fn(&Token) + Send>;
 /// Final invocation; the closure receives the deadline-based abort.
-type FinishFn = Box<dyn Fn(&dyn Fn() -> bool) + Send>;
+type FinishFn = Box<dyn Fn(&(dyn Fn() -> bool + Sync)) + Send>;
 
 /// One schedulable task: a periodic run (disabled when `cadence` is `None`)
 /// plus an optional final flush at drain. Constructors capture their config;

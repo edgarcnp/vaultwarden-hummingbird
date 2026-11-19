@@ -11,7 +11,9 @@ const CHUNK: usize = 64 * 1024;
 
 /// The lowercase hex SHA-256 of a file's contents.
 pub fn sha256_file(path: &str) -> std::io::Result<String> {
-    let mut file = std::fs::File::open(path)?;
+    // A sync source may be replaced by a symlink after enumeration; never
+    // follow it (that would hash a supervisor-only file into the bucket).
+    let mut file = crate::util::fs::open_nofollow(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
     loop {

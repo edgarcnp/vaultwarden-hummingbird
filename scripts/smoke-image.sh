@@ -48,6 +48,23 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# The base runtime ships a shell (and the openssl/coreutils CLI set); the
+# Containerfile removes it. Create (do not start) a container and inspect
+# the exported root filesystem without executing anything in the image.
+if cid=$(podman create "$IMAGE" 2>/dev/null); then
+  if podman export "$cid" 2>/dev/null | tar -t 2>/dev/null | grep -Eq '^(usr/)?bin/(bash|sh)$'; then
+    echo "FAIL  no-shell (a shell binary is present in the runtime image)"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS  no-shell (no bash/sh binary in the runtime image)"
+    PASS=$((PASS + 1))
+  fi
+  podman rm -f "$cid" >/dev/null 2>&1 || true
+else
+  echo "FAIL  no-shell (podman create failed)"
+  FAIL=$((FAIL + 1))
+fi
+
 # Fixtures: each file isolates one refusal path.
 printf 'DATABASE_URL=x\n' >"$WORK/bare.env"
 printf 'SUPERVISOR_DB_BACKUP_RESTOR=true\nTAILSCALE_AUTHKEY=tskey-smoke\n' >"$WORK/supervisor.env"
@@ -59,7 +76,7 @@ printf 'TAILSCALE_AUTHKEY=tskey-invalid-smoke\nVAULTWARDEN_DOMAIN=https://smoke.
 run healthcheck-no-config 1 "refusing" -- --entrypoint /entrypoint "$IMAGE" --healthcheck
 
 # 2. No config at all: fail closed naming the missing key.
-run no-config 1 "TAILSCALE_AUTHKEY is required" -- "$IMAGE"
+run no-config 1 "no identity source" -- "$IMAGE"
 
 # 3. Strict dotenv: a bare upstream key refuses, naming it.
 run bare-key 1 "unrecognized dotenv file keys (DATABASE_URL)" -- \

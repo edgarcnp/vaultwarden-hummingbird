@@ -3,13 +3,18 @@
 //! the vault; a busy DB fails the run cleanly (bounded busy timeout,
 //! never blocks the vault).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::util::log;
 
 /// `VACUUM INTO` a fresh consistent copy of the sqlite DB at `path` into
-/// `staged`.
-pub(crate) fn dump(path: &str, staged: &str) -> bool {
+/// `staged`. `abort` is honoured through `sqlite3_interrupt`, so a shutdown
+/// budget cannot be overrun by a large database dump.
+pub(crate) fn dump(path: &str, staged: &str, abort: &(impl Fn() -> bool + Sync)) -> bool {
+    if abort() {
+        return false;
+    }
     let conn = match rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -26,7 +31,23 @@ pub(crate) fn dump(path: &str, staged: &str) -> bool {
         log::err(&format!("db backup: sqlite busy_timeout failed: {e}"));
         return false;
     }
-    match conn.execute_batch(&format!("VACUUM INTO '{}'", staged.replace('\'', "''"))) {
+    let interrupt = conn.get_interrupt_handle();
+    let done = AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if abort() {
+                    interrupt.interrupt();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let result = conn.execute_batch(&format!("VACUUM INTO '{}'", staged.replace('\'', "''")));
+        done.store(true, Ordering::Relaxed);
+        result
+    });
+    match result {
         Ok(()) => true,
         Err(e) => {
             // VACUUM INTO can leave a partial output before failing: a
@@ -52,11 +73,29 @@ mod tests {
         std::fs::write(&src, b"not a database").unwrap();
         let staged = dir.join("dump.sqlite3");
         std::fs::write(&staged, b"pre-existing sentinel").unwrap();
-        assert!(!dump(src.to_str().unwrap(), staged.to_str().unwrap()));
+        assert!(!dump(
+            src.to_str().unwrap(),
+            staged.to_str().unwrap(),
+            &|| false
+        ));
         assert!(
             !staged.exists(),
             "failed dump must not leave partial output"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dump_honours_an_immediate_abort() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-bkabort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("never.sqlite3");
+        assert!(!dump(
+            "/nonexistent/source.sqlite3",
+            staged.to_str().unwrap(),
+            &|| true
+        ));
+        assert!(!staged.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -73,7 +112,11 @@ mod tests {
             .unwrap();
         }
         let staged = dir.join("dumped.sqlite3");
-        assert!(dump(src.to_str().unwrap(), staged.to_str().unwrap()));
+        assert!(dump(
+            src.to_str().unwrap(),
+            staged.to_str().unwrap(),
+            &|| false
+        ));
         let copy = rusqlite::Connection::open_with_flags(
             &staged,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

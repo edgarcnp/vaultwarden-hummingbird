@@ -64,17 +64,17 @@ RUN ARCH="${TARGETARCH:-$(uname -m)}" \
         arm64|aarch64) TAILSCALE_ARCH=arm64; TS_SHA="${TAILSCALE_SHA256_ARM64}" ;; \
         *) echo "unsupported arch: ${ARCH}" && exit 1 ;; \
     esac \
- && curl -fsSL -o vw.tar.gz \
+ && curl -fsSL --max-time 300 --retry 3 --retry-delay 2 -o vw.tar.gz \
         "https://github.com/dani-garcia/vaultwarden/archive/refs/tags/${VW_VERSION}.tar.gz" \
  && echo "${VW_SHA256}  vw.tar.gz" | sha256sum -c - \
  && if [ "${VAULTWARDEN_WEB_VAULT}" = "true" ]; then \
-        curl -fsSL -o "bw_web_${WEB_VAULT_VERSION}.tar.gz" \
+        curl -fsSL --max-time 300 --retry 3 --retry-delay 2 -o "bw_web_${WEB_VAULT_VERSION}.tar.gz" \
             "https://github.com/dani-garcia/bw_web_builds/releases/download/${WEB_VAULT_VERSION}/bw_web_${WEB_VAULT_VERSION}.tar.gz" \
      && echo "${WEB_VAULT_SHA256}  bw_web_${WEB_VAULT_VERSION}.tar.gz" | sha256sum -c - \
      && tar -xzf "bw_web_${WEB_VAULT_VERSION}.tar.gz" -C /out/web-vault --strip-components=1 \
      && test -f /out/web-vault/index.html ; \
     fi \
- && curl -fsSL -o ts.tgz \
+ && curl -fsSL --max-time 300 --retry 3 --retry-delay 2 -o ts.tgz \
         "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TAILSCALE_ARCH}.tgz" \
  && echo "${TS_SHA}  ts.tgz" | sha256sum -c - \
  && tar -xzf ts.tgz -C /out --strip-components=1 \
@@ -112,7 +112,7 @@ RUN tar -xzf vw.tar.gz --strip-components=1 && rm vw.tar.gz \
  && case "${TARGETARCH:-$(uname -m)}" in \
         amd64|x86_64) export RUSTFLAGS="-Ctarget-cpu=x86-64-v2" ;; \
     esac \
- && VW_VERSION=${VW_VERSION} cargo build \
+ && VW_VERSION=${VW_VERSION} cargo build --locked \
         --features "sqlite,enable_mimalloc" --profile release \
  && cp target/release/vaultwarden /out-vaultwarden
 
@@ -165,6 +165,18 @@ ENV DATA_FOLDER=/data \
     USER_ATTACHMENT_LIMIT=0 \
     WEB_VAULT_ENABLED=${VAULTWARDEN_WEB_VAULT} \
     WEB_VAULT_FOLDER=/web-vault
+
+# HARDENING — the base runtime ships a shell, the openssl CLI, and a
+# coreutils set, but the supervisor and both children only ever exec their
+# own binaries. Remove the post-exploitation tools so the documented
+# "no shell" posture is true; this is the last RUN (the next RUN would need
+# the shell itself). The base image runs as 65532, so escalate only for
+# this build step; USER 65532:0 below restores the runtime identity.
+USER 0
+RUN rm -f \
+        /usr/bin/bash /usr/bin/sh /usr/bin/openssl \
+        /usr/bin/base64 /usr/bin/cat /usr/bin/cp /usr/bin/dd \
+        /usr/bin/ls /usr/bin/mv /usr/bin/rm
 
 # CONTAINER SHAPE — persistent data volume, the gate port, non-root
 # entrypoint (the supervisor).

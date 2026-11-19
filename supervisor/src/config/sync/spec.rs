@@ -46,6 +46,14 @@ impl SyncConfig {
                  (AWS included) is configured by its endpoint"
             );
         }
+        // Validate at config resolution, before a boot can depend on it.
+        // The client repeats the parse (defense in depth).
+        let parsed: url::Url = endpoint
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid SUPERVISOR_S3_ENDPOINT: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            bail!("SUPERVISOR_S3_ENDPOINT must use http or https");
+        }
         let target = parse_remote(&remote, key_id, key_secret, endpoint)?;
         Ok(Self {
             remote,
@@ -60,7 +68,14 @@ impl SyncConfig {
     /// set. A path outside `/data` (or `mem:`) stays unsynced — the caller
     /// logs that it cannot be covered.
     pub fn set_state_file(&mut self, state: &str) {
-        self.state_file = state.strip_prefix("/data/").map(str::to_string);
+        // Only a normal, non-empty path under /data is covered by the sync
+        // root. A `/data/../etc` or control-character spelling is not.
+        self.state_file = state
+            .strip_prefix("/data/")
+            .filter(|rel| {
+                !rel.is_empty() && !rel.contains("..") && !rel.chars().any(char::is_control)
+            })
+            .map(str::to_string);
     }
 
     /// The sync's bucket-relative key prefix (empty, or ending in `/`).
@@ -164,6 +179,31 @@ mod tests {
                 "{remote} must be rejected"
             );
         }
+    }
+
+    /// The endpoint is parsed at resolution, not only at first request.
+    #[test]
+    fn malformed_endpoint_is_rejected() {
+        assert!(
+            SyncConfig::new(
+                "r2:vw-state".into(),
+                "id".into(),
+                "secret".into(),
+                "not a url".into(),
+                Duration::from_secs(60)
+            )
+            .is_err()
+        );
+        assert!(
+            SyncConfig::new(
+                "r2:vw-state".into(),
+                "id".into(),
+                "secret".into(),
+                "ftp://example.invalid".into(),
+                Duration::from_secs(60)
+            )
+            .is_err()
+        );
     }
 
     /// No provider is a default: the endpoint is required, AWS included.

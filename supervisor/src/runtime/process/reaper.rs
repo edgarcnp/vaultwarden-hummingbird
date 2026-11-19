@@ -162,7 +162,15 @@ fn tick() {
                 drop(reg);
                 deliver_waiter(*pid, status, waiter);
             }
-            Err(Errno::ECHILD) => {}
+            Err(Errno::ECHILD) => {
+                // The child is already gone (defensive; every status is
+                // delivered by this hub). Keeping the entry would let
+                // `signal_child` treat a possibly recycled pid as live.
+                reg.remove(pid);
+                log::err(&format!(
+                    "reaper: waitpid({pid}) reported ECHILD; dropping the stale entry"
+                ));
+            }
             Err(e) => log::err(&format!("reaper: waitpid({pid}) failed: {e}")),
         }
     }

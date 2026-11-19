@@ -85,6 +85,11 @@ static KNOBS: &[Knob] = &[
         default: None,
     },
     Knob {
+        name: "SUPERVISOR_EPHEMERAL",
+        policy: FilePolicy::File,
+        default: Some(Default::Bool(false)),
+    },
+    Knob {
         name: "SUPERVISOR_DB_BACKUP",
         policy: FilePolicy::File,
         default: None,
@@ -184,6 +189,7 @@ mod tests {
         // the flags merge parses keep typed defaults
         assert!(bool_default("TAILSCALE_SERVE"));
         assert!(bool_default("TAILSCALE_USERSPACE"));
+        assert!(!bool_default("SUPERVISOR_EPHEMERAL"));
         assert_eq!(string_default("VAULTWARDEN_PORT"), "8080");
         assert_eq!(
             string_default("TAILSCALE_STATE_FILE"),

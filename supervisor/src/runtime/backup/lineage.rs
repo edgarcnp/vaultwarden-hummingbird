@@ -10,8 +10,8 @@
 
 use std::path::Path;
 
+use crate::util::fs::{read_capped, write_atomic};
 use crate::util::log;
-use crate::util::make_private;
 
 /// Sidecar next to the live database holding the newest manifest
 /// generation this lineage has produced (after a push) or adopted (after
@@ -35,7 +35,9 @@ pub(super) enum Known {
 
 /// The recorded lineage, if any.
 pub(super) fn read(db_path: &str) -> Option<Known> {
-    let text = std::fs::read_to_string(sidecar_path(db_path)).ok()?;
+    // The sidecar is a generation or a legacy object name; 1 KiB is ample.
+    // A symlink or an oversized/corrupt file is "no usable lineage".
+    let text = read_capped(&sidecar_path(db_path), 1024).ok()?;
     let value = text.trim();
     if value.is_empty() {
         return None;
@@ -61,16 +63,11 @@ pub(super) fn write_name(db_path: &str, name: &str) {
 
 fn write_text(db_path: &str, text: &str) {
     let path = sidecar_path(db_path);
-    if let Err(e) = std::fs::write(&path, text) {
+    // Atomic replace: a symlink at the sidecar path is replaced, never
+    // followed, and the 0600 mode is exact.
+    if let Err(e) = write_atomic(&path, text.as_bytes(), 0o600) {
         log::err(&format!(
             "db backup: cannot record lineage state {}: {e}",
-            log::sanitize(&path)
-        ));
-        return;
-    }
-    if let Err(e) = make_private(&path) {
-        log::err(&format!(
-            "db backup: cannot restrict the lineage sidecar {} ({e})",
             log::sanitize(&path)
         ));
     }

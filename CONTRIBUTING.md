@@ -18,10 +18,11 @@ One thing before you dive in: [README.md](README.md) is written for **users**. I
 Containerfile      the image: fetch -> supervisor -> vaultwarden -> runtime
 compose.yaml       local runner (podman/docker compose)
 .env.example       the user-facing config template (strict: 3 key prefixes)
-scripts/           update-pins.sh — recompute checksum ARGs after a version bump
+scripts/           update-pins.sh (recompute checksum ARGs), smoke-image.sh
+                   (image fail-closed suite), prune-image-versions.sh (retention)
 .github/workflows/ supervisor.yml (lint/test/build), image.yml (Containerfile
                    build + entrypoint smoke), pins.yml (CI digest recheck),
-                   publish.yml (release images)
+                   publish.yml (release images), prune.yml (manual retention)
 supervisor/        the Rust crate — module map below
 ```
 
@@ -99,8 +100,7 @@ A full build gives you a container you can exercise for real:
 
 ```sh
 podman run --rm -it -p 127.0.0.1:8080:8080 \
-  -e TAILSCALE_AUTHKEY=tskey-... \
-  -e VAULTWARDEN_DOMAIN=https://vaultwarden.example.com \
+  --env-file .env \
   vaultwarden-hummingbird:local
 
 podman healthcheck run <container>   # exit 0 means healthy

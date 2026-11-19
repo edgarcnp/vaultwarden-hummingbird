@@ -1,6 +1,6 @@
 //! Small shared helpers with no single owner module.
 
-mod fs;
+pub(crate) mod fs;
 pub mod hash;
 pub mod log;
 pub mod net;

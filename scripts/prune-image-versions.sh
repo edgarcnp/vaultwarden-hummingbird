@@ -39,6 +39,8 @@
 #   scripts/prune-image-versions.sh --keep 3 --versions-file captured.json
 
 set -euo pipefail
+# The token is written to 0600 files below, never passed in argv.
+umask 077
 
 api_url=${PRUNE_API_URL:-https://api.github.com}
 registry_url=${PRUNE_REGISTRY_URL:-https://ghcr.io}
@@ -111,11 +113,17 @@ tmpdir=$(mktemp -d)
 # The working files are removed on every exit path.
 trap 'rm -rf "$tmpdir"' EXIT
 
+# curl reads the token from files so it never appears in `ps`/`/proc` argv.
+auth_header="$tmpdir/auth-header"
+printf 'Authorization: Bearer %s\n' "$GH_TOKEN" >"$auth_header"
+registry_curlrc="$tmpdir/registry-curlrc"
+printf 'user = "%s:%s"\n' "${GITHUB_ACTOR:-git}" "$GH_TOKEN" >"$registry_curlrc"
+
 api() { # api METHOD PATH -> the response body; fails on 4xx/5xx
   local method=$1 path=$2 status
   local out="$tmpdir/response"
-  status=$(curl -sS --max-time 60 -o "$out" -w '%{http_code}' -X "$method" \
-    -H "Authorization: Bearer $GH_TOKEN" \
+  status=$(curl -sS --max-time 60 --retry 3 --retry-delay 2 -o "$out" -w '%{http_code}' -X "$method" \
+    -H @"$auth_header" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "$api_url$path")
@@ -126,35 +134,36 @@ api() { # api METHOD PATH -> the response body; fails on 4xx/5xx
   cat "$out"
 }
 
-token=
-registry_token() { # a pull token for the package, fetched once
-  if [ -z "$token" ]; then
-    token=$(curl -fsS --max-time 60 -u "${GITHUB_ACTOR:-git}:$GH_TOKEN" \
-      "$registry_url/token?scope=repository:$owner/$package:pull&service=ghcr.io" |
-      jq -r '.token // empty')
-    if [ -z "$token" ]; then
-      echo "prune: could not get a registry pull token for $image" >&2
-      return 1
-    fi
+registry_header="$tmpdir/registry-header"
+registry_auth() { # fetch a pull token once; keep it out of argv
+  if [ -f "$registry_header" ]; then
+    return 0
   fi
-  printf '%s\n' "$token"
+  local token
+  token=$(curl -fsS --max-time 60 --retry 3 --retry-delay 2 -K "$registry_curlrc" \
+    "$registry_url/token?scope=repository:$owner/$package:pull&service=ghcr.io" |
+    jq -r '.token // empty')
+  if [ -z "$token" ]; then
+    echo "prune: could not get a registry pull token for $image" >&2
+    return 1
+  fi
+  printf 'Authorization: Bearer %s\n' "$token" >"$registry_header"
 }
 
 manifest_digest() { # manifest_digest TAG -> the digest a tag points at
-  local tag=$1 bearer
-  bearer=$(registry_token) || return 1
-  curl -fsSI --max-time 60 \
-    -H "Authorization: Bearer $bearer" \
+  local tag=$1
+  registry_auth || return 1
+  curl -fsSI --max-time 60 --retry 3 --retry-delay 2 \
+    -H @"$registry_header" \
     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
     "$registry_url/v2/$owner/$package/manifests/$tag" |
     tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2; exit }'
 }
 
 index_children() { # index_children REF -> child digests (sha256: stripped), one per line
-  local bearer
-  bearer=$(registry_token) || return 1
-  curl -fsS --max-time 60 \
-    -H "Authorization: Bearer $bearer" \
+  registry_auth || return 1
+  curl -fsS --max-time 60 --retry 3 --retry-delay 2 \
+    -H @"$registry_header" \
     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
     "$registry_url/v2/$owner/$package/manifests/$1" |
     jq -r '.manifests[]?.digest | sub("^sha256:"; "")'
@@ -260,6 +269,7 @@ skipped=$(
 # `gh attestation verify` reads.
 protected="$tmpdir/protected.txt"
 : >"$protected"
+protection_failed=false
 while read -r tag; do
   [ -n "$tag" ] || continue
   case $tag in
@@ -269,28 +279,36 @@ while read -r tag; do
   # An index this run deletes protects nothing, so a rehearsal sees exactly
   # what the run would do.
   grep -qxF "$tag" "$prune_tags" && continue
-  index_children "$tag" >>"$protected" ||
-    echo "prune: warning: could not read the children of $tag; its payloads stay" >&2
+  # If a kept index cannot be read, its untagged children are unknown. Never
+  # delete blind: fail closed for *all* untagged versions this run.
+  if ! index_children "$tag" >>"$protected"; then
+    protection_failed=true
+    echo "prune: warning: cannot read the children of kept index $tag; refusing all untagged deletions this run" >&2
+  fi
 done < <(jq -r '.[].metadata.container.tags[]?' "$tmpdir/versions.json" | sort -u)
 sort -u -o "$protected" "$protected"
 
 untagged_plan="$tmpdir/untagged-plan.tsv"
 : >"$untagged_plan"
-while IFS=$'\t' read -r id name; do
-  [ -n "${id:-}" ] || continue
-  # Without a digest for a name there is nothing to attribute: leave it alone.
-  if ! [[ $name =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "prune: warning: untagged version $id has no digest name ('$name'); left alone" >&2
-    continue
-  fi
-  grep -qxF "${name#sha256:}" "$protected" && continue
-  # An index in front of a protected child belongs to a kept attestation.
-  kids=$(index_children "$name") || kids=
-  if [ -n "$kids" ] && printf '%s\n' "$kids" | grep -qxF -f "$protected"; then
-    continue
-  fi
-  printf '%s\t%s\n' "$id" "$name" >>"$untagged_plan"
-done < <(jq -r '.[] | select((.metadata.container.tags // []) | length == 0) | [.id, .name] | @tsv' "$tmpdir/versions.json")
+if [ "$protection_failed" = true ]; then
+  echo "prune: refusing untagged deletions (a kept release's attestation index was unreadable)" >&2
+else
+  while IFS=$'\t' read -r id name; do
+    [ -n "${id:-}" ] || continue
+    # Without a digest for a name there is nothing to attribute: leave it alone.
+    if ! [[ $name =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      echo "prune: warning: untagged version $id has no digest name ('$name'); left alone" >&2
+      continue
+    fi
+    grep -qxF "${name#sha256:}" "$protected" && continue
+    # An index in front of a protected child belongs to a kept attestation.
+    kids=$(index_children "$name") || kids=
+    if [ -n "$kids" ] && printf '%s\n' "$kids" | grep -qxF -f "$protected"; then
+      continue
+    fi
+    printf '%s\t%s\n' "$id" "$name" >>"$untagged_plan"
+  done < <(jq -r '.[] | select((.metadata.container.tags // []) | length == 0) | [.id, .name] | @tsv' "$tmpdir/versions.json")
+fi
 
 deleted=0
 refused=0
@@ -304,8 +322,8 @@ delete_plan() { # delete_plan LABEL PLAN-FILE (id<TAB>description per line)
       deleted=$((deleted + 1))
       continue
     fi
-    status=$(curl -sS --max-time 60 -o "$tmpdir/response" -w '%{http_code}' -X DELETE \
-      -H "Authorization: Bearer $GH_TOKEN" \
+    status=$(curl -sS --max-time 60 --retry 3 --retry-delay 2 -o "$tmpdir/response" -w '%{http_code}' -X DELETE \
+      -H @"$auth_header" \
       -H "Accept: application/vnd.github+json" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "$api_url${scope:-}/packages/container/$package/versions/$id") || status=000

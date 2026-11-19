@@ -48,6 +48,33 @@ impl FileConfig {
         let Some(path) = path else {
             return Self::default();
         };
+        // Every parser has a size cap: a huge config file must not be able
+        // to exhaust PID 1's memory at boot.
+        const MAX_FILE_BYTES: u64 = 1024 * 1024;
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.len() > MAX_FILE_BYTES => {
+                return Self {
+                    fatal: Some(format!(
+                        "config: {} is {} bytes, over the {MAX_FILE_BYTES}-byte cap; \
+                         refusing to start",
+                        log::sanitize(path),
+                        meta.len()
+                    )),
+                    ..Self::default()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Self {
+                    fatal: Some(format!(
+                        "config: cannot read {}: {e}; refusing to start — fix the mount, \
+                         or unset SUPERVISOR_ENV_FILE to run from the environment only",
+                        log::sanitize(path)
+                    )),
+                    ..Self::default()
+                };
+            }
+        }
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(e) => {
@@ -116,9 +143,18 @@ mod tests {
     use super::*;
 
     fn write_tmp(content: &str) -> String {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+
         let dir = std::env::temp_dir().join(format!("vw-sup-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join(format!("env-{}.test", content.len()));
+        // Unique per call: equal-length fixtures from parallel tests must
+        // not share a path.
+        let p = dir.join(format!(
+            "env-{}-{}.test",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&p, content).unwrap();
         p.to_string_lossy().to_string()
     }

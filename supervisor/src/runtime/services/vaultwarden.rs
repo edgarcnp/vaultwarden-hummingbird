@@ -125,8 +125,77 @@ fn ambient_key(key: &OsStr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
+
+    /// Parse the runtime `ENV` block of the Containerfile (the block after
+    /// the final `FROM`). Values are literal; no interpolation is resolved.
+    fn containerfile_env() -> BTreeMap<String, String> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../Containerfile");
+        let text =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+        let mut out = BTreeMap::new();
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            let Some(first) = line.trim_start().strip_prefix("ENV ") else {
+                continue;
+            };
+            let mut block = String::new();
+            let mut current = first.trim();
+            loop {
+                let (part, more) = match current.strip_suffix('\\') {
+                    Some(part) => (part.trim_end(), true),
+                    None => (current, false),
+                };
+                block.push_str(part);
+                block.push(' ');
+                if !more {
+                    break;
+                }
+                current = lines.next().expect("an ENV continuation line").trim();
+            }
+            for pair in block.split_whitespace() {
+                if let Some((key, value)) = pair.split_once('=') {
+                    out.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// The Containerfile's runtime ENV block and [`IMAGE_DEFAULTS`] are two
+    /// copies of the same contract. The supervisor cannot re-apply a default
+    /// the image forgot, and the image must not carry a default the child
+    /// never receives.
+    #[test]
+    fn containerfile_env_matches_image_defaults() {
+        let env = containerfile_env();
+        for &(key, value) in IMAGE_DEFAULTS {
+            assert_eq!(
+                env.get(key).map(String::as_str),
+                Some(value),
+                "{key}: Containerfile and IMAGE_DEFAULTS disagree"
+            );
+        }
+        // Hard pins and re-derived values, set by the supervisor at spawn.
+        let pinned = [
+            "DATA_FOLDER",
+            "ROCKET_ADDRESS",
+            "WEB_VAULT_ENABLED",
+            "WEB_VAULT_FOLDER",
+        ];
+        let expected: BTreeSet<&str> = IMAGE_DEFAULTS
+            .iter()
+            .map(|(key, _)| *key)
+            .chain(pinned)
+            .collect();
+        let actual: BTreeSet<&str> = env.keys().map(String::as_str).collect();
+        assert_eq!(
+            actual, expected,
+            "the Containerfile ENV block and IMAGE_DEFAULTS drifted"
+        );
+    }
 
     /// Ambient env is default-deny: supervisor-owned keys are filtered
     /// even when not valid UTF-8, bare upstream keys do not pass, and

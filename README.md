@@ -17,12 +17,15 @@ You need a [Tailscale](https://tailscale.com) account, with MagicDNS and HTTPS c
 2. Run it. `VAULTWARDEN_DOMAIN` must be the address Tailscale will serve your vault on:
 
    ```sh
+   cp .env.example .env    # fill in TAILSCALE_AUTHKEY and VAULTWARDEN_DOMAIN
    podman run --rm \
      -p 127.0.0.1:8080:8080 \
-     -e TAILSCALE_AUTHKEY=tskey-... \
-     -e VAULTWARDEN_DOMAIN=https://vaultwarden-hummingbird.<your-tailnet>.ts.net \
+     --env-file .env \
      ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
    ```
+
+   `--env-file` keeps the auth key out of the host process list; prefer it
+   over `-e` for secrets.
 
 3. From a device on your tailnet, open that `https://…ts.net` address and create your account.
 
@@ -38,7 +41,7 @@ Each release publishes new images. Only the three newest releases stay on the re
 
 Tailscale is the only way in. The vault listens on loopback and never leaves the container's network namespace; `tailscale serve` publishes it on your tailnet as `https://<hostname>.<tailnet>.ts.net`, so only your devices can reach it — no TUN device or extra privileges needed.
 
-No Tailscale, no vault. The container refuses to start without an auth key or S3 state sync, and if Tailscale dies later it shuts down instead of running a vault nobody can reach. Your orchestrator restarts it; a short outage beats a silent one.
+No Tailscale, no vault. The container refuses to start without an auth key, a valid local `TAILSCALE_STATE_FILE`, or S3 state sync that can supply the node identity, and if Tailscale dies later it shuts down instead of running a vault nobody can reach. Your orchestrator restarts it; a short outage beats a silent one.
 
 ## Configuration
 
@@ -71,7 +74,7 @@ Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and renam
 
 If `/data` is a real volume, you're done.
 
-If your platform wipes `/data` on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default:
+If your platform wipes `/data` on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default. The key needs object read/write **and list** (`ListObjectsV2`) for first-run, restore, and reconciliation; bucket create/head are never called.
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -83,11 +86,11 @@ SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 
 - At boot it restores what is missing, but never overwrites a newer local file.
 - It saves after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The final save is budgeted (two minutes; fifteen seconds after a second stop signal) so a slow bucket can't hold the container open.
-- It saves the tailnet identity, the vault's RSA signing key, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/data` to ride along; the container says so at boot when it doesn't.
-- Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. Uploads are content-addressed, so an interrupted push can never replace the copy the last good manifest names, and a new file whose manifest write was interrupted is recovered on the next boot. A quiet node costs one manifest read per push and one listing per boot, not a round of uploads.
-- Keep the bucket private (it holds secrets and your files) and run one container against it.
+- It saves the tailnet identity, the vault's RSA signing key, your admin `config.json`, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/data` to ride along; the container says so at boot when it doesn't.
+- Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. Uploads are content-addressed, so an interrupted push can never replace the copy the last good manifest names, and a new file whose manifest write was interrupted is recovered on the next boot. A quiet node costs one manifest read per push and at most one listing per boot (a legacy bucket may list twice), not a round of uploads.
+- A push is refused while the bucket cannot be proven complete (for example after a partial restore): the fallback path-key layout is never written, because it could overwrite a newer bucket copy. Deletions are not propagated yet; a deleted file can be restored from the bucket until the tombstone/GC policy lands. Keep the bucket private (it holds secrets and your files) and run one container against it.
 
-Rather stay fully ephemeral? Use `TAILSCALE_STATE_FILE=mem:` with an `ephemeral=true` auth key: the container joins as a fresh node every boot and devices log in again. Vaultwarden also tries to detect a non-persistent `/data`, but how well that works depends on the mount — treat `/data` as gone unless it's a real volume or sync is on.
+Rather stay fully ephemeral? Use `TAILSCALE_STATE_FILE=mem:` with an `ephemeral=true` auth key: the container joins as a fresh node every boot and devices log in again. On a PaaS with temporary storage, also set `SUPERVISOR_EPHEMERAL=true` (or use `mem:`; a tmpfs `/data` or vaultwarden's `I_REALLY_WANT_VOLATILE_STORAGE` acknowledgement is detected too). In that mode an explicitly configured but unusable S3/backup setting refuses the boot instead of quietly losing persistence; on a real volume the same error is logged and the feature degrades. Vaultwarden also tries to detect a non-persistent `/data`, but how well that works depends on the mount — treat `/data` as gone unless it's a real volume or sync is on.
 
 ## Backups
 
@@ -100,9 +103,9 @@ SUPERVISOR_DB_BACKUP=true
 ```
 
 - A backup is a clean point-in-time copy (`VACUUM INTO`) taken while the vault runs; it doesn't pause or lock the vault (the image keeps WAL mode on, so the copy never blocks the vault).
-- Backups land under `db/` with a timestamp, and the oldest are deleted beyond `KEEP`. An unchanged database isn't re-uploaded. If the container dies mid-backup you lose one cycle, never gain a broken backup.
+- Backups land under `db/` with a timestamp, and the oldest are deleted beyond `KEEP`. An unchanged database isn't re-uploaded. The last pushed dump is kept locally beside the DB (as `db-backups.last`) for the unchanged comparison; it is never uploaded and costs one extra database-sized file on `/data`. If the container dies mid-backup you lose one cycle, never gain a broken backup.
 - A graceful stop takes one more backup after the vault exits, so a normal redeploy carries the latest sessions and devices. Give the orchestrator time to drain (compose's `stop_grace_period`).
-- `SUPERVISOR_DB_BACKUP_RESTORE=true` loads the newest backup at boot, but only into a database it can prove is empty — if the newest copy is damaged it tries the next one, and it never overwrites existing data. If it can't tell (an unreadable database, a bucket it can't list), it refuses to start rather than guess.
+- `SUPERVISOR_DB_BACKUP_RESTORE=true` loads the newest backup at boot, but only into a database it can prove is empty — if the newest copy is missing or fails its integrity/size/hash check it tries the next one, and it never overwrites existing data. A transport or local failure refuses the boot instead of silently downgrading the volume; an unusable S3 configuration also refuses (it never boots fresh behind a requested restore). If it can't tell (an unreadable database, a bucket it can't list), it refuses to start rather than guess.
 - Prefer to restore by hand? Stop the vault and replace `/data/db.sqlite3` with the dump.
 - Want redeploys to carry the newest sessions? Lower the interval, for example to `900`.
 

@@ -1,6 +1,7 @@
 //! The periodic backup cycle (sweep -> dump -> push -> manifest -> prune).
 
 use crate::config::DbBackupConfig;
+use crate::s3::MAX_DB_OBJECT_BYTES;
 use crate::util::log;
 use crate::util::make_private;
 
@@ -30,7 +31,7 @@ use super::unchanged;
 /// successful push persists it. A dump byte-identical to the newest
 /// backup is not re-uploaded (`unchanged`), so a quiet vault mints no
 /// redundant objects.
-pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
+pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     if abort() {
         return;
     }
@@ -109,7 +110,7 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     if !sweep_staging(&cfg.staging) {
         return;
     }
-    if !super::sqlite::dump(&cfg.db_path, &staged) {
+    if !super::sqlite::dump(&cfg.db_path, &staged, &abort) {
         log::err(
             "db backup: dump failed; nothing was uploaded or deleted, the next tick \
              retries (if it repeats, check free space on /data)",
@@ -126,7 +127,27 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
         let _ = std::fs::remove_file(&staged);
         return;
     }
-    let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
+    let size = match std::fs::symlink_metadata(&staged) {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            log::err(&format!(
+                "db backup: cannot size the staged dump ({e}); nothing was uploaded, \
+                 the next tick retries"
+            ));
+            let _ = std::fs::remove_file(&staged);
+            return;
+        }
+    };
+    // The restore path refuses a dump above this cap; uploading one would
+    // create a manifest entry that can never be restored.
+    if size > MAX_DB_OBJECT_BYTES {
+        log::err(&format!(
+            "db backup: dump is {size} bytes, over the {MAX_DB_OBJECT_BYTES}-byte \
+             restore cap; not uploaded"
+        ));
+        let _ = std::fs::remove_file(&staged);
+        return;
+    }
     // Skip a redundant upload only while this lineage still owns the
     // newest generation: a stale or unproven lineage must push, so a gap
     // is never skipped over. (An externally deleted newest object is not

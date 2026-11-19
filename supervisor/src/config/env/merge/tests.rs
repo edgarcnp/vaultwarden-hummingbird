@@ -29,16 +29,27 @@ fn mk_with_file(vars: &[(&str, &str)], file: FileConfig) -> Config {
 
 #[test]
 fn authkey_required_unless_sync_can_restore_the_identity() {
-    // no authkey from env or file, no state sync: fail closed
-    let map: BTreeMap<String, String> = BTreeMap::new();
+    // no authkey from env or file, no state sync, no local state: fail closed
+    let map: BTreeMap<String, String> = [(
+        "TAILSCALE_STATE_FILE".to_string(),
+        "/nonexistent-vw-sup/tailscaled.state".to_string(),
+    )]
+    .into_iter()
+    .collect();
     assert!(
         Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
-        "missing TAILSCALE_AUTHKEY without state sync must refuse to start"
+        "missing TAILSCALE_AUTHKEY without state sync or a local state must refuse to start"
     );
     // empty is as good as missing
-    let map: BTreeMap<String, String> = [("TAILSCALE_AUTHKEY".to_string(), String::new())]
-        .into_iter()
-        .collect();
+    let map: BTreeMap<String, String> = [
+        ("TAILSCALE_AUTHKEY".to_string(), String::new()),
+        (
+            "TAILSCALE_STATE_FILE".to_string(),
+            "/nonexistent-vw-sup/tailscaled.state".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
     assert!(Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none());
     // file layer satisfies the requirement too
     let file = FileConfig::load_from(Some(&env_dotenv("TAILSCALE_AUTHKEY=file-key\n")));
@@ -85,12 +96,101 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
     assert_eq!(cfg.authkey, None);
     // sync knobs WITHOUT the credentials are not state sync: still
     // fail closed
-    let map: BTreeMap<String, String> = [("SUPERVISOR_S3_REMOTE".to_string(), "r2:vw".to_string())]
-        .into_iter()
-        .collect();
+    let map: BTreeMap<String, String> = [
+        ("SUPERVISOR_S3_REMOTE".to_string(), "r2:vw".to_string()),
+        (
+            "TAILSCALE_STATE_FILE".to_string(),
+            "/nonexistent-vw-sup/tailscaled.state".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
     assert!(
         Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
         "a remote without credentials is not an identity source"
+    );
+}
+
+/// A local state file is a valid identity source on a persistent volume;
+/// a `mem:` state or one outside the sync root cannot be supplied by S3.
+#[test]
+fn authkey_gate_considers_the_local_state_and_sync_coverage() {
+    let dir = std::env::temp_dir().join(format!("vw-sup-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = dir.join("tailscaled.state");
+    std::fs::write(&state, b"identity").unwrap();
+
+    let map: BTreeMap<String, String> = [(
+        "TAILSCALE_STATE_FILE".to_string(),
+        state.to_string_lossy().into_owned(),
+    )]
+    .into_iter()
+    .collect();
+    let cfg = Config::build(FileConfig::default(), move |k| map.get(k).cloned())
+        .expect("a valid local state is an identity source");
+    assert_eq!(cfg.authkey, None);
+
+    let sync: &[(&str, &str)] = &[
+        ("SUPERVISOR_S3_REMOTE", "r2:vw"),
+        ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
+        ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
+        ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
+    ];
+    for state in ["mem:", "/var/lib/tailscale/state"] {
+        let mut map: BTreeMap<String, String> = sync
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        map.insert("TAILSCALE_STATE_FILE".into(), state.into());
+        assert!(
+            Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
+            "{state}: sync cannot supply an identity it does not cover"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Temporary storage is strict: an explicitly configured S3/backup feature
+/// that cannot work refuses the boot; with no such feature it warns and
+/// continues.
+#[test]
+fn temporary_storage_strictness() {
+    let base: &[(&str, &str)] = &[
+        ("SUPERVISOR_EPHEMERAL", "true"),
+        ("TAILSCALE_AUTHKEY", "test-key"),
+    ];
+    // Remote with no credentials: S3 requested, sync unusable.
+    let mut vars = base.to_vec();
+    vars.push(("SUPERVISOR_S3_REMOTE", "r2:vw"));
+    assert!(
+        Config::build(FileConfig::default(), move |k| vars
+            .iter()
+            .find(|(key, _)| *key == k)
+            .map(|(_, v)| v.to_string()))
+        .is_none(),
+        "temporary storage must refuse an unusable S3 config"
+    );
+    // Backup requested without a usable sync.
+    let mut vars = base.to_vec();
+    vars.push(("SUPERVISOR_DB_BACKUP", "true"));
+    assert!(
+        Config::build(FileConfig::default(), move |k| vars
+            .iter()
+            .find(|(key, _)| *key == k)
+            .map(|(_, v)| v.to_string()))
+        .is_none(),
+        "temporary storage must refuse an unusable backup config"
+    );
+    // No persistence feature: warn and boot.
+    let vars = base.to_vec();
+    assert!(
+        Config::build(FileConfig::default(), move |k| vars
+            .iter()
+            .find(|(key, _)| *key == k)
+            .map(|(_, v)| v.to_string()))
+        .is_some(),
+        "temporary storage without S3/backup is allowed (with a warning)"
     );
 }
 

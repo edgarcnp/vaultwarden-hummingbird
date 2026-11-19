@@ -19,7 +19,8 @@ pub(super) fn prune(
         let key = format!("{}{}", cfg.prefix(), entry.name);
         match client.delete(&key, abort) {
             Ok(()) => log::info(&format!(
-                "db backup: pruned {key} (generation {})",
+                "db backup: pruned {} (generation {})",
+                log::sanitize(&key),
                 entry.generation
             )),
             Err(e) => log::err(&format!(

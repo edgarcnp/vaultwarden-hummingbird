@@ -196,7 +196,8 @@ impl Boot {
                 let msg = match &self.cfg.service {
                     Some(svc) => {
                         format!(
-                            "tailscale serve: advertised {svc} (needs console definition + approval)"
+                            "tailscale serve: advertised {} (needs console definition + approval)",
+                            log::sanitize(svc)
                         )
                     }
                     None => {

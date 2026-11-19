@@ -17,6 +17,9 @@ on:
       - .containerignore
       - .github/workflows/image.yml
       - scripts/smoke-image.sh
+      # supervisor/ is copied into the image; a change there can break the
+      # image build even when the crate's own test suite passes.
+      - supervisor/**
 
 # Superseded runs on the same branch don't need to finish.
 concurrency:

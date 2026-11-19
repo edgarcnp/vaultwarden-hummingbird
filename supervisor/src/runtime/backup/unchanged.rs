@@ -36,8 +36,10 @@ pub(super) fn is_repeat(staged: &str, db_path: &str) -> bool {
 /// Full-file byte comparison in bounded chunks. Err covers any I/O
 /// trouble; the caller treats it as "not a repeat" and pushes.
 fn same_bytes(a: &str, b: &str) -> std::io::Result<bool> {
-    let mut fa = std::fs::File::open(a)?;
-    let mut fb = std::fs::File::open(b)?;
+    // Both paths are local sidecars/dumps; a symlink must not redirect the
+    // comparison to another (possibly supervisor-only) file.
+    let mut fa = crate::util::fs::open_nofollow(a)?;
+    let mut fb = crate::util::fs::open_nofollow(b)?;
     let mut buf_a = vec![0u8; CHUNK];
     let mut buf_b = vec![0u8; CHUNK];
     loop {

@@ -31,6 +31,7 @@ jobs:
   prune:
     name: prune
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       # Deleting package versions needs admin on the package, which the
       # repository whose workflow publishes it holds by default.

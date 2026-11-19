@@ -154,30 +154,6 @@ impl Config {
                 .unwrap_or_default()
         };
 
-        let mut sync = resolve_sync(&knob);
-
-        // The vault's DB URL: env wins over file — the same precedence the
-        // child env applies, so dumps and restores always reach the same DB
-        // the vault uses. The file's entry arrives only via the strict
-        // routing (`VAULTWARDEN_DATABASE_URL` stripped); a bare
-        // `DATABASE_URL` in the file already refused the boot above.
-        let db_url = non_empty(lookup("VAULTWARDEN_DATABASE_URL"))
-            .or_else(|| non_empty(file.child.get("DATABASE_URL").cloned()));
-        let backup = resolve_backup(&knob, sync.as_ref(), db_url.clone());
-
-        // The node joins the tailnet with EITHER an authkey OR a restored
-        // identity: with S3 state sync configured, the pulled
-        // tailscaled.state is the machine and the key is never consumed —
-        // so the key is only required when sync cannot supply the identity.
-        let authkey = non_empty(Some(knob("TAILSCALE_AUTHKEY", "")));
-        if authkey.is_none() && sync.is_none() {
-            log::err(
-                "config: TAILSCALE_AUTHKEY is required unless SUPERVISOR_S3_* state sync \
-                 is configured to restore the node identity; refusing to start",
-            );
-            return None;
-        }
-
         // The state file anchors the node identity and the `--statedir`
         // derived from it; a relative path has no stable meaning for a
         // PID 1 (and would yield an empty statedir). `mem:` is Tailscale's
@@ -191,6 +167,38 @@ impl Config {
             ));
             return None;
         }
+        // A state file is a third identity source, alongside an authkey and
+        // a sync bucket that can restore one. Only a normal, non-empty path
+        // under /data is covered by the sync root.
+        let state_under_data = state.strip_prefix("/data/").filter(|rel| {
+            !rel.is_empty() && !rel.contains("..") && !rel.chars().any(char::is_control)
+        });
+        let state_present = state != "mem:"
+            && std::fs::metadata(&state).is_ok_and(|meta| meta.is_file() && meta.len() > 0);
+
+        let mut sync = resolve_sync(&knob);
+
+        // The vault's DB URL: env wins over file — the same precedence the
+        // child env applies, so dumps and restores always reach the same DB
+        // the vault uses. The file's entry arrives only via the strict
+        // routing (`VAULTWARDEN_DATABASE_URL` stripped); a bare
+        // `DATABASE_URL` in the file already refused the boot above.
+        let db_url = non_empty(lookup("VAULTWARDEN_DATABASE_URL"))
+            .or_else(|| non_empty(file.child.get("DATABASE_URL").cloned()));
+        let backup = resolve_backup(&knob, sync.as_ref(), db_url.clone());
+
+        // A key is required only when no other source can supply identity:
+        // a valid local state file, or a sync bucket that covers it.
+        let authkey = non_empty(Some(knob("TAILSCALE_AUTHKEY", "")));
+        let sync_can_supply = sync.is_some() && state_under_data.is_some();
+        if authkey.is_none() && !state_present && !sync_can_supply {
+            log::err(
+                "config: no identity source: set TAILSCALE_AUTHKEY, keep a valid local \
+                 TAILSCALE_STATE_FILE, or configure SUPERVISOR_S3_* state sync covering \
+                 that file; refusing to start",
+            );
+            return None;
+        }
         // The identity file must ride inside the sync root; anything else
         // cannot be covered by state sync, so say so rather than silently
         // losing the node on the next redeploy.
@@ -202,6 +210,61 @@ impl Config {
                      state sync cannot carry the node identity",
                     log::sanitize(&state)
                 ));
+            }
+        }
+
+        // Temporary-storage mode: an explicitly configured persistence
+        // feature that cannot work is fatal (there is nowhere else for the
+        // data to go); on a real volume it is an error message and a
+        // degraded feature. `mem:`, a tmpfs /data, or vaultwarden's
+        // volatile-storage acknowledgement declare the same mode.
+        let volatile_storage = non_empty(lookup("VAULTWARDEN_I_REALLY_WANT_VOLATILE_STORAGE"))
+            .or_else(|| non_empty(file.child.get("I_REALLY_WANT_VOLATILE_STORAGE").cloned()))
+            .is_some();
+        let ephemeral = parse_flag(
+            "SUPERVISOR_EPHEMERAL",
+            &raw("SUPERVISOR_EPHEMERAL"),
+            schema::bool_default("SUPERVISOR_EPHEMERAL"),
+        ) || state == "mem:"
+            || volatile_storage
+            || crate::util::fs::on_tmpfs("/data");
+        if ephemeral {
+            let s3_requested = [
+                "SUPERVISOR_S3_REMOTE",
+                "SUPERVISOR_S3_ACCESS_KEY_ID",
+                "SUPERVISOR_S3_SECRET_ACCESS_KEY",
+                "SUPERVISOR_S3_ENDPOINT",
+                "SUPERVISOR_S3_SYNC_INTERVAL",
+            ]
+            .iter()
+            .any(|key| !knob(key, "").is_empty());
+            let backup_requested = [
+                "SUPERVISOR_DB_BACKUP",
+                "SUPERVISOR_DB_BACKUP_INTERVAL",
+                "SUPERVISOR_DB_BACKUP_KEEP",
+                "SUPERVISOR_DB_BACKUP_RESTORE",
+            ]
+            .iter()
+            .any(|key| !knob(key, "").is_empty());
+            if s3_requested && sync.is_none() {
+                log::err(
+                    "config: temporary-storage mode is declared but SUPERVISOR_S3_* is \
+                     unusable; refusing to start with nowhere durable to put the data",
+                );
+                return None;
+            }
+            if backup_requested && backup.is_none() {
+                log::err(
+                    "config: temporary-storage mode is declared but SUPERVISOR_DB_BACKUP* \
+                     is unusable; refusing to start with no DB backup",
+                );
+                return None;
+            }
+            if !s3_requested && !backup_requested {
+                log::err(
+                    "config: temporary-storage mode declared with no state sync or DB \
+                     backup; data will not survive a redeploy",
+                );
             }
         }
 

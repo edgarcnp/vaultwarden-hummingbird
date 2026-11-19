@@ -201,6 +201,39 @@ fn normalize_endpoint(mut endpoint: Url) -> Url {
     endpoint
 }
 
+/// Why a download failed. The restore path must distinguish a definitively
+/// missing/invalid candidate (try the next older backup) from a transport or
+/// local failure (never silently downgrade the volume).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetError {
+    /// The object does not exist (HTTP 404).
+    Missing,
+    /// The object exists but violates the caller's expectations: too large,
+    /// too short, wrong size, or a checksum mismatch.
+    Invalid(String),
+    /// The request failed in a way that may be transient (network, 5xx,
+    /// redirect, permission).
+    Transport(String),
+    /// A local filesystem failure (`.part` creation, write, fsync, rename).
+    Local(String),
+    /// A stop request interrupted the transfer.
+    Aborted,
+}
+
+impl std::fmt::Display for GetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("object not found"),
+            Self::Invalid(message) | Self::Transport(message) | Self::Local(message) => {
+                f.write_str(message)
+            }
+            Self::Aborted => f.write_str("aborted"),
+        }
+    }
+}
+
+impl std::error::Error for GetError {}
+
 /// What a download must turn out to be: the caller's expectations, checked
 /// before the temp file is published. Size and checksum together protect
 /// against an object that was truncated, corrupted, or substituted.
@@ -296,7 +329,13 @@ impl Client {
         }
         let response = retrying(|| {
             // A retry reopens the file: the request consumes the handle.
-            let file = std::fs::File::open(path).map_err(ureq::Error::Io)?;
+            // O_NOFOLLOW: a sync source replaced by a symlink must never be
+            // uploaded through the target.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(path)
+                .map_err(ureq::Error::Io)?;
             let length = file.metadata().map_err(ureq::Error::Io)?.len();
             let url = self
                 .bucket
@@ -388,8 +427,11 @@ impl Client {
         upload_id: &str,
         abort: &impl Fn() -> bool,
     ) -> anyhow::Result<Vec<String>> {
-        let mut file =
-            std::fs::File::open(path).map_err(|e| anyhow!("cannot open {path} for upload: {e}"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|e| anyhow!("cannot open {path} for upload: {e}"))?;
         let mut etags: Vec<String> = Vec::new();
         let mut offset: u64 = 0;
         while offset < size {
@@ -517,9 +559,9 @@ impl Client {
         path: &str,
         expect: Expect<'_>,
         abort: impl Fn() -> bool,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), GetError> {
         if abort() {
-            bail!("aborted");
+            return Err(GetError::Aborted);
         }
         // The temp lives beside the target so the publish is one atomic
         // same-filesystem rename; a crash leaves the target untouched. A
@@ -529,10 +571,10 @@ impl Client {
         let tmp = format!("{path}.part");
         let mut offset = resumed_offset(&tmp, expect.size);
         let mut attempt = 0;
-        let staged: anyhow::Result<u64> = loop {
+        let staged: Result<u64, GetError> = loop {
             attempt += 1;
             if abort() {
-                break Err(anyhow!("aborted"));
+                break Err(GetError::Aborted);
             }
             // Sign per attempt: a retry must not reuse a URL that may have
             // expired while the previous attempt consumed its body budget.
@@ -547,13 +589,17 @@ impl Client {
             let response = match request.call() {
                 Ok(response) => match checked("download", key, response) {
                     Ok(response) => response,
-                    Err(e) => break Err(e),
+                    Err(e) => break Err(GetError::Transport(e.to_string())),
                 },
+                Err(ureq::Error::StatusCode(404)) => break Err(GetError::Missing),
                 Err(e) => {
                     if retryable(&e) && attempt < MAX_DOWNLOAD_ATTEMPTS {
                         continue;
                     }
-                    break Err(anyhow!("download of {key} failed: {}", http_err(&e)));
+                    break Err(GetError::Transport(format!(
+                        "download of {key} failed: {}",
+                        http_err(&e)
+                    )));
                 }
             };
             // A server that ignored the range (or an object that changed)
@@ -568,65 +614,72 @@ impl Client {
                 .and_then(|value| value.parse::<u64>().ok());
             let start = offset;
             let mut reader = response.into_body().into_reader();
-            let streamed = (|| -> anyhow::Result<u64> {
+            let streamed = (|| -> Result<u64, GetError> {
                 let mut out = std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
                     .truncate(start == 0)
                     .append(start > 0)
                     .mode(0o600)
+                    .custom_flags(nix::libc::O_NOFOLLOW)
                     .open(&tmp)
-                    .map_err(|e| anyhow!("cannot create {tmp}: {e}"))?;
+                    .map_err(|e| GetError::Local(format!("cannot create {tmp}: {e}")))?;
                 let mut buf = [0u8; 64 * 1024];
                 let mut total = start;
                 loop {
                     if abort() {
-                        bail!("aborted");
+                        return Err(GetError::Aborted);
                     }
                     let n = reader
                         .read(&mut buf)
-                        .map_err(|e| anyhow!("download of {key}: {e}"))?;
+                        .map_err(|e| GetError::Transport(format!("download of {key}: {e}")))?;
                     if n == 0 {
                         break;
                     }
                     total += n as u64;
                     if total > expect.max_bytes {
-                        bail!(
+                        return Err(GetError::Invalid(format!(
                             "download of {key}: exceeds the {}-byte cap",
                             expect.max_bytes
-                        );
+                        )));
                     }
                     if let Some(expected) = expect.size
                         && total > expected
                     {
-                        bail!("download of {key}: larger than the {expected} bytes listed");
+                        return Err(GetError::Invalid(format!(
+                            "download of {key}: larger than the {expected} bytes listed"
+                        )));
                     }
                     out.write_all(&buf[..n])
-                        .map_err(|e| anyhow!("download of {key}: {e}"))?;
+                        .map_err(|e| GetError::Local(format!("download of {key}: {e}")))?;
                 }
-                // A connection that closed early is a failed attempt, not
-                // a short object: the reader may report EOF either way, so
-                // the declared length is checked explicitly.
+                // A body that ends short of the declared length is not a
+                // usable object. The retry budget is already spent here, so
+                // classify it as definitively invalid and let a restore try
+                // the next older candidate.
                 if let Some(declared) = declared
                     && total - start != declared
                 {
-                    bail!(
+                    return Err(GetError::Invalid(format!(
                         "download of {key}: body ended after {} of {declared} bytes",
                         total - start
-                    );
+                    )));
                 }
                 out.sync_all()
-                    .map_err(|e| anyhow!("download of {key}: {e}"))?;
+                    .map_err(|e| GetError::Local(format!("download of {key}: {e}")))?;
                 Ok(total)
             })();
             match streamed {
                 Ok(total) => break Ok(total),
                 Err(e) => {
-                    // Keep the partial for the next attempt; past the
-                    // budget (or on abort) the failure is final and the
-                    // cleanup below removes it.
-                    let done = std::fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
-                    if attempt < MAX_DOWNLOAD_ATTEMPTS
+                    // Only a transport failure is worth another attempt; a
+                    // cap/size/hash/local failure is definitive.
+                    let retry = matches!(e, GetError::Transport(_));
+                    let done = std::fs::symlink_metadata(&tmp)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0);
+                    if retry
+                        && attempt < MAX_DOWNLOAD_ATTEMPTS
                         && !abort()
                         && done < expect.size.unwrap_or(u64::MAX)
                     {
@@ -641,16 +694,22 @@ impl Client {
             if let Some(expected) = expect.size
                 && total != expected
             {
-                bail!("download of {key}: got {total} bytes, expected {expected}");
+                return Err(GetError::Invalid(format!(
+                    "download of {key}: got {total} bytes, expected {expected}"
+                )));
             }
             if let Some(expected) = expect.sha256 {
-                let actual = crate::util::hash::sha256_file(&tmp)
-                    .map_err(|e| anyhow!("download of {key}: cannot hash the temp file: {e}"))?;
+                let actual = crate::util::hash::sha256_file(&tmp).map_err(|e| {
+                    GetError::Local(format!("download of {key}: cannot hash the temp file: {e}"))
+                })?;
                 if actual != expected {
-                    bail!("download of {key}: sha256 mismatch (got {actual}, expected {expected})");
+                    return Err(GetError::Invalid(format!(
+                        "download of {key}: sha256 mismatch (got {actual}, expected {expected})"
+                    )));
                 }
             }
-            std::fs::rename(&tmp, path).map_err(|e| anyhow!("cannot publish {path}: {e}"))
+            std::fs::rename(&tmp, path)
+                .map_err(|e| GetError::Local(format!("cannot publish {path}: {e}")))
         });
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -1013,6 +1072,26 @@ mod tests {
             sha256: None,
             max_bytes: max,
         }
+    }
+
+    /// A 404 is a structured "missing" (the restore path may try the next
+    /// older candidate), unlike a transport failure.
+    #[test]
+    fn get_reports_a_missing_object() {
+        let client = local_client(fake_server("404 Not Found", "", b""));
+        let dir = scratch("get-missing");
+        let target = dir.join("db.sqlite3");
+        let err = client
+            .get(
+                "db/sqlite-1.sqlite3",
+                target.to_str().unwrap(),
+                expect(Some(1), 1024),
+                || false,
+            )
+            .unwrap_err();
+        assert_eq!(err, GetError::Missing);
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A complete download lands atomically with owner-only permissions

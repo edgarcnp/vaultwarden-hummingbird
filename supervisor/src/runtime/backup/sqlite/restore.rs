@@ -5,6 +5,8 @@
 //! torn-copy window.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::util::log;
 use crate::util::make_private;
@@ -40,6 +42,8 @@ pub(crate) enum ImportError {
     Invalid,
     /// Publication failed locally (I/O, permissions, or the live path).
     Local,
+    /// A stop request interrupted the integrity check.
+    Aborted,
 }
 
 /// Integrity pre-check (`PRAGMA integrity_check` on the staged copy),
@@ -53,14 +57,42 @@ pub(crate) enum ImportError {
 /// linking, so the live path never exists with wider permissions. Both
 /// paths sit on the same data volume, so the hard link is always possible
 /// (same constraint `rename` had).
-pub(crate) fn import(staged: &str, path: &str) -> Result<(), ImportError> {
+pub(crate) fn import(
+    staged: &str,
+    path: &str,
+    abort: &(impl Fn() -> bool + Sync),
+) -> Result<(), ImportError> {
+    if abort() {
+        return Err(ImportError::Aborted);
+    }
     let check = match rusqlite::Connection::open_with_flags(
         staged,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) {
-        Ok(c) => c
-            .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
-            .unwrap_or_else(|e| format!("check failed: {e}")),
+        Ok(conn) => {
+            let interrupt = conn.get_interrupt_handle();
+            let done = AtomicBool::new(false);
+            let check = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while !done.load(Ordering::Relaxed) {
+                        if abort() {
+                            interrupt.interrupt();
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                });
+                let check = conn
+                    .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                    .unwrap_or_else(|e| format!("check failed: {e}"));
+                done.store(true, Ordering::Relaxed);
+                check
+            });
+            if abort() {
+                return Err(ImportError::Aborted);
+            }
+            check
+        }
         Err(e) => format!("cannot open: {e}"),
     };
     if check != "ok" {
@@ -103,12 +135,23 @@ pub(crate) fn import(staged: &str, path: &str) -> Result<(), ImportError> {
             // Unlink the staging name; failure only leaves a stale copy
             // for the next staging sweep, never a wrong live file.
             let _ = std::fs::remove_file(staged);
-            // The published DB must not inherit the replaced file's WAL
-            // siblings: a stale `<db>-wal` from the old inode must not be
-            // picked up by the next opener. Nothing else has the DB open
-            // at boot time, so removing them is safe.
+            // The published DB must not inherit the replaced file's sidecars:
+            // a stale `<db>-wal`/`-journal` from the old inode must not be
+            // picked up by the next opener. Nothing else has the DB open at
+            // boot time, so removing them is safe.
             let _ = std::fs::remove_file(format!("{path}-wal"));
             let _ = std::fs::remove_file(format!("{path}-shm"));
+            let _ = std::fs::remove_file(format!("{path}-journal"));
+            // Make the publication durable before the vault starts. A
+            // failure here is reported but does not unpublish the file.
+            if let Err(e) = std::fs::File::open(path).and_then(|file| file.sync_all()) {
+                log::err(&format!("db restore: cannot fsync the live DB: {e}"));
+            }
+            if let Some(parent) = Path::new(path).parent()
+                && let Err(e) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
+            {
+                log::err(&format!("db restore: cannot fsync the DB directory: {e}"));
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -220,7 +263,7 @@ mod tests {
         drop(conn);
         let before = std::fs::metadata(&live).unwrap().ino();
 
-        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()).is_err());
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap(), &|| false).is_err());
 
         // The live file is untouched (same inode, same data).
         use std::os::unix::fs::MetadataExt;
@@ -239,7 +282,12 @@ mod tests {
         // Happy path for contrast: publication into an absent path works
         // and lands 0600.
         let target = dir.join("fresh.sqlite3");
-        assert!(import(staged.to_str().unwrap(), target.to_str().unwrap()).is_ok());
+        assert!(
+            import(staged.to_str().unwrap(), target.to_str().unwrap(), &|| {
+                false
+            })
+            .is_ok()
+        );
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -264,7 +312,7 @@ mod tests {
         let live = dir.join("live.sqlite3");
         rusqlite::Connection::open(&live).unwrap(); // tableless, no user data
 
-        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()).is_ok());
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap(), &|| false).is_ok());
 
         let conn = rusqlite::Connection::open_with_flags(
             &live,
@@ -293,18 +341,36 @@ mod tests {
         let live = dir.join("live.sqlite3");
         let wal = dir.join("live.sqlite3-wal");
         let shm = dir.join("live.sqlite3-shm");
+        let journal = dir.join("live.sqlite3-journal");
         std::fs::write(&wal, b"stale").unwrap();
         std::fs::write(&shm, b"stale").unwrap();
+        std::fs::write(&journal, b"stale").unwrap();
 
-        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap()).is_ok());
+        assert!(import(staged.to_str().unwrap(), live.to_str().unwrap(), &|| false).is_ok());
 
         assert!(!wal.exists(), "stale -wal must be removed");
         assert!(!shm.exists(), "stale -shm must be removed");
+        assert!(!journal.exists(), "stale -journal must be removed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A staged copy that is not a database at all is classified Invalid
     /// (the caller may try an older candidate), unlike a local failure.
+    #[test]
+    fn import_honours_an_immediate_abort() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-sqlab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("staged.sqlite3");
+        std::fs::write(&staged, b"x").unwrap();
+        let live = dir.join("live.sqlite3");
+        let err = import(staged.to_str().unwrap(), live.to_str().unwrap(), &|| true)
+            .expect_err("abort must not publish");
+        assert!(matches!(err, ImportError::Aborted), "got {err:?}");
+        assert!(!live.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn import_marks_a_non_database_staged_copy_invalid() {
         let dir = std::env::temp_dir().join(format!("vw-sup-sqlinv-{}", std::process::id()));
@@ -313,7 +379,7 @@ mod tests {
         let staged = dir.join("staged.sqlite3");
         std::fs::write(&staged, b"not a database").unwrap();
         let live = dir.join("live.sqlite3");
-        let err = import(staged.to_str().unwrap(), live.to_str().unwrap())
+        let err = import(staged.to_str().unwrap(), live.to_str().unwrap(), &|| false)
             .expect_err("garbage must not import");
         assert!(matches!(err, ImportError::Invalid), "got {err:?}");
         assert!(!live.exists(), "a rejected candidate must not publish");

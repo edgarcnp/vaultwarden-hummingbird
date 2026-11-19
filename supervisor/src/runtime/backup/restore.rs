@@ -11,7 +11,7 @@
 //! manifest falls back to that listing loudly as recovery.
 
 use crate::config::DbBackupConfig;
-use crate::s3::{Expect, MAX_DB_OBJECT_BYTES};
+use crate::s3::{Expect, GetError, MAX_DB_OBJECT_BYTES};
 use crate::util::log;
 
 use super::check::is_empty;
@@ -50,7 +50,7 @@ pub enum RestoreOutcome {
 /// durable (`Failed`), so a transient error cannot downgrade the volume to
 /// an older backup. "No backup found" is not a failure (a fresh deployment
 /// legitimately boots on an empty DB).
-pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> RestoreOutcome {
+pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -> RestoreOutcome {
     if !cfg.restore {
         return RestoreOutcome::Ready;
     }
@@ -72,12 +72,13 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> Resto
     let s3 = match client(cfg) {
         Ok(s3) => s3,
         Err(e) => {
+            // The operator asked for a restore and the DB is empty: booting
+            // fresh would hide both the misconfiguration and the backups.
             log::err(&format!(
-                "db restore: skipped: unusable S3 configuration ({e}); \
-                 check the SUPERVISOR_S3_* settings and endpoint (a fresh DB \
-                 will boot)"
+                "db restore: unusable S3 configuration ({e}); refusing to \
+                 start on a fresh DB while a restore is requested"
             ));
-            return RestoreOutcome::Ready;
+            return RestoreOutcome::Failed;
         }
     };
     let candidates = match candidates(&s3, cfg, &abort) {
@@ -128,6 +129,7 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool) -> Resto
                 ));
                 return RestoreOutcome::Failed;
             }
+            Attempt::Aborted => return RestoreOutcome::Aborted,
         }
     }
     log::err(
@@ -243,6 +245,8 @@ enum Attempt {
     Invalid,
     /// Could not be downloaded, staged, or published: never fall back.
     Failed,
+    /// A stop request interrupted the integrity check.
+    Aborted,
 }
 
 /// Download one candidate into staging, verify integrity, import; on a
@@ -254,13 +258,13 @@ fn restore_object(
     s3: &Client,
     cfg: &DbBackupConfig,
     candidate: &Candidate,
-    abort: &impl Fn() -> bool,
+    abort: &(impl Fn() -> bool + Sync),
 ) -> Attempt {
     if !sweep_staging(&cfg.staging) {
         return Attempt::Failed;
     }
     let staged = format!("{}/restore-{}", cfg.staging, cfg.db_label());
-    if let Err(e) = s3.get(
+    match s3.get(
         &candidate.key,
         &staged,
         Expect {
@@ -270,10 +274,27 @@ fn restore_object(
         },
         abort,
     ) {
-        log::err(&format!("db restore: download failed ({e})"));
-        return Attempt::Failed;
+        // The manifest names an object that is absent or definitively
+        // invalid (missing, wrong size, too large). The integrity check
+        // cannot run; this candidate is unusable, so the caller may try the
+        // next older one.
+        Err(GetError::Missing | GetError::Invalid(_)) => {
+            log::err(&format!(
+                "db restore: {} is missing or invalid; trying the next older backup",
+                candidate.key
+            ));
+            return Attempt::Invalid;
+        }
+        Err(GetError::Aborted) => return Attempt::Aborted,
+        // A transport/local failure is different: falling back could
+        // silently downgrade the volume on a transient error.
+        Err(e) => {
+            log::err(&format!("db restore: download failed ({e})"));
+            return Attempt::Failed;
+        }
+        Ok(()) => {}
     }
-    let imported = super::sqlite::import(&staged, &cfg.db_path);
+    let imported = super::sqlite::import(&staged, &cfg.db_path, abort);
     let _ = std::fs::remove_file(&staged);
     match imported {
         Ok(()) => {
@@ -288,6 +309,7 @@ fn restore_object(
         }
         Err(super::sqlite::ImportError::Invalid) => Attempt::Invalid,
         Err(super::sqlite::ImportError::Local) => Attempt::Failed,
+        Err(super::sqlite::ImportError::Aborted) => Attempt::Aborted,
     }
 }
 
@@ -416,6 +438,82 @@ mod tests {
         cfg.db_path = db_path;
         adopt_lineage(&cfg, || false);
         assert!(lineage::read(&cfg.db_path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing newest object is a definitive invalid candidate: restore
+    /// must try the next older backup, not brick the boot. A transport
+    /// failure keeps the fail-closed behavior (see the test above).
+    #[test]
+    fn restore_falls_through_a_missing_newest_object() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!("vw-sup-rmiss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.sqlite3");
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        conn.execute_batch("CREATE TABLE restored (v TEXT); INSERT INTO restored VALUES ('new');")
+            .unwrap();
+        drop(conn);
+        let bytes = std::fs::read(&source).unwrap();
+        let manifest = format!(
+            "v1\n1 sqlite-1.sqlite3 {}\n2 sqlite-2.sqlite3 1\n",
+            bytes.len()
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = bytes.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("");
+                // Presigned URLs carry a query string; route on the path.
+                let path = path.split('?').next().unwrap_or(path);
+                let (status, body) = if path.ends_with("/manifest") {
+                    ("200 OK", manifest.clone().into_bytes())
+                } else if path.ends_with("/sqlite-2.sqlite3") {
+                    ("404 Not Found", Vec::new())
+                } else if path.ends_with("/sqlite-1.sqlite3") {
+                    ("200 OK", body.clone())
+                } else {
+                    ("404 Not Found", Vec::new())
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(&body);
+            }
+        });
+
+        let sync = SyncConfig::new(
+            "r2:vw-restore-missing".into(),
+            "id".into(),
+            "secret".into(),
+            format!("http://{addr}"),
+            Duration::from_secs(60),
+        )
+        .expect("valid test remote");
+        let mut cfg = support::cfg_with_sync(sync);
+        cfg.restore = true;
+        cfg.db_path = dir.join("live.sqlite3").to_string_lossy().into_owned();
+
+        assert_eq!(restore_if_empty(&cfg, || false), RestoreOutcome::Ready);
+        let live = rusqlite::Connection::open(&cfg.db_path).unwrap();
+        let value: String = live
+            .query_row("SELECT v FROM restored LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "new");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

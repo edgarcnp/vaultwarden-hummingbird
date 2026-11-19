@@ -27,6 +27,7 @@ jobs:
   build:
     name: build/${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +83,7 @@ jobs:
     name: manifest
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       digest: ${{ steps.push-manifest.outputs.digest }}
       image: ${{ steps.image.outputs.image }}
@@ -118,6 +120,7 @@ jobs:
     name: provenance
     needs: manifest
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       # The attestation is minted with the workflow's OIDC token and
       # pushed to ghcr.io as a referrers manifest on the attested tag, so
@@ -146,6 +149,7 @@ jobs:
     name: sbom
     needs: manifest
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       attestations: write
@@ -210,6 +214,7 @@ jobs:
     name: prune
     needs: manifest
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

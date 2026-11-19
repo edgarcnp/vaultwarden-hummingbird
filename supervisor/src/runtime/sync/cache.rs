@@ -7,12 +7,19 @@
 //! remote manifest stays the authority for content.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-use crate::util::make_private;
+use crate::util::fs::{read_capped, write_atomic};
 
-/// On the data volume, outside the synced set (the allowlist enumerates
+/// On the data root, outside the synced set (the allowlist enumerates
 /// concrete paths, and a dotfile is not one of them).
-pub(super) const CACHE_PATH: &str = "/data/.sync-cache";
+const CACHE_NAME: &str = ".sync-cache";
+/// A corrupt/hostile cache must not exhaust PID 1's memory.
+const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
+fn cache_path(root: &Path) -> PathBuf {
+    root.join(CACHE_NAME)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cached {
@@ -32,8 +39,9 @@ impl Cache {
     /// Load the cache; any problem (missing, unreadable, malformed, an
     /// older format) just yields an empty cache — the next push hashes and
     /// rewrites it.
-    pub(super) fn load() -> Self {
-        std::fs::read_to_string(CACHE_PATH)
+    pub(super) fn load(root: &Path) -> Self {
+        let path = cache_path(root);
+        read_capped(&path.to_string_lossy(), MAX_CACHE_BYTES)
             .map(|text| Self::parse(&text))
             .unwrap_or_default()
     }
@@ -105,8 +113,9 @@ impl Cache {
     }
 
     /// Persist the cache. Best-effort: a failed write only means the next
-    /// push re-hashes.
-    pub(super) fn save(&self) {
+    /// push re-hashes. Atomic and 0600: a symlink at the cache path is
+    /// replaced, never followed.
+    pub(super) fn save(&self, root: &Path) {
         if !self.dirty {
             return;
         }
@@ -117,11 +126,11 @@ impl Cache {
                 cached.sha256, cached.size, cached.mtime, cached.ctime, rel
             ));
         }
-        if std::fs::write(CACHE_PATH, out).is_ok()
-            && let Err(e) = make_private(CACHE_PATH)
-        {
+        let path = cache_path(root);
+        if let Err(e) = write_atomic(&path.to_string_lossy(), out.as_bytes(), 0o600) {
             crate::util::log::err(&format!(
-                "state sync: cannot restrict the hash cache {CACHE_PATH} ({e})"
+                "state sync: cannot save the hash cache {} ({e})",
+                crate::util::log::sanitize(&path.to_string_lossy())
             ));
         }
     }

@@ -41,6 +41,7 @@ use std::path::Path;
 
 use crate::config::{SYNC_TIMEOUT, SyncConfig};
 use crate::s3::{Client, Expect, Listed, MAX_SYNC_OBJECT_BYTES};
+use crate::util::fs::{create_real_dirs, read_capped, write_atomic};
 use crate::util::hash::sha256_file;
 use crate::util::log;
 
@@ -169,14 +170,18 @@ fn repair_path(root: &Path) -> std::path::PathBuf {
     root.join(".sync-repair")
 }
 
+/// The repair list is a sidecar, not user input: cap and no-follow it.
+const MAX_REPAIR_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_repair(root: &Path) -> BTreeSet<String> {
-    std::fs::read_to_string(repair_path(root))
+    read_capped(&repair_path(root).to_string_lossy(), MAX_REPAIR_BYTES)
         .map(|text| text.lines().map(str::to_string).collect())
         .unwrap_or_default()
 }
 
 /// Rewrite the repair list; an empty list removes the file. Best-effort:
-/// a failed write only means the next boot re-computes it.
+/// a failed write only means the next boot re-computes it. Atomic, so a
+/// symlink at the sidecar path is replaced, never followed.
 fn write_repair(root: &Path, rels: &BTreeSet<String>) {
     let path = repair_path(root);
     if rels.is_empty() {
@@ -186,39 +191,16 @@ fn write_repair(root: &Path, rels: &BTreeSet<String>) {
     let mut text = String::new();
     for rel in rels {
         // A path cannot be represented in a line-oriented file if it
-        // contains a newline; such a name is pathological and is skipped.
-        if rel.contains('\n') {
+        // contains a control character; such a name is pathological.
+        if rel.chars().any(char::is_control) {
             continue;
         }
         text.push_str(rel);
         text.push('\n');
     }
-    if let Err(e) = std::fs::write(&path, text) {
+    if let Err(e) = write_atomic(&path.to_string_lossy(), text.as_bytes(), 0o600) {
         log::err(&format!("state sync: cannot record the repair list ({e})"));
     }
-}
-
-/// The local shadow of what this volume last uploaded while the bucket had
-/// no usable manifest: keeps a degraded run from re-uploading the whole
-/// set every tick. Never uploaded (a dotfile outside the synced set).
-fn shadow_path(root: &Path) -> std::path::PathBuf {
-    root.join(".sync-pending-manifest")
-}
-
-fn load_shadow(root: &Path) -> Option<Manifest> {
-    Manifest::parse(&std::fs::read_to_string(shadow_path(root)).ok()?).ok()
-}
-
-fn store_shadow(root: &Path, manifest: &Manifest) {
-    if let Err(e) = std::fs::write(shadow_path(root), manifest.render()) {
-        log::err(&format!(
-            "state sync: cannot record the pending manifest ({e})"
-        ));
-    }
-}
-
-fn remove_shadow(root: &Path) {
-    let _ = std::fs::remove_file(shadow_path(root));
 }
 
 /// Bucket-relative synced files that are not present locally, over the
@@ -310,9 +292,8 @@ fn reconcile_objects(
         if local.exists() {
             continue;
         }
-        if let Some(parent) = local.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
+        let rel_parent = Path::new(&rel).parent().unwrap_or_else(|| Path::new(""));
+        if create_real_dirs(root, rel_parent).is_err() {
             continue;
         }
         let key = format!("{}{}", cfg.prefix(), object_key(&rel, &version.sha256));
@@ -325,9 +306,15 @@ fn reconcile_objects(
         match client.get(&key, &local, expect, abort) {
             Ok(()) => {
                 recovered += 1;
-                log::info(&format!("state sync: recovered unreferenced {rel}"));
+                log::info(&format!(
+                    "state sync: recovered unreferenced {}",
+                    log::sanitize(&rel)
+                ));
             }
-            Err(e) => log::err(&format!("state sync: recovery of {rel} failed ({e})")),
+            Err(e) => log::err(&format!(
+                "state sync: recovery of {} failed ({e})",
+                log::sanitize(&rel)
+            )),
         }
     }
 
@@ -353,13 +340,15 @@ fn reconcile_objects(
             }
             if root.join(rel).exists() {
                 log::err(&format!(
-                    "state sync: the bucket no longer holds the current copy of {rel}; \
-                     re-uploading it on the next push"
+                    "state sync: the bucket no longer holds the current copy of {}; \
+                     re-uploading it on the next push",
+                    log::sanitize(rel)
                 ));
                 repair.insert(rel.clone());
             } else {
                 log::err(&format!(
-                    "state sync: the bucket no longer holds {rel} and no local copy exists"
+                    "state sync: the bucket no longer holds {} and no local copy exists",
+                    log::sanitize(rel)
                 ));
             }
         }
@@ -396,7 +385,7 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
     };
     // A partial left by a dead transfer must not be resumed against
     // different content; every boot starts clean.
-    let cleared = clear_partials(root);
+    let cleared = clear_partials(root, cfg.state_file.as_deref());
     if cleared > 0 {
         log::info(&format!(
             "state sync: removed {cleared} stale partial download(s)"
@@ -461,7 +450,9 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
     let mut kept = 0usize;
     for target in targets {
         if abort() {
-            return true;
+            // The pull is incomplete; false is the honest result (the boot
+            // caller ignores it, but the contract is not "success").
+            return false;
         }
         if !is_synced_file(&target.rel, cfg.state_file.as_deref()) {
             log::err(&format!(
@@ -476,11 +467,14 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
             kept += 1;
             continue;
         }
-        if let Some(parent) = Path::new(&local).parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
+        // Reject a symlinked parent component: a bucket-controlled path must
+        // never redirect a supervisor write outside the data root.
+        let rel_parent = Path::new(&target.rel)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        if let Err(e) = create_real_dirs(root, rel_parent) {
             log::err(&format!(
-                "state sync: cannot create {}: {e}",
+                "state sync: cannot create the parent of {}: {e}",
                 log::sanitize(&target.rel)
             ));
             ok = false;
@@ -501,7 +495,9 @@ fn restore_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> 
             Some(sha256) => format!("{}{}", cfg.prefix(), object_key(&target.rel, sha256)),
             None => legacy.clone(),
         };
-        let primary_result = client.get(&primary, &local, expect, &abort);
+        let primary_result = client
+            .get(&primary, &local, expect, &abort)
+            .map_err(|e| anyhow::anyhow!("{e}"));
         let result = match primary_result {
             Ok(()) => Ok(()),
             Err(primary_err) if target.sha256.is_some() && primary != legacy => {
@@ -568,8 +564,7 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
         Ok(None) => (Manifest::default(), false),
         Err(e) => {
             // The volume is authoritative: rebuild the manifest from local
-            // content (or the local shadow, so a degraded run does not
-            // re-upload everything every tick).
+            // content, but only after proving the bucket is complete below.
             log::err(&format!(
                 "state sync: cannot read the manifest ({e}); rebuilding it from \
                  local content"
@@ -579,41 +574,34 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
     };
     // A rebuilt manifest must cover everything already in the bucket, or
     // publishing it would orphan the files it omits. When the bucket holds
-    // synced files missing locally, keep the legacy path-keyed layout
-    // (which listing-based pulls can still restore) until a complete pull
-    // succeeds. A failed listing counts as "cannot prove completeness".
-    let publish = if manifest_loaded {
-        true
-    } else {
+    // synced files missing locally, or the listing itself fails, the
+    // supervisor cannot prove completeness. It must not write mutable
+    // path keys in that state: a changed local file could overwrite a newer
+    // bucket copy. Skip the push until a complete pull/manifest exists.
+    if !manifest_loaded {
         match remote_only_files(&client, cfg, root, &abort) {
-            Some(missing) if missing.is_empty() => true,
+            Some(missing) if missing.is_empty() => {}
             Some(missing) => {
                 log::err(&format!(
-                    "state sync: the bucket holds {} file(s) not present locally; keeping \
-                     the legacy layout this run — restore them before a manifest is \
-                     published",
+                    "state sync: the bucket holds {} file(s) not present locally; refusing \
+                     to push until they are restored (a path-key write could overwrite a \
+                     newer copy)",
                     missing.len()
                 ));
-                false
+                return false;
             }
             None => {
                 log::err(
-                    "state sync: cannot list the bucket to rebuild the manifest safely; \
-                     keeping the legacy layout this run",
+                    "state sync: cannot list the bucket to prove it is complete; refusing \
+                     to push this run",
                 );
-                false
+                return false;
             }
         }
-    };
-    // In the legacy window the local shadow (what this volume last
-    // uploaded) drives the skip decisions; otherwise the bucket manifest.
-    let mut manifest = if publish {
-        bucket_manifest
-    } else {
-        load_shadow(root).unwrap_or_default()
-    };
+    }
+    let mut manifest = bucket_manifest;
     let mut repair = read_repair(root);
-    let mut cache = Cache::load();
+    let mut cache = Cache::load(root);
     let mut pushed = 0usize;
     let mut failed = false;
     for rel in &files {
@@ -624,12 +612,26 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(e) => {
-                log::err(&format!("state sync: cannot size {rel}: {e}"));
+                log::err(&format!(
+                    "state sync: cannot size {}: {e}",
+                    log::sanitize(rel)
+                ));
                 failed = true;
                 continue;
             }
         };
         let size = meta.len();
+        // The restore path enforces this cap. Uploading a larger object
+        // would create a manifest entry that can never be restored.
+        if size > MAX_SYNC_OBJECT_BYTES {
+            log::err(&format!(
+                "state sync: {} is {size} bytes, over the {MAX_SYNC_OBJECT_BYTES}-byte \
+                 restore cap; not uploaded",
+                log::sanitize(rel)
+            ));
+            failed = true;
+            continue;
+        }
         let mtime = mtime_nanos(&meta);
         let ctime = ctime_nanos(&meta);
         // A file the boot pass found missing or changed on the bucket is
@@ -651,7 +653,10 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
         let hash = match sha256_file(&path) {
             Ok(hash) => hash,
             Err(e) => {
-                log::err(&format!("state sync: cannot hash {rel}: {e}"));
+                log::err(&format!(
+                    "state sync: cannot hash {}: {e}",
+                    log::sanitize(rel)
+                ));
                 failed = true;
                 continue;
             }
@@ -665,13 +670,8 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
             continue;
         }
         // Content-addressed and immutable: the previous copy keeps its own
-        // key, so a failed manifest write can never destroy it. While the
-        // legacy layout is kept, the path key keeps listing pulls working.
-        let key = if publish {
-            format!("{}{}", cfg.prefix(), object_key(rel, &hash))
-        } else {
-            format!("{}{rel}", cfg.prefix())
-        };
+        // key, so a failed manifest write can never destroy it.
+        let key = format!("{}{}", cfg.prefix(), object_key(rel, &hash));
         match client.put(&key, &path, &abort) {
             Ok(()) => {
                 manifest.insert(
@@ -694,30 +694,21 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
         }
     }
     if pushed > 0 {
-        if publish {
-            match store_manifest(&client, cfg, &manifest, &abort) {
-                Ok(()) => {
-                    remove_shadow(root);
-                    log::info(&format!(
-                        "state sync: push ok ({}, {pushed} new/changed)",
-                        cfg.remote
-                    ));
-                }
-                Err(e) => {
-                    log::err(&format!(
-                        "state sync: pushed {pushed} object(s) but cannot publish the manifest \
-                         ({e}); the objects stay unreferenced until a later run re-uploads \
-                         them (a shutdown flush may exit first)"
-                    ));
-                    failed = true;
-                }
+        match store_manifest(&client, cfg, &manifest, &abort) {
+            Ok(()) => {
+                log::info(&format!(
+                    "state sync: push ok ({}, {pushed} new/changed)",
+                    cfg.remote
+                ));
             }
-        } else {
-            store_shadow(root, &manifest);
-            log::info(&format!(
-                "state sync: pushed {pushed} object(s) in the legacy layout ({})",
-                cfg.remote
-            ));
+            Err(e) => {
+                log::err(&format!(
+                    "state sync: pushed {pushed} object(s) but cannot publish the manifest \
+                     ({e}); the objects stay unreferenced until a later run re-uploads \
+                     them (a shutdown flush may exit first)"
+                ));
+                failed = true;
+            }
         }
     }
     // Forget repairs for files this volume no longer has (nothing to
@@ -725,7 +716,7 @@ fn sync_state_at(root: &Path, cfg: &SyncConfig, abort: impl Fn() -> bool) -> boo
     let present: BTreeSet<&String> = files.iter().collect();
     repair.retain(|rel| present.contains(rel));
     write_repair(root, &repair);
-    cache.save();
+    cache.save(root);
     !failed
 }
 
@@ -1039,24 +1030,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A bucket that is not provably complete must not be written to: the
+    /// old fallback wrote mutable path keys and could overwrite newer data.
     #[test]
-    fn shadow_manifest_round_trips() {
-        let root = std::env::temp_dir().join(format!("vw-sup-shadow-{}", std::process::id()));
+    fn degraded_bucket_is_never_written_to() {
+        let root = std::env::temp_dir().join(format!("vw-sup-degraded-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        assert!(load_shadow(&root).is_none());
-        let mut manifest = Manifest::default();
-        manifest.insert(
-            "rsa_key".into(),
-            Entry {
-                size: 3,
-                sha256: "c".repeat(64),
-            },
+        std::fs::write(root.join("rsa_key"), b"new-local").unwrap();
+
+        let listing = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Name>vw</Name><Prefix></Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys>\
+             <IsTruncated>false</IsTruncated>\
+             <Contents><Key>attachments/remote-only</Key>\
+             <LastModified>2026-09-28T00:00:00.000Z</LastModified>\
+             <ETag>\"x\"</ETag><Size>3</Size><StorageClass>STANDARD</StorageClass></Contents>\
+             </ListBucketResult>"
+            .to_vec();
+        let (endpoint, seen) = fake_bucket(move |line| {
+            let path = req_path(line);
+            if line.starts_with("GET") && path.ends_with("/manifest") {
+                (404, Vec::new())
+            } else if line.starts_with("GET") && line.contains("list-type=2") {
+                (200, listing.clone())
+            } else if line.starts_with("PUT") {
+                (200, Vec::new())
+            } else {
+                (404, Vec::new())
+            }
+        });
+        assert!(
+            !sync_state_at(&root, &sync_cfg(&endpoint), || false),
+            "a degraded bucket must refuse the push"
         );
-        store_shadow(&root, &manifest);
-        assert_eq!(load_shadow(&root), Some(manifest));
-        remove_shadow(&root);
-        assert!(load_shadow(&root).is_none());
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            !seen.iter().any(|line| line.starts_with("PUT")),
+            "no upload may reach a bucket that is not provably complete: {seen:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
