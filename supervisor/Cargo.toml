@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
 dotenvy = { version = "0.15.7", default-features = false }
-jiff = { version = "0.2.43", default-features = false, features = ["std"] }
+jiff = { version = "1.0.0", default-features = false, features = ["std"] }
 nix = { version = "0.31.3", default-features = false, features = ["signal"] }
 rusqlite = { version = "0.42.0", default-features = false, features = ["bundled"] }
 rusty-s3 = { version = "0.11.0", default-features = false, features = ["rustcrypto", "xml"] }
