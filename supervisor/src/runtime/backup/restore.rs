@@ -212,7 +212,7 @@ pub fn adopt_lineage(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
     match load_manifest(&s3, cfg, &abort) {
         Ok(Some(manifest)) if !manifest.is_empty() => {
             let generation = manifest.latest();
-            lineage::write(&cfg.state_dir, generation);
+            lineage::write(&cfg.state_dir, &cfg.sidecar_key(), generation);
             log::info(&format!(
                 "db backup: adopted generation {generation} as this database's lineage"
             ));
@@ -223,7 +223,7 @@ pub fn adopt_lineage(cfg: &DbBackupConfig, abort: impl Fn() -> bool) {
             if let Ok(mut listed) = list_objects(&s3, cfg, &abort)
                 && let Some((name, _)) = listed.pop()
             {
-                lineage::write_name(&cfg.state_dir, &name);
+                lineage::write_name(&cfg.state_dir, &cfg.sidecar_key(), &name);
                 log::info(&format!(
                     "db backup: adopted {name} as this database's lineage"
                 ));
@@ -300,10 +300,10 @@ fn restore_object(
     match imported {
         Ok(()) => {
             match candidate.generation {
-                Some(generation) => lineage::write(&cfg.state_dir, generation),
+                Some(generation) => lineage::write(&cfg.state_dir, &cfg.sidecar_key(), generation),
                 None => {
                     let name = candidate.key.rsplit('/').next().unwrap_or(&candidate.key);
-                    lineage::write_name(&cfg.state_dir, name);
+                    lineage::write_name(&cfg.state_dir, &cfg.sidecar_key(), name);
                 }
             }
             Attempt::Imported
@@ -438,7 +438,7 @@ mod tests {
         cfg.restore = true;
         cfg.db_path = db_path;
         adopt_lineage(&cfg, || false);
-        assert!(lineage::read(&cfg.state_dir).is_none());
+        assert!(lineage::read(&cfg.state_dir, &cfg.sidecar_key()).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

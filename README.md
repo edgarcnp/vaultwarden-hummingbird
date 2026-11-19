@@ -89,7 +89,7 @@ If `/data` and `/state` are real volumes, you're done. Keep them together: `/sta
 
 Named volumes inherit the image's ownership and modes. If you bind-mount host directories instead, they must be owned by uid/gid `65532` (and labeled `:Z` on an SELinux host); otherwise the supervisor refuses to boot rather than run with a state directory the vault could write.
 
-If your platform wipes them on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default. The key needs object read/write **and list** (`ListObjectsV2`) for first-run, restore, and reconciliation; bucket create/head are never called.
+If your platform wipes them on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default. The key needs object read/write/**delete** and bucket list (`ListObjectsV2`) for first-run, restore, reconciliation, deletion GC, and backup pruning; bucket create/head are never called. Plaintext HTTP is refused for a remote endpoint; set `SUPERVISOR_S3_ALLOW_HTTP=true` only on a trusted private network.
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -97,13 +97,19 @@ SUPERVISOR_S3_ACCESS_KEY_ID=...
 SUPERVISOR_S3_SECRET_ACCESS_KEY=...
 SUPERVISOR_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 # SUPERVISOR_S3_SYNC_INTERVAL=3600
+# Optional transport: region, URL style, a private CA (under /state), and
+# plaintext HTTP for a trusted network only. See .env.example.
 ```
+
+If the endpoint has no scheme, HTTPS is used. A remote `http://` endpoint is refused unless `SUPERVISOR_S3_ALLOW_HTTP=true`; loopback endpoints are always allowed.
 
 - At boot it restores what is missing, but never overwrites a newer local file.
 - It saves after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The final save is budgeted (two minutes; fifteen seconds after a second stop signal) so a slow bucket can't hold the container open.
 - It saves the tailnet identity, the vault's RSA signing key, your admin `config.json`, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/state` to ride along; the container says so at boot when it doesn't.
-- Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. Uploads are content-addressed, so an interrupted push can never replace the copy the last good manifest names, and a new file whose manifest write was interrupted is recovered on the next boot. A quiet node costs one manifest read per push and at most one listing per boot (a legacy bucket may list twice), not a round of uploads.
-- A push is refused while the bucket cannot be proven complete (for example after a partial restore): the fallback path-key layout is never written, because it could overwrite a newer bucket copy. Deletions are not propagated yet; a deleted file can be restored from the bucket until the tombstone/GC policy lands. Keep the bucket private (it holds secrets and your files) and run one container against it.
+- Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. Uploads are content-addressed, so an interrupted push can never replace the copy the last good manifest names, and a new file whose manifest write was interrupted is recovered on the next boot. A quiet node costs a manifest and tombstone read plus one listing per push (the GC pass), and at most one listing per boot (a legacy bucket may list twice), not a round of uploads.
+- A push is refused while the bucket cannot be proven complete (for example after a partial restore): the fallback path-key layout is never written, because it could overwrite a newer bucket copy.
+- A user file deleted locally is recorded as a tombstone only after 24 hours of consistent absence, so a transient restore failure or a lost volume cannot delete bucket data. The node identity, signing keys, and certificates are never tombstoned, even after the grace. A disappearance of every manifest file at once, or of more than a quarter of a large set, is refused as probable volume loss; delete in smaller batches, or clear the bucket to reset a vault intentionally. Tombstoned paths are never restored, their objects are garbage-collected after another day, and a file that reappears locally clears its tombstone on the next push. Tombstones are pruned after 30 days. The bucket supports up to about 100k objects per prefix; beyond that a listing fails closed rather than truncating.
+- Keep the bucket private (it holds secrets and your files) and run one container against it.
 
 Rather stay fully ephemeral? Use `TAILSCALE_STATE_FILE=mem:` with an `ephemeral=true` auth key: the container joins as a fresh node every boot and devices log in again. On a PaaS with temporary storage, also set `SUPERVISOR_EPHEMERAL=true` (or use `mem:`; a tmpfs `/data` or vaultwarden's `I_REALLY_WANT_VOLATILE_STORAGE` acknowledgement is detected too). In that mode an explicitly configured but unusable S3/backup setting refuses the boot instead of quietly losing persistence; on a real volume the same error is logged and the feature degrades. Vaultwarden also tries to detect a non-persistent `/data`, but how well that works depends on the mount — treat `/data` as gone unless it's a real volume or sync is on.
 
@@ -118,7 +124,7 @@ SUPERVISOR_DB_BACKUP=true
 ```
 
 - A backup is a clean point-in-time copy (`VACUUM INTO`) taken while the vault runs; it doesn't pause or lock the vault (the image keeps WAL mode on, so the copy never blocks the vault).
-- Backups land under `db/` with a timestamp, and the oldest are deleted beyond `KEEP`. An unchanged database isn't re-uploaded. The last pushed dump is kept as `db-backups.last` on `/state` for the unchanged comparison; it is never uploaded and costs one extra database-sized file on the state volume. If the container dies mid-backup you lose one cycle, never gain a broken backup.
+- Backups land under `db/` with a timestamp, and the oldest are deleted beyond `KEEP`. An unchanged database isn't re-uploaded: a small `db-backups-<id>.last` sidecar on `/state` remembers the last pushed dump's SHA-256, so no second database-sized copy is kept. The sidecar is keyed by the database, remote, and endpoint, so switching any of them starts clean. If the container dies mid-backup you lose one cycle, never gain a broken backup.
 - A graceful stop takes one more backup after the vault exits, so a normal redeploy carries the latest sessions and devices. Give the orchestrator time to drain (compose's `stop_grace_period`).
 - `SUPERVISOR_DB_BACKUP_RESTORE=true` loads the newest backup at boot, but only into a database it can prove is empty — if the newest copy is missing or fails its integrity/size/hash check it tries the next one, and it never overwrites existing data. A transport or local failure refuses the boot instead of silently downgrading the volume; an unusable S3 configuration also refuses (it never boots fresh behind a requested restore). If it can't tell (an unreadable database, a bucket it can't list), it refuses to start rather than guess.
 - Prefer to restore by hand? Stop the vault and replace `/data/db.sqlite3` with the dump.

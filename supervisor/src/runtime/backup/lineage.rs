@@ -10,13 +10,24 @@
 
 use std::path::Path;
 
-use crate::util::fs::{read_capped, write_atomic};
+use crate::util::fs::{is_real_file, read_capped, write_atomic};
 use crate::util::log;
 
 /// On the supervisor-only state volume (not the vault-writable data
 /// volume): the sidecar records the newest manifest generation this
-/// lineage has produced (after a push) or adopted (after a restore).
-pub(super) fn sidecar_path(state_dir: &str) -> String {
+/// lineage has produced (after a push) or adopted (after a restore). Keyed
+/// by the database and remote, so changing either starts a new identity.
+pub(super) fn sidecar_path(state_dir: &str, key: &str) -> String {
+    Path::new(state_dir)
+        .join(format!("db-backups-{key}.state"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The pre-keying sidecar (one database, one remote); read once so an
+/// existing deployment keeps its lineage, then superseded by the keyed
+/// file on the next write.
+fn legacy_path(state_dir: &str) -> String {
     Path::new(state_dir)
         .join("db-backups.state")
         .to_string_lossy()
@@ -34,10 +45,18 @@ pub(super) enum Known {
 }
 
 /// The recorded lineage, if any.
-pub(super) fn read(state_dir: &str) -> Option<Known> {
+pub(super) fn read(state_dir: &str, key: &str) -> Option<Known> {
     // The sidecar is a generation or a legacy object name; 1 KiB is ample.
-    // A symlink or an oversized/corrupt file is "no usable lineage".
-    let text = read_capped(&sidecar_path(state_dir), 1024).ok()?;
+    // A symlink or an oversized/corrupt file is "no usable lineage". A
+    // corrupt keyed file must not silently fall back to a stale legacy
+    // record.
+    let path = sidecar_path(state_dir, key);
+    let path = if is_real_file(&path) {
+        path
+    } else {
+        legacy_path(state_dir)
+    };
+    let text = read_capped(&path, 1024).ok()?;
     let value = text.trim();
     if value.is_empty() {
         return None;
@@ -51,18 +70,18 @@ pub(super) fn read(state_dir: &str) -> Option<Known> {
 /// Record the newest generation for this lineage. Best-effort: a failed
 /// write is logged loudly — the next push refuses (missing continuity)
 /// rather than guess, and RESTORE=true adoption can re-establish it.
-pub(super) fn write(state_dir: &str, generation: u64) {
-    write_text(state_dir, &format!("{generation}\n"));
+pub(super) fn write(state_dir: &str, key: &str, generation: u64) {
+    write_text(state_dir, key, &format!("{generation}\n"));
 }
 
 /// Record a legacy object name (pre-manifest bucket): resolved against
 /// the listing on the next tick.
-pub(super) fn write_name(state_dir: &str, name: &str) {
-    write_text(state_dir, &format!("{name}\n"));
+pub(super) fn write_name(state_dir: &str, key: &str, name: &str) {
+    write_text(state_dir, key, &format!("{name}\n"));
 }
 
-fn write_text(state_dir: &str, text: &str) {
-    let path = sidecar_path(state_dir);
+fn write_text(state_dir: &str, key: &str, text: &str) {
+    let path = sidecar_path(state_dir, key);
     // Atomic replace: a symlink at the sidecar path is replaced, never
     // followed, and the 0600 mode is exact.
     if let Err(e) = write_atomic(&path, text.as_bytes(), 0o600) {
@@ -125,21 +144,35 @@ mod tests {
     #[test]
     fn sidecar_round_trips_generations_and_legacy_names() {
         let dir = scratch("roundtrip");
-        assert!(read(&dir).is_none(), "no sidecar yet");
-        write(&dir, 12);
-        assert!(matches!(read(&dir), Some(Known::Generation(12))));
-        write(&dir, 13);
-        assert!(matches!(read(&dir), Some(Known::Generation(13))));
+        assert!(read(&dir, "aabb").is_none(), "no sidecar yet");
+        write(&dir, "aabb", 12);
+        assert!(matches!(read(&dir, "aabb"), Some(Known::Generation(12))));
+        write(&dir, "aabb", 13);
+        assert!(matches!(read(&dir, "aabb"), Some(Known::Generation(13))));
 
         // A pre-manifest sidecar (a bare object name) still parses; the
         // caller resolves it against the manifest.
-        write_name(&dir, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
-        match read(&dir) {
+        write_name(&dir, "aabb", "sqlite-20260901T000000Z-aabbccdd.sqlite3");
+        match read(&dir, "aabb") {
             Some(Known::LegacyName(name)) => {
                 assert_eq!(name, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
             }
             _ => panic!("expected a legacy name"),
         }
+        // A different identity starts clean rather than inheriting it.
+        assert!(read(&dir, "ccdd").is_none(), "sidecars are per identity");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pre-keying sidecar is read once, so an upgraded deployment keeps
+    /// its lineage; the next write uses the keyed name.
+    #[test]
+    fn the_legacy_sidecar_is_adopted_once() {
+        let dir = scratch("legacy");
+        std::fs::write(legacy_path(&dir), b"9\n").unwrap();
+        assert!(matches!(read(&dir, "aabb"), Some(Known::Generation(9))));
+        write(&dir, "aabb", 10);
+        assert!(matches!(read(&dir, "aabb"), Some(Known::Generation(10))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -147,8 +180,8 @@ mod tests {
     fn write_failure_is_loud_but_nonfatal() {
         // parent dir does not exist: write logs, read stays None
         let dir = "/nonexistent-vw-sup-lin";
-        write(dir, 1);
-        write_name(dir, "sqlite-20260901T000000Z-aabbccdd.sqlite3");
-        assert!(read(dir).is_none());
+        write(dir, "aabb", 1);
+        write_name(dir, "aabb", "sqlite-20260901T000000Z-aabbccdd.sqlite3");
+        assert!(read(dir, "aabb").is_none());
     }
 }

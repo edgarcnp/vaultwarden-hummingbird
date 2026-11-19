@@ -85,6 +85,15 @@ impl Manifest {
         self.entries.insert(rel, entry);
     }
 
+    /// Remove a file (a tombstone supersedes its entry).
+    pub(super) fn remove(&mut self, rel: &str) -> Option<Entry> {
+        self.entries.remove(rel)
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &Entry)> {
         self.entries.iter()
     }

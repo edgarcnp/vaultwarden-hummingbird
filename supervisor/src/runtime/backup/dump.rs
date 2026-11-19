@@ -83,7 +83,8 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     };
     // The local lineage: current sidecars hold a generation; a pre-manifest
     // sidecar holds an object name, resolved against the manifest now.
-    let known = resolve_known(lineage::read(&cfg.state_dir), &manifest);
+    let sidecar = cfg.sidecar_key();
+    let known = resolve_known(lineage::read(&cfg.state_dir, &sidecar), &manifest);
     if matches!(lineage::verdict(known, manifest.latest()), Verdict::Refuse) {
         log::err(&format!(
             "db backup: the bucket holds a newer backup than this database's lineage; \
@@ -154,11 +155,11 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     // detected while the dump stays byte-identical; the next changed dump
     // replaces it, and restore falls back to the next older entry until
     // then.)
-    if upload_is_redundant(
-        known,
-        manifest.latest(),
-        unchanged::is_repeat(&staged, &cfg.state_dir),
-    ) {
+    let fingerprint = unchanged::fingerprint(&staged);
+    let repeat = fingerprint
+        .as_deref()
+        .is_some_and(|hash| unchanged::is_repeat(&cfg.state_dir, &sidecar, hash));
+    if upload_is_redundant(known, manifest.latest(), repeat) {
         let _ = std::fs::remove_file(&staged);
         log::info("db backup: dump is identical to the newest backup; upload skipped");
         return;
@@ -180,8 +181,13 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     let evicted = manifest.retain(cfg.keep);
     match store_manifest(&s3, cfg, &manifest, &abort) {
         Ok(()) => {
-            lineage::write(&cfg.state_dir, generation);
-            unchanged::retain(&staged, &cfg.state_dir);
+            lineage::write(&cfg.state_dir, &sidecar, generation);
+            match &fingerprint {
+                Some(hash) => unchanged::retain(&staged, &cfg.state_dir, &sidecar, hash),
+                None => {
+                    let _ = std::fs::remove_file(&staged);
+                }
+            }
             log::info(&format!(
                 "db backup: pushed {key} ({size} bytes, generation {generation})"
             ));

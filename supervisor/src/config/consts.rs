@@ -42,6 +42,11 @@ pub const BACKUP_FIRST_DELAY: Duration = Duration::from_secs(60);
 /// loses the signing key (every session revoked).
 pub const SYNC_FIRST_DELAY: Duration = Duration::from_secs(60);
 
+/// Extra wait for the vault's signing key on the first push: a slow vault
+/// must not make the first backup keyless. Bounded so a failed vault cannot
+/// hold the maintenance thread indefinitely.
+pub const SYNC_RSA_WAIT: Duration = Duration::from_secs(120);
+
 // Default cadences/counts; seconds where applicable.
 pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;
 pub const BACKUP_INTERVAL_DEFAULT: u64 = 21600;

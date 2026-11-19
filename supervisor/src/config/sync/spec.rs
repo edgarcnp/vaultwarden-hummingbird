@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 
-use crate::s3::RemoteSpec;
+use crate::s3::{BucketStyle, RemoteSpec};
 
 /// S3-backed persistence for the durable /data set (opt-in): the same
 /// tailnet node, vaultwarden RSA keys, and user content survive ephemeral
@@ -40,14 +40,22 @@ impl SyncConfig {
         endpoint: String,
         interval: Duration,
     ) -> anyhow::Result<Self> {
+        let endpoint = endpoint.trim();
         if endpoint.is_empty() {
             bail!(
                 "SUPERVISOR_S3_ENDPOINT is required; every S3-compatible provider \
                  (AWS included) is configured by its endpoint"
             );
         }
+        // A bare host gets the safe scheme; an explicit one is validated.
+        let endpoint = if endpoint.contains("://") {
+            endpoint.to_string()
+        } else {
+            format!("https://{endpoint}")
+        };
         // Validate at config resolution, before a boot can depend on it.
-        // The client repeats the parse (defense in depth).
+        // The client repeats the parse and enforces the HTTP policy
+        // (defense in depth).
         let parsed: url::Url = endpoint
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid SUPERVISOR_S3_ENDPOINT: {e}"))?;
@@ -87,6 +95,26 @@ impl SyncConfig {
     /// The sync's bucket-relative key prefix (empty, or ending in `/`).
     pub fn prefix(&self) -> &str {
         &self.target.prefix
+    }
+
+    /// Permit plaintext HTTP to a non-loopback endpoint (opt-in).
+    pub fn set_allow_http(&mut self, allow: bool) {
+        self.target.allow_http = allow;
+    }
+
+    /// A PEM CA bundle replacing the built-in roots.
+    pub fn set_ca_file(&mut self, path: String) {
+        self.target.ca_file = Some(path);
+    }
+
+    /// Override the SigV4 signing region.
+    pub fn set_region(&mut self, region: String) {
+        self.target.region = Some(region);
+    }
+
+    /// Path-style or virtual-hosted bucket addressing.
+    pub fn set_style(&mut self, style: BucketStyle) {
+        self.target.style = style;
     }
 }
 
@@ -129,6 +157,10 @@ fn parse_remote(
         key_id,
         key_secret,
         endpoint,
+        allow_http: false,
+        ca_file: None,
+        region: None,
+        style: BucketStyle::Path,
     })
 }
 
@@ -235,6 +267,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A bare host gets HTTPS; an explicit scheme is preserved.
+    #[test]
+    fn endpoint_defaults_to_https() {
+        let cfg = SyncConfig::new(
+            "r2:vw-state".into(),
+            "id".into(),
+            "secret".into(),
+            "s3.example.invalid".into(),
+            Duration::from_secs(60),
+        )
+        .expect("bare host");
+        assert_eq!(cfg.target.endpoint, "https://s3.example.invalid");
+        let cfg = SyncConfig::new(
+            "r2:vw-state".into(),
+            "id".into(),
+            "secret".into(),
+            "https://s3.example.invalid".into(),
+            Duration::from_secs(60),
+        )
+        .expect("explicit https");
+        assert_eq!(cfg.target.endpoint, "https://s3.example.invalid");
     }
 
     /// No provider is a default: the endpoint is required, AWS included.

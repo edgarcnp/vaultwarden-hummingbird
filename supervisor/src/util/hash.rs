@@ -26,6 +26,13 @@ pub fn sha256_file(path: &str) -> std::io::Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
+/// The lowercase hex SHA-256 of an in-memory byte string.
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex(&hasher.finalize())
+}
+
 /// Lowercase hex of a digest.
 pub fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -53,6 +60,10 @@ mod tests {
         std::fs::write(&path, b"abc").unwrap();
         assert_eq!(
             sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_bytes(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         std::fs::write(&path, b"").unwrap();

@@ -18,7 +18,7 @@ use rusty_s3::actions::CreateMultipartUpload;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use url::Url;
 
-use super::remote::RemoteSpec;
+use super::remote::{BucketStyle, RemoteSpec};
 
 /// Presigned-URL lifetime; must comfortably exceed the per-request
 /// timeout (the request is issued immediately after signing).
@@ -62,13 +62,47 @@ fn resumed_offset(tmp: &str, expected: Option<u64>) -> u64 {
     }
 }
 
-/// Whether a request failure is worth another attempt: transport errors,
-/// 429, and 5xx. Anything else (403, 404, 3xx from `checked`) is
-/// definitive.
+/// Whether a request failure is worth another attempt. Retrying a
+/// definitive answer (bad credentials, missing object, TLS verification,
+/// malformed URI) only delays the failure and multiplies load; retry
+/// transient transport errors and the statuses providers use for overload.
 fn retryable(e: &ureq::Error) -> bool {
     match e {
-        ureq::Error::StatusCode(code) => *code == 429 || (500..600).contains(code),
-        _ => true,
+        ureq::Error::StatusCode(code) => {
+            matches!(*code, 408 | 429 | 500 | 502 | 503 | 504)
+        }
+        ureq::Error::Timeout(_) => true,
+        ureq::Error::Io(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        // HostNotFound, BadUri, Http, Protocol, RedirectFailed: retrying
+        // the same request cannot change the answer.
+        _ => false,
+    }
+}
+
+/// A reader that checks the stop flag before every chunk, so a large
+/// upload body is cancelled promptly instead of running to BODY_TIMEOUT.
+struct AbortReader<'a, R> {
+    inner: R,
+    abort: &'a dyn Fn() -> bool,
+}
+
+impl<R: Read> Read for AbortReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if (self.abort)() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "aborted",
+            ));
+        }
+        self.inner.read(buf)
     }
 }
 
@@ -93,6 +127,64 @@ fn retrying<T>(mut request: impl FnMut() -> Result<T, ureq::Error>) -> Result<T,
     }
 }
 
+/// Read a PEM CA bundle. A file over the cap is refused before parsing, so
+/// a mistaken path to a huge file cannot exhaust PID 1.
+pub fn validate_ca_file(path: &str) -> anyhow::Result<()> {
+    ca_certs(path).map(|_| ())
+}
+
+fn ca_certs(path: &str) -> anyhow::Result<Vec<ureq::tls::Certificate<'static>>> {
+    use std::path::Component;
+
+    const MAX_CA_BYTES: u64 = 1024 * 1024;
+    // The CA decides which server is trusted; it must not live on a
+    // vault-writable volume. Config resolution checks this too; keeping it
+    // here covers direct callers.
+    let candidate = std::path::Path::new(path);
+    let isolated = candidate.is_absolute()
+        && candidate.starts_with(crate::config::SUPERVISOR_STATE)
+        && candidate
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)));
+    if !isolated {
+        bail!(
+            "SUPERVISOR_S3_CA_FILE {path} must live under {}",
+            crate::config::SUPERVISOR_STATE
+        );
+    }
+    let meta = std::fs::metadata(path)
+        .map_err(|e| anyhow!("cannot read SUPERVISOR_S3_CA_FILE {path}: {e}"))?;
+    if !meta.is_file() {
+        bail!("SUPERVISOR_S3_CA_FILE {path} is not a regular file");
+    }
+    if meta.len() > MAX_CA_BYTES {
+        bail!("SUPERVISOR_S3_CA_FILE {path} exceeds the {MAX_CA_BYTES}-byte cap");
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| anyhow!("cannot read SUPERVISOR_S3_CA_FILE {path}: {e}"))?;
+    let certs: Vec<_> = ureq::tls::parse_pem(&bytes)
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+            _ => None,
+        })
+        .collect();
+    if certs.is_empty() {
+        bail!("SUPERVISOR_S3_CA_FILE {path} holds no PEM certificate");
+    }
+    Ok(certs)
+}
+
+/// Whether an endpoint names the local machine (plaintext HTTP is
+/// tolerable there; anywhere else it would expose SigV4 credentials).
+fn loopback(endpoint: &Url) -> bool {
+    match endpoint.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 /// Exponential backoff with jitter derived from the wall clock (no RNG
 /// dependency): 200ms, 400ms, ... plus up to 100ms.
 fn backoff(attempt: u32) -> Duration {
@@ -114,16 +206,16 @@ pub const MAX_SYNC_OBJECT_BYTES: u64 = 1024 * 1024 * 1024;
 /// still decides validity; this only bounds a rogue endpoint.
 pub const MAX_DB_OBJECT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Listing bound: far beyond any real backup/state prefix, mirroring the
-/// old capture cap's intent — a listing this size is treated as failure,
-/// not memory pressure.
-const MAX_LIST_KEYS: usize = 10_000;
+/// Listing bound. The manifest caps at ~40k files; three content-addressed
+/// versions per file plus the legacy keys fit comfortably under 100k. A
+/// larger prefix is treated as failure rather than materializing an
+/// unbounded vector in PID 1.
+const MAX_LIST_KEYS: usize = 100_000;
 
-/// Page bound for one listing. A real page carries up to 1000 keys, so far
-/// fewer pages than this can reach [`MAX_LIST_KEYS`]; the bound exists for
-/// a broken or hostile endpoint that keeps announcing more pages without
-/// content (which would otherwise loop until the request timeout).
-const MAX_LIST_PAGES: usize = 1024;
+/// Page bound for one listing. At 1000 keys/page this covers the key cap
+/// with headroom; the bound also stops a broken endpoint that keeps
+/// announcing more pages without content.
+const MAX_LIST_PAGES: usize = 256;
 
 /// Raw listing-body bound (16 MiB): a page of 1000 keys is a few MiB at
 /// most; anything larger is hostile or broken, and the read stops before
@@ -287,15 +379,23 @@ impl Client {
             .endpoint
             .parse()
             .map_err(|e| anyhow!("invalid S3 endpoint: {e}"))?;
+        if endpoint.scheme() == "http" && !spec.allow_http && !loopback(&endpoint) {
+            bail!(
+                "SUPERVISOR_S3_ENDPOINT {} uses plaintext HTTP; SigV4 credentials \
+                 would cross the network in clear text. Use https, or set \
+                 SUPERVISOR_S3_ALLOW_HTTP=true only on a trusted network",
+                crate::util::log::sanitize(&spec.endpoint)
+            );
+        }
         let endpoint = normalize_endpoint(endpoint);
-        let bucket = Bucket::new(
-            endpoint.clone(),
-            UrlStyle::Path,
-            spec.bucket.clone(),
-            region_for(&endpoint),
-        )
-        .map_err(|e| anyhow!("invalid S3 bucket configuration: {e}"))?;
-        let agent = ureq::Agent::config_builder()
+        let style = match spec.style {
+            BucketStyle::Path => UrlStyle::Path,
+            BucketStyle::VirtualHosted => UrlStyle::VirtualHost,
+        };
+        let region = spec.region.clone().unwrap_or_else(|| region_for(&endpoint));
+        let bucket = Bucket::new(endpoint.clone(), style, spec.bucket.clone(), region)
+            .map_err(|e| anyhow!("invalid S3 bucket configuration: {e}"))?;
+        let mut config = ureq::Agent::config_builder()
             // Per-phase budgets instead of one end-to-end timeout: control
             // phases stay tight while a transfer body gets BODY_TIMEOUT.
             .timeout_resolve(Some(timeout))
@@ -307,9 +407,16 @@ impl Client {
             .timeout_global(None)
             // A presigned URL must never be re-signed by a redirect; a 3xx
             // is then not an error, so every call site checks the status.
-            .max_redirects(0)
-            .build()
-            .new_agent();
+            .max_redirects(0);
+        if let Some(path) = &spec.ca_file {
+            let certs = ca_certs(path)?;
+            config = config.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::new_with_certs(&certs))
+                    .build(),
+            );
+        }
+        let agent = config.build().new_agent();
         Ok(Self {
             bucket,
             credentials: Credentials::new(&spec.key_id, &spec.key_secret),
@@ -332,6 +439,12 @@ impl Client {
             return self.put_multipart(key, path, size, PART_SIZE, abort);
         }
         let response = retrying(|| {
+            if abort() {
+                return Err(ureq::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "aborted",
+                )));
+            }
             // A retry reopens the file: the request consumes the handle.
             // O_NOFOLLOW: a sync source replaced by a symlink must never be
             // uploaded through the target.
@@ -345,10 +458,14 @@ impl Client {
                 .bucket
                 .put_object(Some(&self.credentials), key)
                 .sign(SIGN_EXPIRE);
+            let mut body = AbortReader {
+                inner: file,
+                abort: &abort,
+            };
             self.agent
                 .put(url.as_str())
                 .header("Content-Length", length.to_string())
-                .send(file)
+                .send(ureq::SendBody::from_reader(&mut body))
         })
         .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
         checked("upload", key, response)?;
@@ -412,9 +529,28 @@ impl Client {
                 .send(body)
         })
         .map_err(|e| anyhow!("completing the upload of {key} failed: {}", http_err(&e)))?;
-        if let Err(e) = checked("complete upload", key, response) {
+        let response = match checked("complete upload", key, response) {
+            Ok(response) => response,
+            Err(e) => {
+                self.abort_upload(key, &upload_id);
+                return Err(e);
+            }
+        };
+        // S3 may answer CompleteMultipartUpload with HTTP 200 and an
+        // <Error> document; the object then does not exist.
+        let mut body = String::new();
+        if let Err(e) = response
+            .into_body()
+            .into_reader()
+            .take(MULTIPART_XML_CAP)
+            .read_to_string(&mut body)
+        {
             self.abort_upload(key, &upload_id);
-            return Err(e);
+            return Err(anyhow!("completing the upload of {key}: {e}"));
+        }
+        if body.contains("<Error") {
+            self.abort_upload(key, &upload_id);
+            bail!("completing the upload of {key} failed: provider returned an error body");
         }
         Ok(())
     }
@@ -455,10 +591,14 @@ impl Client {
                     .bucket
                     .upload_part(Some(&self.credentials), key, part_number, upload_id)
                     .sign(SIGN_EXPIRE);
+                let mut body = AbortReader {
+                    inner: &chunk[..],
+                    abort,
+                };
                 self.agent
                     .put(url.as_str())
                     .header("Content-Length", chunk.len().to_string())
-                    .send(&chunk)
+                    .send(ureq::SendBody::from_reader(&mut body))
             })
             .map_err(|e| {
                 anyhow!(
@@ -501,14 +641,24 @@ impl Client {
             bail!("aborted");
         }
         let response = retrying(|| {
+            if abort() {
+                return Err(ureq::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "aborted",
+                )));
+            }
             let url = self
                 .bucket
                 .put_object(Some(&self.credentials), key)
                 .sign(SIGN_EXPIRE);
+            let mut body = AbortReader {
+                inner: bytes,
+                abort: &abort,
+            };
             self.agent
                 .put(url.as_str())
                 .header("Content-Length", bytes.len().to_string())
-                .send(bytes)
+                .send(ureq::SendBody::from_reader(&mut body))
         })
         .map_err(|e| anyhow!("upload of {key} failed: {}", http_err(&e)))?;
         checked("upload", key, response)?;
@@ -801,20 +951,23 @@ impl Client {
         Ok(names)
     }
 
-    /// Delete one object. A missing object (404) is a failed delete: the
-    /// only caller lists first, so an unexpected 404 is a real anomaly.
+    /// Delete one object. Idempotent: a 404 means the object is already
+    /// gone (a concurrent/previous GC run), which is success.
     pub fn delete(&self, key: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");
         }
-        let response = retrying(|| {
+        let response = match retrying(|| {
             let url = self
                 .bucket
                 .delete_object(Some(&self.credentials), key)
                 .sign(SIGN_EXPIRE);
             self.agent.delete(url.as_str()).call()
-        })
-        .map_err(|e| anyhow!("delete of {key} failed: {}", http_err(&e)))?;
+        }) {
+            Ok(response) => response,
+            Err(ureq::Error::StatusCode(404)) => return Ok(()),
+            Err(e) => bail!("delete of {key} failed: {}", http_err(&e)),
+        };
         checked("delete", key, response)?;
         Ok(())
     }
@@ -924,6 +1077,10 @@ mod tests {
             key_id: "id".into(),
             key_secret: "secret".into(),
             endpoint: endpoint.into(),
+            allow_http: true,
+            ca_file: None,
+            region: None,
+            style: BucketStyle::Path,
         }
     }
 
@@ -1376,6 +1533,7 @@ mod tests {
         parts_seen: std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
         aborts_seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         fail_part: Option<u16>,
+        complete_error: bool,
     ) -> std::net::SocketAddr {
         use std::io::{Read, Write};
 
@@ -1435,11 +1593,19 @@ mod tests {
                     aborts_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     ("204 No Content", String::new(), String::new())
                 } else if line.starts_with("POST") && line.contains("uploadId=") {
-                    (
-                        "200 OK",
-                        String::new(),
-                        "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></CompleteMultipartUploadResult>".to_string(),
-                    )
+                    if complete_error {
+                        (
+                            "200 OK",
+                            String::new(),
+                            "<Error><Code>InternalError</Code></Error>".to_string(),
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            String::new(),
+                            "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></CompleteMultipartUploadResult>".to_string(),
+                        )
+                    }
                 } else {
                     ("400 Bad Request", String::new(), String::new())
                 };
@@ -1468,6 +1634,7 @@ mod tests {
             Arc::clone(&parts),
             Arc::clone(&aborts),
             None,
+            false,
         ));
         let dir = scratch("multipart");
         let file = dir.join("big.bin");
@@ -1493,6 +1660,7 @@ mod tests {
             Arc::clone(&parts),
             Arc::clone(&aborts),
             Some(2),
+            false,
         ));
         let dir = scratch("multipart-fail");
         let file = dir.join("big.bin");
@@ -1504,6 +1672,122 @@ mod tests {
         assert_eq!(*parts.lock().unwrap(), vec![1], "part 2 failed");
         assert_eq!(aborts.load(Ordering::SeqCst), 1, "the upload was aborted");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S3 can answer CompleteMultipartUpload with HTTP 200 and an <Error>
+    /// body; that must abort, not count as success.
+    #[test]
+    fn multipart_upload_aborts_on_a_200_error_body() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let parts = Arc::new(Mutex::new(Vec::new()));
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let client = local_client(fake_multipart_server(
+            Arc::clone(&parts),
+            Arc::clone(&aborts),
+            None,
+            true,
+        ));
+        let dir = scratch("multipart-200-error");
+        let file = dir.join("big.bin");
+        std::fs::write(&file, vec![7u8; 20]).unwrap();
+        let err = client
+            .put_multipart("state/big.bin", file.to_str().unwrap(), 20, 8, || false)
+            .unwrap_err();
+        assert!(err.to_string().contains("error body"), "{err}");
+        assert_eq!(aborts.load(Ordering::SeqCst), 1, "the upload was aborted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Delete is idempotent: a 404 means the object is already gone.
+    #[test]
+    fn delete_treats_a_missing_object_as_success() {
+        let client = local_client(fake_server("404 Not Found", "", b""));
+        client
+            .delete("state/gone", || false)
+            .expect("a missing object is success");
+    }
+
+    /// Plaintext HTTP is refused for a remote endpoint unless explicitly
+    /// allowed; loopback endpoints (local MinIO) stay usable.
+    #[test]
+    fn connect_refuses_remote_plaintext_http() {
+        let mut remote = spec("http://example.invalid");
+        assert!(
+            Client::connect(&remote, Duration::from_secs(5)).is_ok(),
+            "the permissive test fixture is allowed"
+        );
+        remote.allow_http = false;
+        let err = Client::connect(&remote, Duration::from_secs(5))
+            .err()
+            .expect("remote plaintext HTTP must be refused");
+        assert!(err.to_string().contains("plaintext HTTP"), "{err}");
+
+        let local = spec("http://127.0.0.1:1");
+        let mut local = local;
+        local.allow_http = false;
+        assert!(
+            Client::connect(&local, Duration::from_secs(5)).is_ok(),
+            "loopback HTTP is allowed for local MinIO"
+        );
+    }
+
+    #[test]
+    fn ca_file_must_be_a_readable_pem_bundle() {
+        let dir = scratch("ca");
+        let missing = dir.join("missing.pem");
+        assert!(validate_ca_file(missing.to_str().unwrap()).is_err());
+        let empty = dir.join("empty.pem");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(validate_ca_file(empty.to_str().unwrap()).is_err());
+        let junk = dir.join("junk.pem");
+        std::fs::write(&junk, b"not a certificate").unwrap();
+        assert!(validate_ca_file(junk.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The upload body reader aborts before the next chunk when the stop
+    /// flag is set.
+    #[test]
+    fn abort_reader_stops_before_a_chunk() {
+        use std::io::Read;
+
+        let mut reader = AbortReader {
+            inner: &b"payload"[..],
+            abort: &|| true,
+        };
+        let mut buf = [0u8; 4];
+        let err = reader.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn retry_classification_is_transient_only() {
+        let status = |code| ureq::Error::StatusCode(code);
+        for code in [408, 429, 500, 502, 503, 504] {
+            assert!(retryable(&status(code)), "HTTP {code} is transient");
+        }
+        for code in [400, 401, 403, 404, 409, 501, 505] {
+            assert!(!retryable(&status(code)), "HTTP {code} is definitive");
+        }
+        let io = |kind| ureq::Error::Io(std::io::Error::new(kind, "test"));
+        for kind in [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(retryable(&io(kind)), "{kind:?} is transient");
+        }
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+        ] {
+            assert!(!retryable(&io(kind)), "{kind:?} is definitive");
+        }
+        assert!(!retryable(&ureq::Error::HostNotFound));
     }
 
     /// A fake endpoint that serves a body short on the first (non-range)

@@ -453,6 +453,20 @@ fn empty_env_service_falls_back_to_the_file() {
     assert_eq!(cfg.service.as_deref(), Some("svc:file-svc"));
 }
 
+#[test]
+fn s3_endpoint_defaults_to_https_and_options_apply() {
+    let cfg = crate::config::SyncConfig::new(
+        "r2:vw".into(),
+        "id".into(),
+        "sec".into(),
+        "s3.example.com".into(),
+        std::time::Duration::from_secs(60),
+    )
+    .expect("a bare host gets the safe scheme");
+    assert_eq!(cfg.target.endpoint, "https://s3.example.com");
+    assert!(!cfg.target.allow_http);
+}
+
 /// The dotenv file carries the auth key and S3 credentials; it must be on
 /// the supervisor-only volume, not somewhere the vault can read it.
 #[test]

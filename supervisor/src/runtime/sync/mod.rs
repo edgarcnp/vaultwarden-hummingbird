@@ -8,5 +8,6 @@ mod cache;
 mod manifest;
 mod state;
 mod synced;
+mod tombstone;
 
-pub use state::{restore_state, sync_state};
+pub use state::{restore_state, sync_state, wait_for_rsa_key};

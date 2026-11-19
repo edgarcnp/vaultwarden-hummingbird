@@ -134,6 +134,26 @@ static KNOBS: &[Knob] = &[
         policy: FilePolicy::File,
         default: None,
     },
+    Knob {
+        name: "SUPERVISOR_S3_ALLOW_HTTP",
+        policy: FilePolicy::File,
+        default: Some(Default::Bool(false)),
+    },
+    Knob {
+        name: "SUPERVISOR_S3_CA_FILE",
+        policy: FilePolicy::File,
+        default: None,
+    },
+    Knob {
+        name: "SUPERVISOR_S3_REGION",
+        policy: FilePolicy::File,
+        default: None,
+    },
+    Knob {
+        name: "SUPERVISOR_S3_URL_STYLE",
+        policy: FilePolicy::File,
+        default: Some(Default::Str("path")),
+    },
 ];
 
 fn find(name: &str) -> Option<&'static Knob> {
@@ -191,6 +211,7 @@ mod tests {
         assert!(bool_default("TAILSCALE_USERSPACE"));
         assert!(!bool_default("SUPERVISOR_EPHEMERAL"));
         assert_eq!(string_default("VAULTWARDEN_PORT"), "8080");
+        assert_eq!(string_default("SUPERVISOR_S3_URL_STYLE"), "path");
         assert_eq!(
             string_default("TAILSCALE_STATE_FILE"),
             "/state/tailscaled.state"

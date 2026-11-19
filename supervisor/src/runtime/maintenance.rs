@@ -21,10 +21,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 use super::backup::tick as backup_tick;
-use super::sync::sync_state;
+use super::sync::{sync_state, wait_for_rsa_key};
 use super::{POLL, stopping};
 use crate::config::{
-    BACKUP_FIRST_DELAY, DbBackupConfig, SYNC_FIRST_DELAY, SYNC_TIMEOUT, SyncConfig,
+    BACKUP_FIRST_DELAY, DbBackupConfig, SYNC_FIRST_DELAY, SYNC_RSA_WAIT, SYNC_TIMEOUT, SyncConfig,
 };
 use crate::util::log;
 
@@ -101,8 +101,23 @@ impl Task {
             name: "state sync",
             first_delay: SYNC_FIRST_DELAY,
             cadence: (!cfg.interval.is_zero()).then_some(cfg.interval),
-            run: Box::new(move |token| {
-                let _ = sync_state(&periodic, || token.stopping());
+            run: Box::new({
+                // Only the first periodic push waits: the vault creates its
+                // signing key during startup, and a redeploy before the push
+                // would otherwise lose every session.
+                let first = AtomicBool::new(true);
+                move |token| {
+                    if first.swap(false, Ordering::SeqCst)
+                        && !wait_for_rsa_key(SYNC_RSA_WAIT, || token.stopping())
+                        && !token.stopping()
+                    {
+                        log::info(
+                            "state sync: the vault's signing key is not present yet; \
+                             the first push continues without it",
+                        );
+                    }
+                    let _ = sync_state(&periodic, || token.stopping());
+                }
             }),
             finish: Some(Box::new(move |abort| {
                 let _ = sync_state(&cfg, abort);

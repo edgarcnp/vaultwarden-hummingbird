@@ -4,10 +4,25 @@
 
 use std::time::Duration;
 
-use super::super::consts::{MAX_INTERVAL_SECS, SYNC_INTERVAL_DEFAULT};
-use super::super::env::parse_count;
+use super::super::consts::{MAX_INTERVAL_SECS, SYNC_INTERVAL_DEFAULT, SYNC_TIMEOUT};
+use super::super::env::{parse_count, parse_flag};
 use super::spec::SyncConfig;
+use crate::config::consts::SUPERVISOR_STATE;
+use crate::s3::{BucketStyle, Client, validate_ca_file};
 use crate::util::log;
+
+/// A CA bundle decides which server the supervisor trusts; the vault must
+/// not be able to replace it. Require a normal path under `/state`.
+fn ca_path_isolated(path: &str) -> bool {
+    use std::path::Component;
+
+    let path = std::path::Path::new(path);
+    path.is_absolute()
+        && path.starts_with(SUPERVISOR_STATE)
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+}
 
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
     let remote = knob("SUPERVISOR_S3_REMOTE", "");
@@ -37,21 +52,81 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
             }
             s => s,
         };
-        match SyncConfig::new(
+        let mut sync = match SyncConfig::new(
             remote.clone(),
             key_id,
             key_secret,
             knob("SUPERVISOR_S3_ENDPOINT", ""),
             Duration::from_secs(secs),
         ) {
-            Ok(sync) => Some(sync),
+            Ok(sync) => sync,
             Err(e) => {
                 log::err(&format!(
                     "config: invalid SUPERVISOR_S3_* configuration ({e}); state sync disabled"
                 ));
-                None
+                return None;
+            }
+        };
+        sync.set_allow_http(parse_flag(
+            "SUPERVISOR_S3_ALLOW_HTTP",
+            &knob("SUPERVISOR_S3_ALLOW_HTTP", ""),
+            false,
+        ));
+        let ca = knob("SUPERVISOR_S3_CA_FILE", "");
+        if !ca.is_empty() {
+            if !ca_path_isolated(&ca) {
+                log::err(&format!(
+                    "config: SUPERVISOR_S3_CA_FILE {} must live under /state (the \
+                     vault can rewrite a CA on its own volume); state sync disabled",
+                    log::sanitize(&ca)
+                ));
+                return None;
+            }
+            if let Err(e) = validate_ca_file(&ca) {
+                log::err(&format!(
+                    "config: unusable SUPERVISOR_S3_CA_FILE {} ({e}); state sync disabled",
+                    log::sanitize(&ca)
+                ));
+                return None;
+            }
+            sync.set_ca_file(ca);
+        }
+        let region = knob("SUPERVISOR_S3_REGION", "");
+        if !region.is_empty() {
+            if !region
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                log::err(
+                    "config: SUPERVISOR_S3_REGION must be letters, digits, and '-'; \
+                     state sync disabled",
+                );
+                return None;
+            }
+            sync.set_region(region);
+        }
+        match knob("SUPERVISOR_S3_URL_STYLE", "path").as_str() {
+            "path" => sync.set_style(BucketStyle::Path),
+            "virtual" | "virtual-hosted" => sync.set_style(BucketStyle::VirtualHosted),
+            other => {
+                log::err(&format!(
+                    "config: SUPERVISOR_S3_URL_STYLE '{}' is not 'path' or 'virtual'; \
+                     state sync disabled",
+                    log::sanitize(other)
+                ));
+                return None;
             }
         }
+        // Build the transport once now: this validates the endpoint scheme
+        // (plaintext HTTP policy), bucket shape, region/style, and CA bundle
+        // before a boot depends on the feature. No network request is made.
+        if let Err(e) = Client::connect(&sync.target, SYNC_TIMEOUT) {
+            log::err(&format!(
+                "config: unusable SUPERVISOR_S3_* transport ({e}); state sync disabled"
+            ));
+            return None;
+        }
+        Some(sync)
     }
 }
 
@@ -112,6 +187,53 @@ mod tests {
             "https://acct.r2.cloudflarestorage.com"
         );
         assert_eq!(sync.interval, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn transport_options_resolve() {
+        let mut vars: Vec<(&str, &str)> = BASE.to_vec();
+        vars.extend([
+            ("SUPERVISOR_S3_ALLOW_HTTP", "true"),
+            ("SUPERVISOR_S3_REGION", "eu-west-1"),
+            ("SUPERVISOR_S3_URL_STYLE", "virtual"),
+        ]);
+        let sync = resolved(&vars).expect("options resolve");
+        assert!(sync.target.allow_http);
+        assert_eq!(sync.target.region.as_deref(), Some("eu-west-1"));
+        assert_eq!(sync.target.style, BucketStyle::VirtualHosted);
+
+        let mut vars: Vec<(&str, &str)> = BASE.to_vec();
+        vars.push(("SUPERVISOR_S3_URL_STYLE", "bogus"));
+        assert!(resolved(&vars).is_none(), "a typo'd style disables sync");
+
+        let mut vars: Vec<(&str, &str)> = BASE.to_vec();
+        vars.push(("SUPERVISOR_S3_CA_FILE", "/nonexistent/ca.pem"));
+        assert!(resolved(&vars).is_none(), "an unreadable CA disables sync");
+
+        // Plaintext HTTP to a remote host is refused by the transport.
+        let mut vars: Vec<(&str, &str)> = BASE.to_vec();
+        *vars.last_mut().unwrap() = ("SUPERVISOR_S3_ENDPOINT", "http://s3.example.invalid");
+        assert!(
+            resolved(&vars).is_none(),
+            "remote plaintext HTTP disables sync"
+        );
+        let mut vars: Vec<(&str, &str)> = BASE.to_vec();
+        *vars.last_mut().unwrap() = ("SUPERVISOR_S3_ENDPOINT", "http://s3.example.invalid");
+        vars.push(("SUPERVISOR_S3_ALLOW_HTTP", "true"));
+        assert!(
+            resolved(&vars).is_some(),
+            "the explicit opt-in allows plaintext HTTP"
+        );
+    }
+
+    #[test]
+    fn the_ca_bundle_must_live_on_the_supervisor_volume() {
+        assert!(ca_path_isolated("/state/s3-ca.pem"));
+        assert!(ca_path_isolated("/state/tls/ca.pem"));
+        assert!(!ca_path_isolated("/data/s3-ca.pem"));
+        assert!(!ca_path_isolated("/tmp/ca.pem"));
+        assert!(!ca_path_isolated("/state/../data/ca.pem"));
+        assert!(!ca_path_isolated("state/ca.pem"));
     }
 
     #[test]

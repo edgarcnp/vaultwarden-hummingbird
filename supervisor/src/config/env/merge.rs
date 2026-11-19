@@ -31,6 +31,8 @@ fn env_file_isolated(path: &str) -> bool {
 /// or shadow that object in the bucket.
 fn reserved_state_name(rel: &str) -> bool {
     rel == "config.json"
+        || rel == "manifest"
+        || rel == "tombstones"
         || rel == "certs"
         || rel == "attachments"
         || rel == "sends"

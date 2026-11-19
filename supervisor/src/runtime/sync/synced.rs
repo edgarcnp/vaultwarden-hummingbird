@@ -78,6 +78,15 @@ impl Roots {
     }
 }
 
+/// Whether a synced path may be removed by the tombstone lifecycle. The
+/// node identity and its certificates are never tombstoned: a transient
+/// volume loss must not erase the machine's identity from the bucket, and
+/// a user cannot delete them through the vault UI. Only user data and the
+/// admin config can be intentionally deleted.
+pub(super) fn is_deletable(rel: &str) -> bool {
+    rel == "config.json" || rel.starts_with("attachments/") || rel.starts_with("sends/")
+}
+
 /// Whether a bucket-relative path is inside the durable set. Traversal
 /// and absolute paths never pass, in any position; neither does a `.part`
 /// staging file left by an interrupted download (excluded from both
@@ -261,6 +270,30 @@ fn clear_recursive(dir: &Path, removed: &mut usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_user_data_can_be_tombstoned() {
+        use super::is_deletable;
+
+        for rel in [
+            "attachments/u",
+            "attachments/sub/u",
+            "sends/u",
+            "config.json",
+        ] {
+            assert!(is_deletable(rel), "{rel} is user data");
+        }
+        for rel in [
+            "tailscaled.state",
+            "sub/node.state",
+            "rsa_key",
+            "rsa_key.pem",
+            "certs/a.crt",
+            "certs/sub/a.crt",
+        ] {
+            assert!(!is_deletable(rel), "{rel} is identity/cert material");
+        }
+    }
 
     #[test]
     fn synced_set_is_enforced_in_both_directions() {
