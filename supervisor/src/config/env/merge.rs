@@ -2,6 +2,7 @@
 //! resolved into a validated [`Config`] once at boot.
 
 use std::env;
+use std::path::Path;
 
 use crate::config::backup::{DbBackupConfig, resolve_backup};
 use crate::config::consts::SUPERVISOR_STATE;
@@ -9,6 +10,7 @@ use crate::config::dotenv::FileConfig;
 use crate::config::sync::{SyncConfig, resolve_sync};
 use crate::util::log;
 
+use super::super::paths;
 use super::knobs::{non_empty, parse_flag, resolve_service, valid_port};
 use super::schema;
 
@@ -16,39 +18,16 @@ use super::schema;
 /// `..` component must be refused even when the textual prefix matches:
 /// `/state/../data/.env` would otherwise read a vault-writable file.
 fn env_file_isolated(path: &str) -> bool {
-    use std::path::Component;
-
-    let path = std::path::Path::new(path);
-    path.is_absolute()
-        && path.starts_with(SUPERVISOR_STATE)
-        && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-}
-
-/// A custom state file is a bucket key too. These names already belong to
-/// vault data (or the cert tree), so a state file using one would overwrite
-/// or shadow that object in the bucket.
-fn reserved_state_name(rel: &str) -> bool {
-    rel == "config.json"
-        || rel == "manifest"
-        || rel == "tombstones"
-        || rel == "certs"
-        || rel == "attachments"
-        || rel == "sends"
-        || rel.starts_with("certs/")
-        || rel.starts_with("attachments/")
-        || rel.starts_with("sends/")
-        || (rel.starts_with("rsa_key") && !rel.contains('/'))
+    paths::under_root(Path::new(SUPERVISOR_STATE), path)
 }
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
 pub struct Config {
-    /// tailscaled state file (under the supervisor-only state volume;
-    /// `mem:` is Tailscale's in-memory state for fully ephemeral
+    /// tailscaled state file (a direct child of the supervisor-only state
+    /// root; `mem:` is Tailscale's in-memory state for fully ephemeral
     /// deployments)
     pub state: String,
-    /// LocalAPI unix socket (writable, non-volume path)
+    /// LocalAPI unix socket (under the supervisor-only state root)
     pub socket: String,
     /// exposed (gatekeeper) port: `VAULTWARDEN_PORT`, process env before
     /// dotenv file, then 8080. The legacy `VAULTWARDEN_ROCKET_PORT` (env
@@ -115,12 +94,26 @@ impl Config {
             ));
             return None;
         }
-        Self::build(FileConfig::load(), |k| env::var(k).ok())
+        Self::build_at(Path::new(SUPERVISOR_STATE), FileConfig::load(), |k| {
+            env::var(k).ok()
+        })
     }
 
     /// [`Self::from_env`] with the env source injected: tests pass a map,
     /// never mutating the process env (unsafe and racy).
+    #[cfg(test)]
     fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        Self::build_at(Path::new(SUPERVISOR_STATE), file, lookup)
+    }
+
+    /// [`Self::build`] with an explicit state root. Production always uses
+    /// `/state`; tests use a scratch root so they can create a real identity
+    /// file without writing to the image's supervisor volume.
+    fn build_at(
+        root: &Path,
+        file: FileConfig,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Option<Self> {
         // A configured-but-unreadable file refuses the boot: silently
         // running on env-only defaults is exactly the quiet
         // misconfiguration the strict file exists to prevent.
@@ -204,29 +197,47 @@ impl Config {
         };
 
         // The state file anchors the node identity and the `--statedir`
-        // derived from it; a relative path has no stable meaning for a
-        // PID 1 (and would yield an empty statedir). `mem:` is Tailscale's
-        // in-memory state, the documented fully-ephemeral mode.
+        // derived from it. It must stay on the supervisor-only volume and
+        // directly under its root so the derived cert cache is the synced
+        // `/state/certs` tree. `mem:` is Tailscale's in-memory state.
         let state = value("TAILSCALE_STATE_FILE");
-        if state != "mem:" && !state.starts_with('/') {
+        if !paths::state_file(root, &state) {
             log::err(&format!(
-                "config: TAILSCALE_STATE_FILE '{}' must be an absolute path (or 'mem:'); \
+                "config: TAILSCALE_STATE_FILE '{}' must be 'mem:' or a direct child of {}; \
                  refusing to start",
-                log::sanitize(&state)
+                log::sanitize(&state),
+                root.display()
             ));
             return None;
         }
-        // A state file is a third identity source, alongside an authkey and
-        // a sync bucket that can restore one. Only a normal, non-empty path
-        // under the supervisor-only state root is covered by state sync.
-        let state_under_state = state.strip_prefix("/state/").filter(|rel| {
-            !rel.is_empty()
-                && !rel.starts_with('/')
-                && !rel.contains("..")
-                && !rel.chars().any(char::is_control)
-        });
+        let state_rel = paths::state_rel(root, &state);
         let state_present = state != "mem:"
             && std::fs::metadata(&state).is_ok_and(|meta| meta.is_file() && meta.len() > 0);
+        // The socket controls the LocalAPI: a socket on the vault volume
+        // could be deleted or impersonated by the vault uid.
+        let socket = value("TAILSCALE_SOCKET");
+        if !paths::socket(root, &socket) {
+            log::err(&format!(
+                "config: TAILSCALE_SOCKET '{}' must be a path under {}; refusing to start",
+                log::sanitize(&socket),
+                root.display()
+            ));
+            return None;
+        }
+        // A custom identity file must not shadow a supervisor sidecar or a
+        // vault/bucket key. Check it even when sync is off: enabling sync
+        // later must not turn a valid boot into a bucket collision.
+        if let Some(rel) = state_rel
+            && paths::reserved_state_name(rel)
+        {
+            log::err(&format!(
+                "config: TAILSCALE_STATE_FILE '{}' collides with a supervisor or vault \
+                 key; choose another name directly under {}",
+                log::sanitize(&state),
+                root.display()
+            ));
+            return None;
+        }
 
         let mut sync = resolve_sync(&knob);
 
@@ -242,7 +253,7 @@ impl Config {
         // A key is required only when no other source can supply identity:
         // a valid local state file, or a sync bucket that covers it.
         let authkey = non_empty(Some(knob("TAILSCALE_AUTHKEY", "")));
-        let sync_can_supply = sync.is_some() && state_under_state.is_some();
+        let sync_can_supply = sync.is_some() && state_rel.is_some();
         if authkey.is_none() && !state_present && !sync_can_supply {
             log::err(
                 "config: no identity source: set TAILSCALE_AUTHKEY, keep a valid local \
@@ -251,28 +262,10 @@ impl Config {
             );
             return None;
         }
-        // The identity file must ride inside the state root; anything else
-        // cannot be covered by state sync, so say so rather than silently
-        // losing the node on the next redeploy.
-        if let Some(sync) = sync.as_mut() {
-            sync.set_state_file(&state);
-            if let Some(rel) = sync.state_file.as_deref()
-                && reserved_state_name(rel)
-            {
-                log::err(&format!(
-                    "config: TAILSCALE_STATE_FILE '{}' collides with a vault data key in \
-                     the sync namespace; choose another name under /state",
-                    log::sanitize(&state)
-                ));
-                return None;
-            }
-            if sync.state_file.is_none() && state != "mem:" {
-                log::err(&format!(
-                    "config: TAILSCALE_STATE_FILE '{}' is outside /state; SUPERVISOR_S3_* \
-                     state sync cannot carry the node identity",
-                    log::sanitize(&state)
-                ));
-            }
+        if let Some(sync) = sync.as_mut()
+            && let Some(rel) = state_rel
+        {
+            sync.set_state_file_rel(rel);
         }
 
         // Temporary-storage mode: an explicitly configured persistence
@@ -331,9 +324,8 @@ impl Config {
         }
 
         Some(Self {
-            // hard-pinned to the volume; the sync scope is /data too
             state,
-            socket: value("TAILSCALE_SOCKET"),
+            socket,
             port,
             vault_port,
             hostname: value("TAILSCALE_HOSTNAME"),

@@ -45,7 +45,7 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
     // no authkey from env or file, no state sync, no local state: fail closed
     let map: BTreeMap<String, String> = [(
         "TAILSCALE_STATE_FILE".to_string(),
-        "/nonexistent-vw-sup/tailscaled.state".to_string(),
+        "/state/nonexistent-vw-sup.state".to_string(),
     )]
     .into_iter()
     .collect();
@@ -58,7 +58,7 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
         ("TAILSCALE_AUTHKEY".to_string(), String::new()),
         (
             "TAILSCALE_STATE_FILE".to_string(),
-            "/nonexistent-vw-sup/tailscaled.state".to_string(),
+            "/state/nonexistent-vw-sup.state".to_string(),
         ),
     ]
     .into_iter()
@@ -113,7 +113,7 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
         ("SUPERVISOR_S3_REMOTE".to_string(), "r2:vw".to_string()),
         (
             "TAILSCALE_STATE_FILE".to_string(),
-            "/nonexistent-vw-sup/tailscaled.state".to_string(),
+            "/state/nonexistent-vw-sup.state".to_string(),
         ),
     ]
     .into_iter()
@@ -128,19 +128,26 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
 /// a `mem:` state or one outside the sync root cannot be supplied by S3.
 #[test]
 fn authkey_gate_considers_the_local_state_and_sync_coverage() {
-    let dir = std::env::temp_dir().join(format!("vw-sup-state-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let state = dir.join("tailscaled.state");
+    let root = std::env::temp_dir().join(format!("vw-sup-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let state = root.join("tailscaled.state");
     std::fs::write(&state, b"identity").unwrap();
+    let socket = root.join("tailscaled.sock");
 
-    let map: BTreeMap<String, String> = [(
-        "TAILSCALE_STATE_FILE".to_string(),
-        state.to_string_lossy().into_owned(),
-    )]
+    let map: BTreeMap<String, String> = [
+        (
+            "TAILSCALE_STATE_FILE".to_string(),
+            state.to_string_lossy().into_owned(),
+        ),
+        (
+            "TAILSCALE_SOCKET".to_string(),
+            socket.to_string_lossy().into_owned(),
+        ),
+    ]
     .into_iter()
     .collect();
-    let cfg = Config::build(FileConfig::default(), move |k| map.get(k).cloned())
+    let cfg = Config::build_at(&root, FileConfig::default(), move |k| map.get(k).cloned())
         .expect("a valid local state is an identity source");
     assert_eq!(cfg.authkey, None);
 
@@ -150,18 +157,22 @@ fn authkey_gate_considers_the_local_state_and_sync_coverage() {
         ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
         ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
     ];
-    for state in ["mem:", "/var/lib/tailscale/state"] {
+    for state in ["mem:", "/state/sub/node.state"] {
         let mut map: BTreeMap<String, String> = sync
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         map.insert("TAILSCALE_STATE_FILE".into(), state.into());
+        map.insert(
+            "TAILSCALE_SOCKET".into(),
+            socket.to_string_lossy().into_owned(),
+        );
         assert!(
-            Config::build(FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
+            Config::build_at(&root, FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
             "{state}: sync cannot supply an identity it does not cover"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Temporary storage is strict: an explicitly configured S3/backup feature
@@ -483,26 +494,90 @@ fn the_dotenv_must_live_on_the_state_volume() {
 }
 
 /// The state file anchors the node identity and the `--statedir` derived
-/// from it: a relative path refuses the boot, an absolute one passes.
+/// from it: it must stay on the supervisor-only volume, directly under
+/// `/state`, so neither the vault nor a path escape can reach it.
 #[test]
-fn state_file_must_be_absolute() {
+fn state_file_must_live_directly_under_the_state_root() {
     let lookup = |key: &str| (key == "TAILSCALE_AUTHKEY").then(|| "test-key".to_string());
+    let rejects = |contents: &str| {
+        let file = FileConfig::load_from(Some(&env_dotenv(contents)));
+        assert!(
+            Config::build(file, lookup).is_none(),
+            "{contents:?} must refuse the boot"
+        );
+    };
+    rejects("TAILSCALE_STATE_FILE=state/tailscaled.state\n");
+    rejects("TAILSCALE_STATE_FILE=/data/tailscaled.state\n");
+    rejects("TAILSCALE_STATE_FILE=/custom/tailscaled.state\n");
+    rejects("TAILSCALE_STATE_FILE=/state/../data/tailscaled.state\n");
+    rejects("TAILSCALE_STATE_FILE=/state/sub/node.state\n");
+
     let file = FileConfig::load_from(Some(&env_dotenv(
-        "TAILSCALE_STATE_FILE=state/tailscaled.state\n",
+        "TAILSCALE_STATE_FILE=/state/node.state\n",
     )));
-    assert!(
-        Config::build(file, lookup).is_none(),
-        "a relative state file must refuse the boot"
-    );
-    let file = FileConfig::load_from(Some(&env_dotenv(
-        "TAILSCALE_STATE_FILE=/custom/tailscaled.state\n",
-    )));
-    let cfg = Config::build(file, lookup).expect("an absolute state file resolves");
-    assert_eq!(cfg.state, "/custom/tailscaled.state");
+    let cfg = Config::build(file, lookup).expect("a direct /state child resolves");
+    assert_eq!(cfg.state, "/state/node.state");
 
     // `mem:` is Tailscale's in-memory state: accepted, no path check
     let cfg = mk(&[("TAILSCALE_STATE_FILE", "mem:")]);
     assert_eq!(cfg.state, "mem:");
+}
+
+/// The LocalAPI socket is supervisor-only too: a socket on the vault's
+/// volume could be deleted or impersonated by the vault uid.
+#[test]
+fn socket_must_live_under_the_state_root() {
+    for socket in [
+        "/data/tailscaled.sock",
+        "/custom/tailscaled.sock",
+        "/state/../data/tailscaled.sock",
+        "tailscaled.sock",
+    ] {
+        assert!(
+            mk_opt(&[("TAILSCALE_SOCKET", socket)]).is_none(),
+            "{socket} must refuse the boot"
+        );
+    }
+    for socket in ["/state/tailscaled.sock", "/state/run/tailscaled.sock"] {
+        let cfg = mk(&[("TAILSCALE_SOCKET", socket)]);
+        assert_eq!(cfg.socket, socket);
+    }
+}
+
+/// A custom state file must not collide with any supervisor-owned name or
+/// namespace, even before state sync is enabled (it may be enabled later).
+#[test]
+fn reserved_state_names_refuse_the_boot() {
+    for name in [
+        "config.json",
+        "manifest",
+        "tombstones",
+        ".layout-v2",
+        ".sync-cache",
+        ".sync-repair",
+        ".sync-missing",
+        "db",
+        "db-backups",
+        "db-backups.state",
+        "objects",
+        "attachments",
+        "sends",
+        "certs",
+        "rsa_key.pem",
+    ] {
+        let path = format!("/state/{name}");
+        assert!(
+            mk_opt(&[("TAILSCALE_STATE_FILE", path.as_str())]).is_none(),
+            "{name} must be reserved"
+        );
+    }
+    for name in ["node.state", "tailscaled.state", "identity"] {
+        let path = format!("/state/{name}");
+        assert!(
+            mk_opt(&[("TAILSCALE_STATE_FILE", path.as_str())]).is_some(),
+            "{name} must be a usable identity name"
+        );
+    }
 }
 
 /// A custom state file under /state is wired into the sync set, so state
@@ -539,10 +614,23 @@ fn custom_state_files_are_wired_into_sync() {
         "a colliding state name must refuse"
     );
 
+    // Outside /state cannot ride along and must refuse the boot, not
+    // silently run the identity on a volume the vault can rewrite.
     let mut vars = SYNC.to_vec();
-    vars.push(("TAILSCALE_STATE_FILE", "/var/lib/tailscale/state"));
-    let cfg = mk(&vars);
-    assert_eq!(cfg.sync.as_ref().expect("sync configured").state_file, None);
+    vars.push(("TAILSCALE_STATE_FILE", "/state/sub/node.state"));
+    assert!(
+        mk_opt(&vars).is_none(),
+        "an identity outside /state must refuse"
+    );
+
+    // A subdirectory would put tailscaled's cert cache outside the synced
+    // cert tree; only a direct child is covered.
+    let mut vars = SYNC.to_vec();
+    vars.push(("TAILSCALE_STATE_FILE", "/state/sub/node.state"));
+    assert!(
+        mk_opt(&vars).is_none(),
+        "a state file in a subdirectory must refuse"
+    );
 }
 
 /// One-key dotenv file for the merge tests above. Unique per call:

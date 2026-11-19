@@ -48,9 +48,17 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
         log::err("internal vault port is not a valid port; refusing to start");
         shutdown(Some(tsd), None, 1, None)
     };
-    drop(std::thread::spawn(move || {
-        gate_serve(gate, Some(vault_addr))
-    }));
+    // The gate thread is the only public listener. A thread that cannot
+    // start is a failed boot, not a vault nobody can health-check.
+    let gate_thread = std::thread::Builder::new()
+        .name("gate".into())
+        .spawn(move || gate_serve(gate, Some(vault_addr)));
+    if let Err(e) = gate_thread {
+        log::err(&format!(
+            "gatekeeper thread failed to start ({e}); refusing to run without the gate"
+        ));
+        shutdown(Some(tsd), None, 1, None);
+    }
 
     log::info("starting vaultwarden");
     let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {

@@ -14,7 +14,9 @@ mod run;
 mod signals;
 mod watch;
 
-pub use child::{Credentials, POLL, TERM_GRACE, signal_child, spawn, spawn_as};
+pub use child::{
+    Credentials, POLL, TERM_GRACE, TUN_CAPS, signal_child, spawn, spawn_as, spawn_with_caps,
+};
 pub use env::EnvGrant;
 pub use reap::{Gone, exit_code, reap_until_gone};
 pub use reaper::Handle;

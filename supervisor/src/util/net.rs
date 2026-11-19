@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use super::wait_until;
+use crate::util::log;
 
 /// Poll cadence for socket readiness.
 const TICK: Duration = Duration::from_millis(100);
@@ -32,15 +33,23 @@ pub fn wait_daemon(socket: &str, timeout: Duration, abort: impl Fn() -> bool) ->
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
     let path = socket.to_string();
-    drop(std::thread::spawn(move || {
-        while !worker_stop.load(Ordering::Relaxed) {
-            if unix_socket_alive(&path) {
-                let _ = tx.send(());
-                return;
+    let worker = std::thread::Builder::new()
+        .name("daemon-wait".into())
+        .spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                if unix_socket_alive(&path) {
+                    let _ = tx.send(());
+                    return;
+                }
+                std::thread::sleep(TICK);
             }
-            std::thread::sleep(TICK);
-        }
-    }));
+        });
+    if let Err(e) = worker {
+        log::err(&format!(
+            "cannot start the daemon-wait worker ({e}); reporting the socket as not ready"
+        ));
+        return false;
+    }
     let ready = wait_until(|| rx.try_recv().ok(), timeout, abort, TICK);
     stop.store(true, Ordering::Relaxed);
     ready.is_some()

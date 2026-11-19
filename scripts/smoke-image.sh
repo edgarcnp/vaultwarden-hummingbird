@@ -102,7 +102,7 @@ run unknown-supervisor-key 1 "SUPERVISOR_DB_BACKUP_RESTOR" -- \
   -e SUPERVISOR_ENV_FILE=/state/.env -v "$WORK/supervisor.env:/state/.env:ro,z" "$IMAGE"
 
 # 5. A relative state file refuses (it anchors the identity and statedir).
-run relative-state 1 "must be an absolute path" -- \
+run relative-state 1 "must be 'mem:' or a direct child" -- \
   -e SUPERVISOR_ENV_FILE=/state/.env -v "$WORK/relative.env:/state/.env:ro,z" "$IMAGE"
 
 # 6. A dotenv file outside /state is refused: the vault uid could read it.
@@ -131,6 +131,12 @@ run vault-cannot-reach-state 1 "Permission denied" -- \
   --user 65533:65532 --entrypoint /vaultwarden \
   -e DATA_FOLDER=/state -e WEB_VAULT_FOLDER=/web-vault \
   -e I_REALLY_WANT_VOLATILE_STORAGE=true "$IMAGE"
+
+# 10. The supervisor-spawned children must not retain the container
+#     capabilities. This is the regression test for the vault's capability
+#     drop: without it the vault can setuid back to 65532 and read /state.
+run security-isolation 0 "isolation probe: ok" -- \
+  --cap-add=SETUID --cap-add=SETGID --cap-add=KILL "$IMAGE" --security-probe
 
 echo
 echo "== summary: $PASS passed, $FAIL failed =="

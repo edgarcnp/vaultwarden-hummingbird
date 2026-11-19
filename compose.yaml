@@ -47,7 +47,7 @@ services:
       - no-new-privileges:true
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=64m
     # Serves /alive only (supervisor gatekeeper), loopback-only; the API is
     # tailnet-only via tailscale serve.
     ports:

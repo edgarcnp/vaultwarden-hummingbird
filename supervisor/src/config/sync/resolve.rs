@@ -14,14 +14,7 @@ use crate::util::log;
 /// A CA bundle decides which server the supervisor trusts; the vault must
 /// not be able to replace it. Require a normal path under `/state`.
 fn ca_path_isolated(path: &str) -> bool {
-    use std::path::Component;
-
-    let path = std::path::Path::new(path);
-    path.is_absolute()
-        && path.starts_with(SUPERVISOR_STATE)
-        && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+    super::super::paths::under_root(std::path::Path::new(SUPERVISOR_STATE), path)
 }
 
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {

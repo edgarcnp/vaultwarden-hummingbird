@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nix::libc;
 use nix::sys::prctl;
 use nix::sys::signal::{Signal, kill, killpg};
 use nix::sys::stat::{Mode, umask};
@@ -36,6 +37,34 @@ pub(crate) const KILL_GRACE: Duration = Duration::from_secs(5);
 pub type Pid = i32;
 
 /// Spawn `cmd` as the leader of its own process group, registered with
+/// the reaper hub, with every capability dropped and `no_new_privs` set.
+/// Closing the grouping/registry races is described on [`spawn_inner`].
+pub fn spawn(cmd: &mut Command) -> Option<Handle> {
+    spawn_with_caps(cmd, &[])
+}
+
+/// Capabilities `tailscaled` needs only in TUN mode. The container must
+/// grant them; the supervisor keeps these and drops everything else in
+/// the child. Userspace networking needs none.
+pub const TUN_CAPS: &[u32] = &[12, 13]; // CAP_NET_ADMIN, CAP_NET_RAW
+
+/// [`spawn`] with an explicit capability allowlist for the child. Every
+/// other capability is dropped; the allowlist survives `exec` through the
+/// ambient set. This is for `tailscaled` in TUN mode only: the vault and
+/// every bounded CLI child use [`spawn`] and get no capabilities.
+pub fn spawn_with_caps(cmd: &mut Command, keep: &'static [u32]) -> Option<Handle> {
+    // SAFETY: pre_exec runs between fork and exec; the closure allocates
+    // nothing and only calls capset/prctl.
+    unsafe {
+        cmd.pre_exec(move || {
+            restrict_caps(keep)?;
+            prctl::set_no_new_privs().map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+        });
+    }
+    spawn_inner(cmd)
+}
+
+/// Spawn `cmd` as the leader of its own process group, registered with
 /// the reaper hub. Doing the grouping in the child (`process_group(0)`)
 /// closes the race where the child execs before the parent could
 /// `setpgid` it.
@@ -48,9 +77,11 @@ pub type Pid = i32;
 /// hub ever reaps. Failure (spawn error, or `pidfd_open` refusing on a
 /// pre-5.3 kernel) returns `None` — a child nobody can supervise is a
 /// child nobody may run.
-pub fn spawn(cmd: &mut Command) -> Option<Handle> {
+fn spawn_inner(cmd: &mut Command) -> Option<Handle> {
     cmd.process_group(0);
-    reaper::start();
+    if !reaper::start() {
+        return None;
+    }
     let mut reg = reaper::registry_lock();
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -99,8 +130,10 @@ pub struct Credentials {
 /// `setgroups([])` (a leftover supplementary group would survive the UID
 /// change). `setresgid`/`setresuid` set all three ids; with the supervisor
 /// as the caller, no saved uid remains to regain the old identity. The
-/// final `PR_SET_NO_NEW_PRIVS` makes the restriction irreversible across
-/// `exec`. The closure only makes async-signal-safe syscalls.
+/// capabilities that allowed that transition are then dropped explicitly
+/// (`setresuid` alone does not clear them), and `PR_SET_NO_NEW_PRIVS`
+/// makes the restriction irreversible across `exec`. The closure only
+/// makes async-signal-safe syscalls.
 pub fn spawn_as(cmd: &mut Command, creds: Credentials) -> Option<Handle> {
     let same_identity = geteuid().as_raw() == creds.uid && getegid().as_raw() == creds.gid;
     // SAFETY: pre_exec runs between fork and exec; the closure allocates
@@ -125,12 +158,13 @@ pub fn spawn_as(cmd: &mut Command, creds: Credentials) -> Option<Handle> {
                 Uid::from_raw(creds.uid),
             )
             .map_err(fail)?;
+            restrict_caps(&[])?;
             prctl::set_no_new_privs().map_err(fail)?;
             umask(Mode::from_bits_truncate(creds.umask));
             Ok(())
         });
     }
-    spawn(cmd)
+    spawn_inner(cmd)
 }
 
 /// Signal the whole process group of a child spawned via [`spawn`] (pgid ==
@@ -159,6 +193,97 @@ pub fn signal_child(child: &Handle, sig: Signal) -> bool {
     let delivered = signal_group(child.pid, sig);
     drop(reg);
     delivered
+}
+
+/// Drop every capability except `keep` and arrange for the allowed ones to
+/// survive `exec` through the ambient set. Runs in the forked child only:
+/// syscalls, no allocation.
+#[cfg(target_os = "linux")]
+fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Data {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    const VERSION_3: u32 = 0x2008_0522;
+    const PR_CAP_AMBIENT: libc::c_int = 47;
+    const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
+    const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
+
+    let mut header = Header {
+        version: VERSION_3,
+        pid: 0,
+    };
+    let mut data = [Data::default(); 2];
+    // SAFETY: capget reads two capability data words into the array and
+    // writes only the version/pid header, which is owned here.
+    let rc = unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut mask = 0u64;
+    for cap in keep {
+        if *cap < 64 {
+            mask |= 1u64 << *cap;
+        }
+    }
+    for (index, word) in data.iter_mut().enumerate() {
+        let bits = (mask >> (index * 32)) as u32;
+        word.effective &= bits;
+        word.permitted &= bits;
+        word.inheritable &= bits;
+    }
+    // SAFETY: capset reads the header and the two data words.
+    let rc = unsafe { libc::syscall(libc::SYS_capset, &header, data.as_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Ambient caps are inherited across exec. Clear them first; a
+    // capability outside the allowlist is already gone from permitted and
+    // cannot remain ambient.
+    // SAFETY: prctl takes integers only.
+    unsafe {
+        libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+    }
+    for cap in keep {
+        if *cap >= 64 {
+            continue;
+        }
+        let index = (*cap / 32) as usize;
+        let bit = 1u32 << (*cap % 32);
+        if data[index].permitted & bit == 0 {
+            continue;
+        }
+        // SAFETY: the capability is in permitted and inheritable, the
+        // documented precondition for raising ambient.
+        let rc = unsafe {
+            libc::prctl(
+                PR_CAP_AMBIENT,
+                PR_CAP_AMBIENT_RAISE,
+                libc::c_ulong::from(*cap),
+                0,
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restrict_caps(_keep: &[u32]) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

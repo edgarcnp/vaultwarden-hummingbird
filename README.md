@@ -23,6 +23,7 @@ You need a [Tailscale](https://tailscale.com) account, with MagicDNS and HTTPS c
      -e SUPERVISOR_ENV_FILE=/state/.env \
      -v "$PWD/.env:/state/.env:ro,z" \
      --cap-drop=all --cap-add=SETUID --cap-add=SETGID --cap-add=KILL \
+     --security-opt no-new-privileges \
      -v vw-data:/data -v vw-state:/state \
      ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
    ```
@@ -52,7 +53,7 @@ Tailscale is the only way in. The vault listens on loopback and never leaves the
 
 No Tailscale, no vault. The container refuses to start without an auth key, a valid local `TAILSCALE_STATE_FILE`, or S3 state sync that can supply the node identity, and if Tailscale dies later it shuts down instead of running a vault nobody can reach. Your orchestrator restarts it; a short outage beats a silent one.
 
-The container keeps two volumes and two identities. `/data` (0770, group `65532`) holds the vault: its database, signing key, `config.json`, attachments, and Sends. `/state` (0700, owner `65532`) is supervisor-only: the tailscaled identity and socket, the certificate cache, backup staging, sync sidecars, and the dotenv file. The supervisor and tailscaled run as `65532:65532`; the vault runs as `65533:65532`, so a compromised vault cannot traverse `/state`, read the LocalAPI socket, or inspect PID 1's environment. The supervisor holds only `SETUID`/`SETGID` (to start the vault) and `KILL` (to stop it); the vault has no capabilities.
+The container keeps two volumes and two identities. `/data` (0770, group `65532`) holds the vault: its database, signing key, `config.json`, attachments, and Sends. `/state` (0700, owner `65532`) is supervisor-only: the tailscaled identity and socket, the certificate cache, backup staging, sync sidecars, and the dotenv file. The supervisor and tailscaled run as `65532:65532`; the vault runs as `65533:65532`. The supervisor starts every child with its capabilities dropped: the vault has none, the tailscale CLI has none, and tailscaled keeps only `NET_ADMIN`/`NET_RAW` in TUN mode (the container must grant them); userspace mode needs none. A compromised vault therefore cannot traverse `/state`, read the LocalAPI socket, inspect PID 1's environment, or change back to the supervisor uid. The supervisor itself keeps `SETUID`/`SETGID` (to start the vault) and `KILL` (to stop it); in TUN mode the container also grants `NET_ADMIN`/`NET_RAW`, and only the tailscaled child keeps them.
 
 ## Configuration
 
@@ -74,14 +75,14 @@ Three rules that save confusion:
 
 Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and rename `ROCKET_PORT`/`VAULTWARDEN_ROCKET_PORT` to `VAULTWARDEN_PORT`.
 
-Coming from the single-volume layout? Update the mounts and capabilities in your run command or compose file: `.env` moves to `/state/.env` (a dotenv file elsewhere now refuses the boot), add a `vw-state:/state` volume, and add `SETUID`/`SETGID`/`KILL` after `cap_drop: ALL`. On the first boot the supervisor moves the old `tailscaled.state`, `certs/` cache, and backup lineage from `/data` to `/state`, deletes the old staging/cache files, and makes the vault's existing files group-accessible; a failed copy leaves the source in place and refuses the boot. Old-layout identity and cert files must be owned by uid `65532` — a foreign-owned file is refused rather than adopted. Bucket key names are unchanged, so an existing state-sync bucket restores into either layout. Rolling back to the old single-volume image needs the identity back on `/data`: move `/state/tailscaled.state` and `/state/certs/` there (or let the old image restore them from the bucket); the old image does not mount `/state`.
+Coming from the single-volume layout? Update the mounts and capabilities in your run command or compose file: `.env` moves to `/state/.env` (a dotenv file elsewhere now refuses the boot), add a `vw-state:/state` volume, and add `SETUID`/`SETGID`/`KILL` after `cap_drop: ALL`. A custom `TAILSCALE_STATE_FILE` or `TAILSCALE_SOCKET` outside `/state` must be moved first; a custom state file must be a direct child of `/state`. On the first boot the supervisor moves the old `tailscaled.state`, `certs/` cache, and backup lineage from `/data` to `/state`, deletes the old staging/cache files, and makes the vault's existing files group-accessible; a failed copy leaves the source in place and refuses the boot. Old-layout identity and cert files must be owned by uid `65532` — a foreign-owned file is refused rather than adopted. Bucket key names are unchanged, so an existing state-sync bucket restores into either layout. Rolling back to the old single-volume image needs the identity back on `/data`: move `/state/tailscaled.state` and `/state/certs/` there (or let the old image restore them from the bucket); the old image does not mount `/state`.
 
 ### Tailscale options
 
 - `TAILSCALE_SERVE` (default `true`) — publish the vault over tailnet HTTPS. Needs MagicDNS and HTTPS certificates; set `false` to run without the `*.ts.net` address.
 - `TAILSCALE_HOSTNAME` — the node name (default `vaultwarden-hummingbird`).
 - `TAILSCALE_SERVICE` — advertise the vault as a Tailscale Service; needs a tag-based auth key and approval in the console.
-- `TAILSCALE_USERSPACE` (default `true`) — userspace networking, no privileges. `false` switches to TUN mode: slightly faster, needs `NET_ADMIN` and `/dev/net/tun`.
+- `TAILSCALE_USERSPACE` (default `true`) — userspace networking, no privileges. `false` switches to TUN mode: slightly faster, needs `NET_ADMIN` (and `NET_RAW` for some setups) and `/dev/net/tun`; the supervisor keeps only those capabilities in the tailscaled child.
 
 ## Keeping data across redeploys
 
@@ -105,7 +106,7 @@ If the endpoint has no scheme, HTTPS is used. A remote `http://` endpoint is ref
 
 - At boot it restores what is missing, but never overwrites a newer local file.
 - It saves after Tailscale connects, shortly after the vault starts, on a cadence, and on shutdown. The final save is budgeted (two minutes; fifteen seconds after a second stop signal) so a slow bucket can't hold the container open.
-- It saves the tailnet identity, the vault's RSA signing key, your admin `config.json`, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must live under `/state` to ride along; the container says so at boot when it doesn't.
+- It saves the tailnet identity, the vault's RSA signing key, your admin `config.json`, TLS certificates, and your attachment and Send uploads — so a redeploy keeps the same node, the same sessions, and your files. The signing key matters most: lose it and every session logs out. A custom `TAILSCALE_STATE_FILE` must be a direct child of `/state` (a subdirectory would move tailscaled's cert cache outside the synced tree); a path on `/data`, `/custom`, or with `..` refuses the boot. The LocalAPI socket must also live under `/state`.
 - Only files whose content changed are re-uploaded, downloads are verified against a recorded hash, and large files upload in parts. Uploads are content-addressed, so an interrupted push can never replace the copy the last good manifest names, and a new file whose manifest write was interrupted is recovered on the next boot. A quiet node costs a manifest and tombstone read plus one listing per push (the GC pass), and at most one listing per boot (a legacy bucket may list twice), not a round of uploads.
 - A push is refused while the bucket cannot be proven complete (for example after a partial restore): the fallback path-key layout is never written, because it could overwrite a newer bucket copy.
 - A user file deleted locally is recorded as a tombstone only after 24 hours of consistent absence, so a transient restore failure or a lost volume cannot delete bucket data. The node identity, signing keys, and certificates are never tombstoned, even after the grace. A disappearance of every manifest file at once, or of more than a quarter of a large set, is refused as probable volume loss; delete in smaller batches, or clear the bucket to reset a vault intentionally. Tombstoned paths are never restored, their objects are garbage-collected after another day, and a file that reappears locally clears its tombstone on the next push. Tombstones are pruned after 30 days. The bucket supports up to about 100k objects per prefix; beyond that a listing fails closed rather than truncating.

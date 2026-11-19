@@ -6,6 +6,7 @@ mod consts;
 mod dburl;
 mod dotenv;
 mod env;
+pub(crate) mod paths;
 mod sync;
 
 pub use backup::DbBackupConfig;

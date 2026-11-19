@@ -4,18 +4,28 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::config::{TAILSCALE, TAILSCALED};
-use crate::runtime::{Handle, apply_env, run_bounded, run_bounded_capture, spawn};
+use crate::runtime::{
+    Handle, TUN_CAPS, apply_env, run_bounded, run_bounded_capture, spawn, spawn_with_caps,
+};
 use crate::util::{StagedFile, log};
 
 /// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
 /// /dev/net/tun). `--statedir` (derived from the state file's dir, on the
 /// supervisor-only state volume) is required for `tailscale serve` HTTPS
 /// cert caching.
-/// Environment is allow-listed ([`apply_env`]) — no supervisor secrets.
+///
+/// Environment is allow-listed ([`apply_env`]) — no supervisor secrets —
+/// and every capability is dropped. TUN mode keeps only NET_ADMIN/NET_RAW
+/// (the container must grant them); userspace mode needs no capabilities.
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Handle> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
-    if let Some(dir) = std::path::Path::new(state)
+    if state == "mem:" {
+        // `mem:` has no parent to derive a cert cache from. Keep the cache
+        // on the supervisor volume so `serve` can still issue and store
+        // certificates; the identity itself stays in memory.
+        cmd.arg("--statedir").arg(crate::config::SUPERVISOR_STATE);
+    } else if let Some(dir) = std::path::Path::new(state)
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .and_then(|d| d.to_str())
@@ -26,7 +36,11 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Ha
         cmd.arg("--tun=userspace-networking");
     }
     apply_env(&mut cmd, &[]);
-    spawn(&mut cmd)
+    if userspace {
+        spawn(&mut cmd)
+    } else {
+        spawn_with_caps(&mut cmd, TUN_CAPS)
+    }
 }
 
 /// `tailscale up` with hard timeout; a failure makes the caller refuse to
@@ -47,13 +61,16 @@ pub fn tailscale_up(
 ) -> bool {
     let key_file = match authkey {
         Some(key) => {
-            let mut file = match StagedFile::create("ts-authkey") {
-                Ok(f) => f,
-                Err(_) => {
-                    log::err("tailscale up: cannot stage authkey file; skipping authentication");
-                    return false;
-                }
-            };
+            let mut file =
+                match StagedFile::create_in(crate::config::SUPERVISOR_STATE, "ts-authkey") {
+                    Ok(f) => f,
+                    Err(_) => {
+                        log::err(
+                            "tailscale up: cannot stage authkey file; skipping authentication",
+                        );
+                        return false;
+                    }
+                };
             if file.write_all(key.as_bytes()).is_err() {
                 log::err("tailscale up: cannot write authkey file; skipping authentication");
                 return false;

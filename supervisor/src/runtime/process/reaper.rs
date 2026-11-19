@@ -126,14 +126,21 @@ impl Handle {
 }
 
 /// Idempotently start the reaper thread. Called before the first spawn.
-pub(crate) fn start() {
-    static START: OnceLock<()> = OnceLock::new();
-    START.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("reaper".into())
-            .spawn(run)
-            .expect("reaper thread");
-    });
+/// Returns false when the OS cannot create the thread: a child nobody can
+/// reap must not be started (fail closed).
+pub(crate) fn start() -> bool {
+    static START: OnceLock<bool> = OnceLock::new();
+    *START.get_or_init(
+        || match std::thread::Builder::new().name("reaper".into()).spawn(run) {
+            Ok(_) => true,
+            Err(e) => {
+                log::err(&format!(
+                    "reaper thread failed to start ({e}); refusing to spawn children"
+                ));
+                false
+            }
+        },
+    )
 }
 
 /// One reaper pass: reap pidfd-ready children, then sweep strays.

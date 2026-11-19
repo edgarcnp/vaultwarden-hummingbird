@@ -20,10 +20,11 @@ pub struct SyncConfig {
     pub target: RemoteSpec,
     /// periodic push cadence (0 disables periodic pushes)
     pub interval: Duration,
-    /// The resolved tailscaled state file as a `/data`-relative name when it
-    /// lives directly under `/data` (so it is inside the sync root).
+    /// The resolved tailscaled state file as a name directly under the
+    /// supervisor state root, so the sync can carry the identity and the
+    /// daemon's derived cert cache (`<root>/certs`) is the synced tree.
     /// `None` = the identity file cannot be part of the durable set (a
-    /// `mem:` state, or a path outside `/data`); the default
+    /// `mem:` state, or a path outside the root); the default
     /// `tailscaled.state` name is still accepted by the predicate.
     pub state_file: Option<String>,
 }
@@ -71,25 +72,17 @@ impl SyncConfig {
         })
     }
 
-    /// Point the sync at the configured state file, so a custom
-    /// `TAILSCALE_STATE_FILE` under `/data` is still part of the durable
-    /// set. A path outside `/data` (or `mem:`) stays unsynced — the caller
-    /// logs that it cannot be covered.
-    pub fn set_state_file(&mut self, state: &str) {
-        // Only a normal, non-empty path under the state root is covered by
-        // the sync root. A `/state/../etc` or control-character spelling is
-        // not.
-        self.state_file = state
-            .strip_prefix("/state/")
-            .filter(|rel| {
-                // A leading slash here would make `root.join(rel)` absolute
-                // and escape the state volume.
-                !rel.is_empty()
-                    && !rel.starts_with('/')
-                    && !rel.contains("..")
-                    && !rel.chars().any(char::is_control)
-            })
-            .map(str::to_string);
+    /// Point the sync at a state file name directly under the state root.
+    /// The config resolver has already proved the absolute path is a direct
+    /// child of the root; this keeps the bucket-relative name safe as well:
+    /// no empty name, no separator, no traversal, no control character.
+    pub fn set_state_file_rel(&mut self, rel: &str) {
+        let safe = !rel.is_empty()
+            && rel != "."
+            && rel != ".."
+            && !rel.contains('/')
+            && !rel.chars().any(char::is_control);
+        self.state_file = safe.then(|| rel.to_string());
     }
 
     /// The sync's bucket-relative key prefix (empty, or ending in `/`).
@@ -219,10 +212,10 @@ mod tests {
         }
     }
 
-    /// A custom state file is stored under the state root; an extra leading
-    /// slash after `/state/` must not turn it into an absolute path.
+    /// The synced identity name is a single normal component directly under
+    /// the state root: no separators, traversal, or control characters.
     #[test]
-    fn state_file_mapping_never_escapes_the_state_root() {
+    fn state_file_rel_is_a_single_safe_component() {
         let mut cfg = SyncConfig::new(
             "r2:vw-state".into(),
             "id".into(),
@@ -231,16 +224,11 @@ mod tests {
             Duration::from_secs(60),
         )
         .expect("valid config");
-        cfg.set_state_file("/state/tailscaled.state");
+        cfg.set_state_file_rel("tailscaled.state");
         assert_eq!(cfg.state_file.as_deref(), Some("tailscaled.state"));
-        for state in [
-            "/state//etc/passwd",
-            "/state/../etc/passwd",
-            "/state/sub/../x",
-            "/state/a\nb",
-        ] {
-            cfg.set_state_file(state);
-            assert_eq!(cfg.state_file, None, "{state} must not be mapped");
+        for rel in ["", ".", "..", "../etc/passwd", "sub/node.state", "a\nb"] {
+            cfg.set_state_file_rel(rel);
+            assert_eq!(cfg.state_file, None, "{rel:?} must not be mapped");
         }
     }
 

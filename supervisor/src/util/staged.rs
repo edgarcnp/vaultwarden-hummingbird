@@ -26,9 +26,15 @@ impl StagedFile {
     /// 0), so it is reclaimed instead of returned: a stale secret must not
     /// linger and a crash must not jam the next boot.
     pub fn create(prefix: &str) -> std::io::Result<Self> {
+        Self::create_in("/tmp", prefix)
+    }
+
+    /// [`Self::create`] in an explicit directory. Secrets that the vault
+    /// must not interfere with use the supervisor-only state root.
+    pub fn create_in(dir: &str, prefix: &str) -> std::io::Result<Self> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let path = format!(
-            "/tmp/{prefix}-{}-{}",
+            "{dir}/{prefix}-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         );

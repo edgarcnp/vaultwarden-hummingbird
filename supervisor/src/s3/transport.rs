@@ -97,18 +97,14 @@ pub fn validate_ca_file(path: &str) -> anyhow::Result<()> {
 }
 
 pub(super) fn ca_certs(path: &str) -> anyhow::Result<Vec<ureq::tls::Certificate<'static>>> {
-    use std::path::Component;
-
     const MAX_CA_BYTES: u64 = 1024 * 1024;
     // The CA decides which server is trusted; it must not live on a
     // vault-writable volume. Config resolution checks this too; keeping it
     // here covers direct callers.
-    let candidate = std::path::Path::new(path);
-    let isolated = candidate.is_absolute()
-        && candidate.starts_with(crate::config::SUPERVISOR_STATE)
-        && candidate
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)));
+    let isolated = crate::config::paths::under_root(
+        std::path::Path::new(crate::config::SUPERVISOR_STATE),
+        path,
+    );
     if !isolated {
         bail!(
             "SUPERVISOR_S3_CA_FILE {path} must live under {}",
