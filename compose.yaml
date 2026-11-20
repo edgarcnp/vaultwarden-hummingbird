@@ -17,6 +17,9 @@ services:
       dockerfile: Containerfile
       args:
         VAULTWARDEN_WEB_VAULT: "${VAULTWARDEN_WEB_VAULT:-true}"
+        GIT_SHA: "${GIT_SHA:-unknown}"
+        BUILD_DATE: "${BUILD_DATE:-1970-01-01T00:00:00Z}"
+        IMAGE_VERSION: "${IMAGE_VERSION:-dev}"
     image: vaultwarden-hummingbird:local
     restart: unless-stopped
     # Covers the supervisor's TERM grace period plus the budgeted final S3

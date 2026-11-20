@@ -46,7 +46,12 @@ podman manifest inspect ghcr.io/edgarcnp/vaultwarden-hummingbird:v1.2.0
 podman pull ghcr.io/edgarcnp/vaultwarden-hummingbird:v1.2.0
 podman image inspect --format '{{json .Config.Healthcheck}}' \
   ghcr.io/edgarcnp/vaultwarden-hummingbird:v1.2.0
+podman image inspect --format '{{.Labels}}' \
+  ghcr.io/edgarcnp/vaultwarden-hummingbird:v1.2.0
 ```
+
+The labels should name the release version and the tagged commit, not the
+Hummingbird base values.
 
 Check the publish workflow run and its attestations. Both the Image workflow
 (on build-context changes) and publish (on each release, both architectures)

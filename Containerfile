@@ -136,9 +136,21 @@ ARG VW_VERSION
 ARG TAILSCALE_VERSION
 ARG VAULTWARDEN_WEB_VAULT
 
+# IMAGE METADATA — override the base image's labels, which otherwise keep
+# describing the Hummingbird base (its version, commit, and build date).
+# CI passes the real values; local builds get the sentinels.
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=1970-01-01T00:00:00Z
+ARG IMAGE_VERSION=dev
+
 LABEL org.opencontainers.image.title="vaultwarden-hummingbird" \
       org.opencontainers.image.description="Vaultwarden ${VW_VERSION} + Tailscale ${TAILSCALE_VERSION} on Hummingbird core-runtime" \
-      org.opencontainers.image.source="https://github.com/edgarcnp/vaultwarden-hummingbird"
+      org.opencontainers.image.source="https://github.com/edgarcnp/vaultwarden-hummingbird" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      vcs-ref="${GIT_SHA}" \
+      version="${IMAGE_VERSION}"
 
 # RUNTIME CONTENTS — the -openssl runtime image provides libssl/libcrypto;
 # the sqlite-only vaultwarden build needs no other shared libs copied in.

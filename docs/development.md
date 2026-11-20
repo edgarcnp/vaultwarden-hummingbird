@@ -19,6 +19,10 @@ Do not skip `--format docker`. The image declares a native health check, and
 Podman's default OCI format silently drops that field. Without the flag,
 everything looks fine and the health check simply does not work.
 
+The image labels default to `unknown`/`dev`. CI and releases pass `GIT_SHA`,
+`BUILD_DATE`, and `IMAGE_VERSION` so `podman inspect` records the source
+revision and release instead of the Hummingbird base values.
+
 Run what you built:
 
 ```sh

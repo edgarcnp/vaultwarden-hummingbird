@@ -47,6 +47,9 @@ jobs:
           podman build \
             --format docker \
             --platform linux/amd64 \
+            --build-arg GIT_SHA="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg IMAGE_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' supervisor/Cargo.toml)" \
             --tag pr-check:ci \
             .
 
@@ -70,6 +73,9 @@ jobs:
           podman build \
             --format docker \
             --platform linux/arm64 \
+            --build-arg GIT_SHA="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg IMAGE_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' supervisor/Cargo.toml)" \
             --tag pr-check:ci \
             .
 
