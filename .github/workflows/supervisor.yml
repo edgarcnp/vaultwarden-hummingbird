@@ -1,4 +1,4 @@
-# The supervisor crate: lint -> test -> build, gated in that order.
+# The supervisor crate: lint and rustdoc -> test -> build, gated in that order.
 name: Supervisor
 
 on:
@@ -53,6 +53,11 @@ jobs:
 
       - name: cargo clippy
         run: cargo +"$RUST_VERSION" clippy --all-targets --locked -- -D warnings
+
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +"$RUST_VERSION" doc --no-deps --document-private-items --locked
 
   test:
     name: Test
