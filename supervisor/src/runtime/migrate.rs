@@ -134,7 +134,8 @@ pub(super) fn migrate_layout_at(state: &Path, data: &Path) -> bool {
 /// the group is the fixed `tailscale` gid; in a developer test run the
 /// current gid is the only one the user may assign.
 fn tailscale_group() -> u32 {
-    if geteuid().as_raw() == SUPERVISOR_UID {
+    let euid = geteuid();
+    if euid.as_raw() == SUPERVISOR_UID || euid.is_root() {
         TAILSCALE_GID
     } else {
         nix::unistd::getegid().as_raw()

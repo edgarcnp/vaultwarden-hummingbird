@@ -290,10 +290,11 @@ fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
     for (index, word) in data.iter_mut().enumerate() {
         let bits = (mask >> (index * 32)) as u32;
         // After a uid change with KEEPCAPS, effective is cleared; the
-        // allowlist must become effective again for the child to use it.
-        word.effective = word.permitted & bits;
+        // allowlist must become effective again and be inheritable, or the
+        // ambient raise (and the exec-preserved set) is empty.
         word.permitted &= bits;
-        word.inheritable &= bits;
+        word.effective = word.permitted;
+        word.inheritable = word.permitted;
     }
     // SAFETY: capset reads the header and the two data words.
     let rc = unsafe { libc::syscall(libc::SYS_capset, &header, data.as_ptr()) };

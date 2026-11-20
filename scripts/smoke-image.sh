@@ -144,7 +144,21 @@ run vault-cannot-reach-state 1 "Permission denied" -- \
   -e DATA_FOLDER=/state -e WEB_VAULT_FOLDER=/web-vault \
   -e I_REALLY_WANT_VOLATILE_STORAGE=true "$IMAGE"
 
-# 10. The supervisor-spawned children must not retain the container
+# 10. TUN mode keeps NET_ADMIN/NET_RAW across the tailscaled uid change
+#     (PR_SET_KEEPCAPS). Rootless podman cannot create a TUN in its user
+#     namespace, so this runs only on a rootful host with a TUN device;
+#     the image still exercises userspace mode above.
+ROOTLESS=$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
+if [ -e /dev/net/tun ] && [ "$ROOTLESS" != "true" ]; then
+  run tailscale-tun-fails-closed 1 "authenticating tailscale node" -- \
+    "${CAPS[@]}" --cap-add=NET_ADMIN --cap-add=NET_RAW --device /dev/net/tun \
+    -e TAILSCALE_USERSPACE=false -e SUPERVISOR_ENV_FILE=/state/.env \
+    -v "$WORK/fake-auth.env:/state/.env:ro,z" "$IMAGE"
+else
+  echo "SKIP  tailscale-tun-fails-closed (rootless=$ROOTLESS or no /dev/net/tun)"
+fi
+
+# 11. The supervisor-spawned children must not retain the container
 #     capabilities. This is the regression test for the vault's capability
 #     drop: without it the vault can setuid back to 65532 and read /state.
 run security-isolation 0 "isolation probe: ok" -- \
