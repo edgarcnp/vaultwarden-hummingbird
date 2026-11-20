@@ -243,6 +243,52 @@ fn expect(size: Option<u64>, max: u64) -> Expect<'static> {
     }
 }
 
+/// A download below a root is anchored on directory descriptors: a
+/// symlinked parent planted after `create_real_dirs` cannot redirect the
+/// write outside the root.
+#[test]
+fn get_under_refuses_a_symlinked_parent() {
+    let client = local_client(fake_server("200 OK", "", b"payload"));
+    let root = scratch("get-under-link");
+    let outside = scratch("get-under-outside");
+    std::os::unix::fs::symlink(&outside, root.join("attachments")).unwrap();
+    let err = client
+        .get_under(
+            "state/attachments/a",
+            &root,
+            "attachments/a",
+            expect(Some(7), 1024),
+            || false,
+        )
+        .unwrap_err();
+    assert!(matches!(err, GetError::Local(_)), "{err:?}");
+    assert!(!outside.join("a").exists(), "the link target is untouched");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn get_under_publishes_into_an_anchored_parent() {
+    let client = local_client(fake_server("200 OK", "", b"payload"));
+    let root = scratch("get-under-ok");
+    std::fs::create_dir(root.join("attachments")).unwrap();
+    client
+        .get_under(
+            "state/attachments/a",
+            &root,
+            "attachments/a",
+            expect(Some(7), 1024),
+            || false,
+        )
+        .expect("anchored download publishes");
+    assert_eq!(
+        std::fs::read(root.join("attachments/a")).unwrap(),
+        b"payload"
+    );
+    assert!(!root.join("attachments/a.vw-part").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A 404 is a structured "missing" (the restore path may try the next
 /// older candidate), unlike a transport failure.
 #[test]

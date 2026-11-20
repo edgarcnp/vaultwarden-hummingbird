@@ -356,12 +356,8 @@ fn reconcile_objects(
             continue;
         }
         let rel_parent = Path::new(&rel).parent().unwrap_or_else(|| Path::new(""));
-        if create_real_dirs(
-            &roots.local_root(&rel, cfg.state_file.as_deref()),
-            rel_parent,
-        )
-        .is_err()
-        {
+        let root = roots.local_root(&rel, cfg.state_file.as_deref());
+        if create_real_dirs(&root, rel_parent).is_err() {
             continue;
         }
         let key = format!("{}{}", cfg.prefix(), object_key(&rel, &version.sha256));
@@ -371,8 +367,7 @@ fn reconcile_objects(
             max_bytes: MAX_SYNC_OBJECT_BYTES,
             mode: DOWNLOAD_MODE,
         };
-        let local = local.to_string_lossy().into_owned();
-        match client.get(&key, &local, expect, abort) {
+        match client.get_under(&key, &root, &rel, expect, abort) {
             Ok(()) => {
                 recovered += 1;
                 log::info(&format!(
@@ -573,14 +568,14 @@ fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -
             continue;
         }
         // Reject a symlinked parent component: a bucket-controlled path must
-        // never redirect a supervisor write outside its volume.
+        // never redirect a supervisor write outside its volume. The
+        // download itself opens the parent with openat/O_NOFOLLOW, so a
+        // swap after this check cannot redirect the temp or the rename.
         let rel_parent = Path::new(&target.rel)
             .parent()
             .unwrap_or_else(|| Path::new(""));
-        if let Err(e) = create_real_dirs(
-            &roots.local_root(&target.rel, cfg.state_file.as_deref()),
-            rel_parent,
-        ) {
+        let root = roots.local_root(&target.rel, cfg.state_file.as_deref());
+        if let Err(e) = create_real_dirs(&root, rel_parent) {
             log::err(&format!(
                 "state sync: cannot create the parent of {}: {e}",
                 log::sanitize(&target.rel)
@@ -605,32 +600,33 @@ fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -
             None => legacy.clone(),
         };
         let mut invalid = false;
-        let result: Result<(), GetError> = match client.get(&primary, &local, expect, &abort) {
-            Ok(()) => Ok(()),
-            Err(primary_err) => {
-                if matches!(primary_err, GetError::Invalid(_)) {
-                    invalid = true;
-                }
-                if target.sha256.is_some() && primary != legacy {
-                    // Legacy fallback for entries a bucket inherited from
-                    // before the layout change.
-                    match client.get(&legacy, &local, expect, &abort) {
-                        Ok(()) => Ok(()),
-                        Err(legacy_err) => {
-                            if matches!(legacy_err, GetError::Invalid(_)) {
-                                invalid = true;
-                            }
-                            Err(GetError::Transport(format!(
-                                "content-addressed key failed ({primary_err}); the legacy \
-                                 key failed too ({legacy_err})"
-                            )))
-                        }
+        let result: Result<(), GetError> =
+            match client.get_under(&primary, &root, &target.rel, expect, &abort) {
+                Ok(()) => Ok(()),
+                Err(primary_err) => {
+                    if matches!(primary_err, GetError::Invalid(_)) {
+                        invalid = true;
                     }
-                } else {
-                    Err(primary_err)
+                    if target.sha256.is_some() && primary != legacy {
+                        // Legacy fallback for entries a bucket inherited from
+                        // before the layout change.
+                        match client.get_under(&legacy, &root, &target.rel, expect, &abort) {
+                            Ok(()) => Ok(()),
+                            Err(legacy_err) => {
+                                if matches!(legacy_err, GetError::Invalid(_)) {
+                                    invalid = true;
+                                }
+                                Err(GetError::Transport(format!(
+                                    "content-addressed key failed ({primary_err}); the legacy \
+                                     key failed too ({legacy_err})"
+                                )))
+                            }
+                        }
+                    } else {
+                        Err(primary_err)
+                    }
                 }
-            }
-        };
+            };
         match result {
             Ok(()) => {
                 pulled += 1;

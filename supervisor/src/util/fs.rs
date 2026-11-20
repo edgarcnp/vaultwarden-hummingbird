@@ -178,6 +178,37 @@ pub fn open_under(root: &Path, rel: &str) -> io::Result<File> {
     Ok(current)
 }
 
+/// Open a real directory without following a final symlink.
+pub(crate) fn open_dir(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)
+}
+
+/// Open `root/rel` as a real directory without following a symlink in any
+/// component. The descriptor chain pins the parent even if a concurrent
+/// writer renames or replaces the path entries after the check.
+pub fn open_dir_under(root: &Path, rel: &Path) -> io::Result<File> {
+    let mut current = open_dir(root)?;
+    for component in rel.components() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains a non-normal component",
+            ));
+        };
+        let fd = openat(
+            &current,
+            Path::new(name),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        current = File::from(fd);
+    }
+    Ok(current)
+}
+
 /// Open a file for reading without following a final symlink.
 pub fn open_nofollow(path: &str) -> io::Result<File> {
     OpenOptions::new()

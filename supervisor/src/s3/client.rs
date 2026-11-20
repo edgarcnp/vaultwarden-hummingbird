@@ -12,10 +12,14 @@
 //! untouched.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
+use nix::fcntl::{AtFlags, OFlag, openat, renameat};
+use nix::sys::stat::{Mode, fstatat};
+use nix::unistd::{UnlinkatFlags, unlinkat};
 use rusty_s3::actions::{CreateMultipartUpload, DeleteObjectsResponse, ObjectIdentifier};
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 
@@ -45,15 +49,94 @@ const MULTIPART_XML_CAP: u64 = 64 * 1024;
 /// partial transfer resumes with a Range request instead of restarting.
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
 
-/// How many bytes of a previous attempt a download may resume from: the
-/// supervisor temp size, unless it already reached the expected size (a stale or
-/// foreign leftover must never be appended to).
-fn resumed_offset(tmp: &str, expected: Option<u64>) -> u64 {
-    let len = std::fs::metadata(tmp).map(|meta| meta.len()).unwrap_or(0);
-    if expected.is_some_and(|expected| len >= expected) {
-        0
-    } else {
-        len
+/// A download target anchored on the directory descriptor, so the temp
+/// creation, hash, rename, and cleanup cannot be redirected by a path swap
+/// in the parent after the check.
+struct Download {
+    dir: std::fs::File,
+    name: String,
+    display: String,
+}
+
+impl Download {
+    fn path(path: &str) -> std::io::Result<Self> {
+        let path = Path::new(path);
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+        })?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+            })?;
+        Ok(Self {
+            dir: crate::util::fs::open_dir(parent)?,
+            name: name.to_string(),
+            display: path.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn under(root: &Path, rel: &str) -> std::io::Result<Self> {
+        let path = Path::new(rel);
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+            })?;
+        Ok(Self {
+            dir: crate::util::fs::open_dir_under(root, parent)?,
+            name: name.to_string(),
+            display: root.join(path).to_string_lossy().into_owned(),
+        })
+    }
+
+    fn temp(&self) -> String {
+        format!("{}{}", self.name, crate::util::fs::PART_SUFFIX)
+    }
+
+    fn temp_len(&self, temp: &str, expected: Option<u64>) -> u64 {
+        let len = fstatat(&self.dir, temp, AtFlags::AT_SYMLINK_NOFOLLOW)
+            .ok()
+            .and_then(|stat| u64::try_from(stat.st_size).ok())
+            .unwrap_or(0);
+        if expected.is_some_and(|expected| len >= expected) {
+            0
+        } else {
+            len
+        }
+    }
+
+    fn open_temp(&self, temp: &str, start: u64, mode: u32) -> std::io::Result<std::fs::File> {
+        let mut flags = OFlag::O_WRONLY
+            | OFlag::O_CREAT
+            | OFlag::O_NOFOLLOW
+            | OFlag::O_NONBLOCK
+            | OFlag::O_CLOEXEC;
+        if start == 0 {
+            flags |= OFlag::O_TRUNC;
+        } else {
+            flags |= OFlag::O_APPEND;
+        }
+        let fd = openat(&self.dir, temp, flags, Mode::from_bits_truncate(mode))?;
+        Ok(std::fs::File::from(fd))
+    }
+
+    fn hash_temp(&self, temp: &str) -> std::io::Result<String> {
+        let fd = openat(
+            &self.dir,
+            temp,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut file = std::fs::File::from(fd);
+        crate::util::hash::sha256_reader(&mut file)
+    }
+
+    fn remove_temp(&self, temp: &str) {
+        let _ = unlinkat(&self.dir, temp, UnlinkatFlags::NoRemoveDir);
     }
 }
 
@@ -537,7 +620,10 @@ impl Client {
     /// that meets every expectation is renamed into place: a failed,
     /// truncated, or mismatched download leaves `path` untouched and
     /// removes the temp. The published file takes [`Expect::mode`] (0660:
-    /// group-writable for the owning service).
+    /// group-writable for the owning service). The parent directory is
+    /// opened once and every temp/hash/rename/cleanup operation is relative
+    /// to that descriptor; [`Self::get_under`] additionally anchors each
+    /// path component.
     pub fn get(
         &self,
         key: &str,
@@ -545,16 +631,49 @@ impl Client {
         expect: Expect<'_>,
         abort: impl Fn() -> bool,
     ) -> Result<(), GetError> {
+        let target = Download::path(path)
+            .map_err(|e| GetError::Local(format!("cannot open the parent of {path}: {e}")))?;
+        self.get_target(key, target, expect, abort)
+    }
+
+    /// [`Self::get`] for `rel` below `root`, opened with `openat` and
+    /// `O_NOFOLLOW` per component. The directory descriptors pin the
+    /// parent, so a symlink swapped in after the caller's
+    /// `create_real_dirs` cannot redirect the temp, rename, or cleanup.
+    pub fn get_under(
+        &self,
+        key: &str,
+        root: &Path,
+        rel: &str,
+        expect: Expect<'_>,
+        abort: impl Fn() -> bool,
+    ) -> Result<(), GetError> {
+        let target = Download::under(root, rel).map_err(|e| {
+            GetError::Local(format!(
+                "cannot open the parent of {}: {e}",
+                root.join(rel).display()
+            ))
+        })?;
+        self.get_target(key, target, expect, abort)
+    }
+
+    fn get_target(
+        &self,
+        key: &str,
+        target: Download,
+        expect: Expect<'_>,
+        abort: impl Fn() -> bool,
+    ) -> Result<(), GetError> {
         if abort() {
             return Err(GetError::Aborted);
         }
-        // The temp lives beside the target so the publish is one atomic
-        // same-filesystem rename; a crash leaves the target untouched. A
-        // partial transfer is kept and resumed with a Range request, so a
-        // slow link makes progress across bounded attempts instead of
-        // restarting from zero every time.
-        let tmp = format!("{path}{}", crate::util::fs::PART_SUFFIX);
-        let mut offset = resumed_offset(&tmp, expect.size);
+        // The temp lives in the anchored directory so the publish is one
+        // atomic same-filesystem rename; a crash leaves the target
+        // untouched. A partial transfer is kept and resumed with a Range
+        // request, so a slow link makes progress across bounded attempts
+        // instead of restarting from zero every time.
+        let tmp = target.temp();
+        let mut offset = target.temp_len(&tmp, expect.size);
         let mut attempt = 0;
         let staged: Result<u64, GetError> = loop {
             attempt += 1;
@@ -600,24 +719,21 @@ impl Client {
             let start = offset;
             let mut reader = response.into_body().into_reader();
             let streamed = (|| -> Result<u64, GetError> {
-                let mut out = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(start == 0)
-                    .append(start > 0)
-                    .mode(expect.mode)
-                    .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-                    .open(&tmp)
-                    .map_err(|e| GetError::Local(format!("cannot create {tmp}: {e}")))?;
+                let mut out = target.open_temp(&tmp, start, expect.mode).map_err(|e| {
+                    GetError::Local(format!("cannot create {}: {e}", target.display))
+                })?;
                 // A pre-created FIFO opens without O_NONBLOCK only when a
                 // reader is present; never write into anything but a file.
                 if !out
                     .metadata()
-                    .map_err(|e| GetError::Local(format!("cannot inspect {tmp}: {e}")))?
+                    .map_err(|e| {
+                        GetError::Local(format!("cannot inspect {}: {e}", target.display))
+                    })?
                     .is_file()
                 {
                     return Err(GetError::Local(format!(
-                        "cannot create {tmp}: not a regular file"
+                        "cannot create {}: not a regular file",
+                        target.display
                     )));
                 }
                 let mut buf = [0u8; 64 * 1024];
@@ -675,9 +791,7 @@ impl Client {
                     // Only a transport failure is worth another attempt; a
                     // cap/size/hash/local failure is definitive.
                     let retry = matches!(e, GetError::Transport(_));
-                    let done = std::fs::symlink_metadata(&tmp)
-                        .map(|meta| meta.len())
-                        .unwrap_or(0);
+                    let done = target.temp_len(&tmp, None);
                     if retry
                         && attempt < MAX_DOWNLOAD_ATTEMPTS
                         && !abort()
@@ -699,8 +813,11 @@ impl Client {
                 )));
             }
             if let Some(expected) = expect.sha256 {
-                let actual = crate::util::hash::sha256_file(&tmp).map_err(|e| {
-                    GetError::Local(format!("download of {key}: cannot hash the temp file: {e}"))
+                let actual = target.hash_temp(&tmp).map_err(|e| {
+                    GetError::Local(format!(
+                        "download of {key}: cannot hash {}: {e}",
+                        target.display
+                    ))
                 })?;
                 if actual != expected {
                     return Err(GetError::Invalid(format!(
@@ -708,22 +825,18 @@ impl Client {
                     )));
                 }
             }
-            std::fs::rename(&tmp, path)
-                .map_err(|e| GetError::Local(format!("cannot publish {path}: {e}")))?;
+            renameat(&target.dir, tmp.as_str(), &target.dir, target.name.as_str())
+                .map_err(|e| GetError::Local(format!("cannot publish {}: {e}", target.display)))?;
             // The file is complete and published; make the name durable
             // too, or a crash can lose a successful pull.
-            if let Some(parent) = std::path::Path::new(path).parent()
-                && let Err(e) = std::fs::File::open(parent).and_then(|dir| dir.sync_all())
-            {
-                return Err(GetError::Local(format!(
-                    "cannot fsync {}: {e}",
-                    parent.to_string_lossy()
-                )));
-            }
+            target
+                .dir
+                .sync_all()
+                .map_err(|e| GetError::Local(format!("cannot fsync {}: {e}", target.display)))?;
             Ok(())
         });
         if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
+            target.remove_temp(&tmp);
         }
         result
     }
