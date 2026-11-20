@@ -164,9 +164,9 @@ COPY --from=fetch --chown=65532:65532 /data /data
 # folder, so an API-only build stays API-only under the supervisor too.
 # Volatile storage: pointing /data at tmpfs (or running without a volume)
 # loses everything on exit. vaultwarden's upstream
-# I_REALLY_WANT_VOLATILE_STORAGE gate did NOT trigger on 1.37.2 (verified
-# on that version; recheck on upgrade: a tmpfs /data boots clean, no
-# refusal, no warning) — the safety net here
+# I_REALLY_WANT_VOLATILE_STORAGE gate only flags Docker/Podman's 64-character
+# anonymous volume (verified against the 1.37.5 source: a manual tmpfs /data
+# boots clean, no refusal, no warning) — the safety net here
 # is the supervisor's state sync + DB backup, not the vault's own check.
 
 ENV DATA_FOLDER=/data \
