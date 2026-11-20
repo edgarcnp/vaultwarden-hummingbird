@@ -37,8 +37,17 @@ fn env_file_isolated(path: &str) -> bool {
 fn state_has_identity(path: &str) -> bool {
     const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
     const MACHINE_KEY: &[u8] = b"\"_machinekey\"";
-    let Ok(bytes) = crate::util::fs::read_capped_bytes(path, MAX_STATE_BYTES) else {
-        return false;
+    let bytes = match crate::util::fs::read_capped_bytes(path, MAX_STATE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            log::err(&format!(
+                "config: cannot read the Tailscale state file {} ({e}); treating it as \
+                 no identity — check the file mode and CAP_DAC_READ_SEARCH",
+                log::sanitize(path)
+            ));
+            return false;
+        }
     };
     bytes
         .windows(MACHINE_KEY.len())
