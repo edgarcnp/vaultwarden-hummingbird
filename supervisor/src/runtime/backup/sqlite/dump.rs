@@ -17,7 +17,7 @@ pub(crate) fn dump(path: &str, staged: &str, abort: &(impl Fn() -> bool + Sync))
     }
     let conn = match rusqlite::Connection::open_with_flags(
         path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -33,19 +33,24 @@ pub(crate) fn dump(path: &str, staged: &str, abort: &(impl Fn() -> bool + Sync))
     }
     let interrupt = conn.get_interrupt_handle();
     let done = AtomicBool::new(false);
-    let result = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                if abort() {
-                    interrupt.interrupt();
-                    break;
+    let result: Result<(), String> = std::thread::scope(|scope| {
+        if let Err(e) = std::thread::Builder::new()
+            .name("sqlite-dump-abort".into())
+            .spawn_scoped(scope, || {
+                while !done.load(Ordering::Relaxed) {
+                    if abort() {
+                        interrupt.interrupt();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        });
+            })
+        {
+            return Err(format!("cannot start the sqlite abort watcher: {e}"));
+        }
         let result = conn.execute("VACUUM INTO ?1", [staged]).map(|_| ());
         done.store(true, Ordering::Relaxed);
-        result
+        result.map_err(|e| e.to_string())
     });
     match result {
         Ok(()) => true,

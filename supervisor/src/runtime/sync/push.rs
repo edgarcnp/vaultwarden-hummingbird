@@ -8,9 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::config::SyncConfig;
+use crate::config::{SYNC_RUN_BUDGET, SyncConfig};
 use crate::s3::{Client, MAX_SYNC_OBJECT_BYTES};
 use crate::util::hash::sha256_reader;
 use crate::util::log;
@@ -65,7 +65,10 @@ pub(super) fn wait_for_rsa_key_at(
 /// deletion grace becomes a tombstone instead of being kept forever; the
 /// mass guard keeps a lost volume from emptying the bucket.
 pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
-    sync_state_at(&Roots::production(), cfg, abort)
+    let deadline = Instant::now() + SYNC_RUN_BUDGET;
+    sync_state_at(&Roots::production(), cfg, || {
+        abort() || Instant::now() >= deadline
+    })
 }
 
 /// [`sync_state`] with explicit roots (tests use a scratch directory).

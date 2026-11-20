@@ -25,6 +25,7 @@ struct Candidate {
     key: String,
     size: u64,
     generation: Option<u64>,
+    sha256: Option<String>,
 }
 
 /// What the boot-time restore decided.
@@ -159,6 +160,7 @@ fn candidates(
                 key: format!("{}{}", cfg.prefix(), entry.name),
                 size: entry.size,
                 generation: Some(entry.generation),
+                sha256: entry.sha256.clone(),
             })
             .collect()),
         Ok(None) => legacy_candidates(s3, cfg, abort),
@@ -188,6 +190,7 @@ fn legacy_candidates(
             key: format!("{}{name}", cfg.prefix()),
             size,
             generation: None,
+            sha256: None,
         })
         .collect())
 }
@@ -269,7 +272,7 @@ fn restore_object(
         &staged,
         Expect {
             size: Some(candidate.size),
-            sha256: None,
+            sha256: candidate.sha256.as_deref(),
             max_bytes: MAX_DB_OBJECT_BYTES,
             mode: 0o600,
         },
@@ -499,6 +502,87 @@ mod tests {
 
         let sync = SyncConfig::new(
             "r2:vw-restore-missing".into(),
+            "id".into(),
+            "secret".into(),
+            format!("http://{addr}"),
+            Duration::from_secs(60),
+        )
+        .expect("valid test remote");
+        let mut cfg = support::cfg_with_sync(sync);
+        cfg.restore = true;
+        cfg.db_path = dir.join("live.sqlite3").to_string_lossy().into_owned();
+
+        assert_eq!(restore_if_empty(&cfg, || false), RestoreOutcome::Ready);
+        let live = rusqlite::Connection::open(&cfg.db_path).unwrap();
+        let value: String = live
+            .query_row("SELECT v FROM restored LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A v2 manifest hash that does not match the downloaded bytes is a
+    /// definitive invalid candidate: restore tries the next older backup.
+    #[test]
+    fn restore_falls_through_a_hash_mismatch() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!("vw-sup-rhash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.sqlite3");
+        let conn = rusqlite::Connection::open(&source).unwrap();
+        conn.execute_batch("CREATE TABLE restored (v TEXT); INSERT INTO restored VALUES ('new');")
+            .unwrap();
+        drop(conn);
+        let bytes = std::fs::read(&source).unwrap();
+        let good = crate::util::hash::sha256_bytes(&bytes);
+        let bad = "0".repeat(64);
+        let manifest = format!(
+            "v2\n1 sqlite-1.sqlite3 {} {good}\n2 sqlite-2.sqlite3 {} {bad}\n",
+            bytes.len(),
+            bytes.len()
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = bytes.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("");
+                let path = path.split('?').next().unwrap_or(path);
+                let body = if path.ends_with("/manifest") {
+                    manifest.clone().into_bytes()
+                } else if path.ends_with("/sqlite-2.sqlite3") || path.ends_with("/sqlite-1.sqlite3")
+                {
+                    body.clone()
+                } else {
+                    Vec::new()
+                };
+                let status = if body.is_empty() {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(&body);
+            }
+        });
+
+        let sync = SyncConfig::new(
+            "r2:vw-restore-hash".into(),
             "id".into(),
             "secret".into(),
             format!("http://{addr}"),

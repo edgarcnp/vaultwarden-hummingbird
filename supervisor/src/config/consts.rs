@@ -37,15 +37,29 @@ pub const PERSIST_FORCED_BUDGET: Duration = Duration::from_secs(15);
 pub const BACKUP_FIRST_DELAY: Duration = Duration::from_secs(60);
 /// Delay before the first periodic state push, also measured from the vault
 /// starting: vaultwarden creates `/data/rsa_key.pem` during startup, so a
-/// push a little later is the first that can carry it. Without this the next
-/// push would wait a full sync interval, and a redeploy inside that window
-/// loses the signing key (every session revoked).
-pub const SYNC_FIRST_DELAY: Duration = Duration::from_secs(60);
+/// push a little later is the first that can carry it. It runs before the
+/// first DB backup (30s vs 60s), so a large dump cannot starve the signing
+/// key; without this the next push would wait a full sync interval, and a
+/// redeploy inside that window loses the signing key (every session revoked).
+pub const SYNC_FIRST_DELAY: Duration = Duration::from_secs(30);
 
 /// Extra wait for the vault's signing key on the first push: a slow vault
 /// must not make the first backup keyless. Bounded so a failed vault cannot
 /// hold the maintenance thread indefinitely.
 pub const SYNC_RSA_WAIT: Duration = Duration::from_secs(120);
+
+/// Overall budget for one boot state pull. Per-request timeouts still leave
+/// a slow bucket able to delay boot for a long time; a partial pull is
+/// better than an unbounded boot, and the next boot retries.
+pub const BOOT_RESTORE_BUDGET: Duration = Duration::from_secs(30 * 60);
+
+/// Overall budget for one periodic state push, independent of the number
+/// of objects and attempts.
+pub const SYNC_RUN_BUDGET: Duration = Duration::from_secs(60 * 60);
+
+/// Overall budget for one periodic backup cycle (dump, upload, manifest,
+/// prune). The drain has its own, shorter deadline.
+pub const BACKUP_RUN_BUDGET: Duration = Duration::from_secs(60 * 60);
 
 // Default cadences/counts; seconds where applicable.
 pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;

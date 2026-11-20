@@ -9,7 +9,6 @@
 //! temp on the data volume, then `link(2)`s it into place: still atomic,
 //! still never replacing existing data, and no cross-device rename.
 
-use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,23 +20,26 @@ use crate::util::make_private;
 /// The live DB is shared with the vault through the data group: the vault
 /// runs a different uid and must be able to write its own database.
 const LIVE_MODE: u32 = 0o660;
-const COPY_CHUNK: usize = 64 * 1024;
 
 /// Emptiness per the never-overwrite invariant: the live file is absent,
 /// or a readable SQLite database with zero user tables (a freshly created
 /// or truncated file). Corrupt or unreadable files are ambiguous (Err) —
 /// never silently treated as empty, never silently kept.
 pub(crate) fn is_empty(path: &str) -> anyhow::Result<bool> {
-    if !Path::new(path).exists() {
-        return Ok(true);
+    match Path::new(path).try_exists() {
+        Ok(false) => return Ok(true),
+        Ok(true) => {}
+        Err(e) => return Err(anyhow::anyhow!("cannot inspect existing db: {e}")),
     }
-    let conn =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| anyhow::anyhow!("cannot open existing db: {e}"))?;
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|e| anyhow::anyhow!("cannot open existing db: {e}"))?;
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master \
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+             WHERE type = 'table' AND lower(name) NOT GLOB 'sqlite_*'",
             [],
             |r| r.get(0),
         )
@@ -78,27 +80,39 @@ pub(crate) fn import(
     }
     let check = match rusqlite::Connection::open_with_flags(
         staged,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
     ) {
         Ok(conn) => {
             let interrupt = conn.get_interrupt_handle();
             let done = AtomicBool::new(false);
-            let check = std::thread::scope(|scope| {
-                scope.spawn(|| {
-                    while !done.load(Ordering::Relaxed) {
-                        if abort() {
-                            interrupt.interrupt();
-                            break;
+            let check: Result<String, String> = std::thread::scope(|scope| {
+                if let Err(e) = std::thread::Builder::new()
+                    .name("sqlite-restore-abort".into())
+                    .spawn_scoped(scope, || {
+                        while !done.load(Ordering::Relaxed) {
+                            if abort() {
+                                interrupt.interrupt();
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
                         }
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                });
+                    })
+                {
+                    return Err(format!("cannot start the sqlite abort watcher: {e}"));
+                }
                 let check = conn
                     .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
                     .unwrap_or_else(|e| format!("check failed: {e}"));
                 done.store(true, Ordering::Relaxed);
-                check
+                Ok(check)
             });
+            let check = match check {
+                Ok(check) => check,
+                Err(e) => {
+                    log::err(&format!("db restore: {e}; refusing the import"));
+                    return Err(ImportError::Local);
+                }
+            };
             if abort() {
                 return Err(ImportError::Aborted);
             }
@@ -121,8 +135,8 @@ pub(crate) fn import(
     // clearing it loses nothing. If this dies in between, the next boot
     // sees an absent database and retries; a non-empty file is never
     // touched.
-    if Path::new(path).exists() {
-        match is_empty(path) {
+    match Path::new(path).try_exists() {
+        Ok(true) => match is_empty(path) {
             Ok(true) => {
                 if let Err(e) = std::fs::remove_file(path) {
                     log::err(&format!("db restore: cannot clear the empty live DB: {e}"));
@@ -139,6 +153,13 @@ pub(crate) fn import(
                 ));
                 return Err(ImportError::Local);
             }
+        },
+        Ok(false) => {}
+        Err(e) => {
+            log::err(&format!(
+                "db restore: cannot inspect the live DB path ({e}); not overwriting"
+            ));
+            return Err(ImportError::Local);
         }
     }
     let tmp = match copy_beside(staged, path) {
@@ -203,14 +224,7 @@ fn copy_beside(staged: &str, path: &str) -> std::io::Result<String> {
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(&tmp)?;
     let copied = (|| -> std::io::Result<()> {
-        let mut buffer = vec![0u8; COPY_CHUNK];
-        loop {
-            let n = input.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            output.write_all(&buffer[..n])?;
-        }
+        std::io::copy(&mut input, &mut output)?;
         // The open mask is umask-dependent; make the exact mode explicit.
         output.set_permissions(std::fs::Permissions::from_mode(LIVE_MODE))?;
         output.sync_all()
@@ -268,6 +282,37 @@ mod tests {
         drop(conn);
         assert!(!is_empty(&path).unwrap());
         cleanup(&path);
+    }
+
+    /// `LIKE 'sqlite_%'` treats `_` as a wildcard; a user table that merely
+    /// starts with `sqlite` (no underscore) is still user data.
+    #[test]
+    fn a_user_table_starting_with_sqlite_is_not_empty() {
+        let path = scratch("sqlite-prefix");
+        cleanup(&path);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sqliteX (v TEXT);")
+            .unwrap();
+        drop(conn);
+        assert!(!is_empty(&path).unwrap());
+        cleanup(&path);
+    }
+
+    /// The live DB path is vault-writable; a symlink is never followed.
+    #[test]
+    fn a_symlinked_db_is_refused() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("vw-sup-sqllink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.sqlite3");
+        let conn = rusqlite::Connection::open(&real).unwrap();
+        conn.execute_batch("CREATE TABLE t (v TEXT);").unwrap();
+        drop(conn);
+        let link = dir.join("link.sqlite3");
+        symlink(&real, &link).unwrap();
+        assert!(is_empty(link.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Internal sqlite tables (e.g. a leftover sqlite_sequence from a

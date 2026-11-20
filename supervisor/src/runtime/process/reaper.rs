@@ -20,7 +20,6 @@
 //! would turn a successful child into a reported spawn failure).
 
 use std::collections::HashMap;
-use std::os::fd::AsRawFd;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -150,7 +149,7 @@ fn tick() {
         .iter()
         .map(|(pid, e)| (*pid, Arc::clone(&e.pidfd)))
         .collect();
-    let fds: Vec<_> = entries.iter().map(|(_, fd)| fd.as_raw_fd()).collect();
+    let fds: Vec<&PidFd> = entries.iter().map(|(_, fd)| fd.as_ref()).collect();
     for i in PidFd::ready_indices(&fds, POLL) {
         let (pid, _) = &entries[i];
         // The registry lock is held across the targeted waitpid and the

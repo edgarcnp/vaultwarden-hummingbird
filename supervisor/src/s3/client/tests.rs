@@ -703,6 +703,18 @@ fn multipart_upload_aborts_on_a_200_error_body() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A body over the caller's cap is an error, not a silently truncated
+/// string (the old `.take` would return a prefix).
+#[test]
+fn get_optional_text_refuses_an_oversized_body() {
+    const BIG: [u8; 2048] = [b'x'; 2048];
+    let client = local_client(fake_server("200 OK", "", &BIG));
+    let err = client
+        .get_optional_text("state/text", 1024, || false)
+        .expect_err("a 2 KiB body over a 1 KiB cap must fail");
+    assert!(err.to_string().contains("limit"), "{err}");
+}
+
 /// Delete is idempotent: a 404 means the object is already gone.
 #[test]
 fn delete_treats_a_missing_object_as_success() {

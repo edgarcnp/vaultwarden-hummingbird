@@ -155,10 +155,14 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     // detected while the dump stays byte-identical; the next changed dump
     // replaces it, and restore falls back to the next older entry until
     // then.)
-    let fingerprint = unchanged::fingerprint(&staged);
-    let repeat = fingerprint
-        .as_deref()
-        .is_some_and(|hash| unchanged::is_repeat(&cfg.state_dir, &sidecar, hash));
+    let Some(fingerprint) = unchanged::fingerprint(&staged) else {
+        log::err(
+            "db backup: cannot hash the staged dump; nothing was uploaded, the next              tick retries",
+        );
+        let _ = std::fs::remove_file(&staged);
+        return;
+    };
+    let repeat = unchanged::is_repeat(&cfg.state_dir, &sidecar, &fingerprint);
     if upload_is_redundant(known, manifest.latest(), repeat) {
         let _ = std::fs::remove_file(&staged);
         log::info("db backup: dump is identical to the newest backup; upload skipped");
@@ -177,17 +181,13 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
         generation,
         name: name.clone(),
         size,
+        sha256: Some(fingerprint.clone()),
     });
     let evicted = manifest.retain(cfg.keep);
     match store_manifest(&s3, cfg, &manifest, &abort) {
         Ok(()) => {
             lineage::write(&cfg.state_dir, &sidecar, generation);
-            match &fingerprint {
-                Some(hash) => unchanged::retain(&staged, &cfg.state_dir, &sidecar, hash),
-                None => {
-                    let _ = std::fs::remove_file(&staged);
-                }
-            }
+            unchanged::retain(&staged, &cfg.state_dir, &sidecar, &fingerprint);
             log::info(&format!(
                 "db backup: pushed {key} ({size} bytes, generation {generation})"
             ));

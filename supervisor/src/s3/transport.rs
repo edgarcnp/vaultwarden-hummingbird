@@ -165,8 +165,18 @@ pub(super) fn backoff(attempt: u32) -> Duration {
 /// `.amazonaws.com.cn` variants); acceleration hosts always sign in
 /// us-east-1.
 pub(super) fn region_for(endpoint: &Url) -> String {
-    let Some(host) = endpoint.host_str() else {
+    let Some(raw_host) = endpoint.host_str() else {
         return AUTO_REGION.to_string();
+    };
+    // A virtual-hosted endpoint puts the bucket before the service host
+    // (`bucket.s3.us-west-2.amazonaws.com`). Strip that label before
+    // looking for the AWS service/region spelling.
+    let host = if let Some((_, rest)) = raw_host.split_once(".s3.") {
+        format!("s3.{rest}")
+    } else if let Some((_, rest)) = raw_host.split_once(".s3-") {
+        format!("s3-{rest}")
+    } else {
+        raw_host.to_string()
     };
     let Some(rest) = host
         .strip_suffix(".amazonaws.com")

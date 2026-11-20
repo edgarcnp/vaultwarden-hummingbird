@@ -5,7 +5,7 @@
 //! exit — so a missed or partial poll can only cost latency, never a
 //! lost status.
 
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::time::Duration;
 
 use nix::libc;
@@ -17,9 +17,9 @@ use super::child::Pid;
 /// component polls it (the reaper).
 pub struct PidFd(OwnedFd);
 
-impl AsRawFd for PidFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
+impl AsFd for PidFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
     }
 }
 
@@ -40,16 +40,10 @@ impl PidFd {
     /// event (not just POLLIN) counts as ready: the caller's targeted
     /// waitpid is the authority, and ECHILD there simply means the sweep
     /// already reaped and delivered this child.
-    pub fn ready_indices(fds: &[RawFd], timeout: Duration) -> Vec<usize> {
+    pub fn ready_indices(fds: &[&PidFd], timeout: Duration) -> Vec<usize> {
         let mut pollfds: Vec<PollFd> = fds
             .iter()
-            .map(|&fd| {
-                // SAFETY: the caller keeps the PidFd Arcs alive for the
-                // whole call (they own these raw descriptors); the
-                // BorrowedFd never escapes this function.
-                let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-                PollFd::new(borrowed, PollFlags::POLLIN)
-            })
+            .map(|fd| PollFd::new(fd.as_fd(), PollFlags::POLLIN))
             .collect();
         if pollfds.is_empty() {
             return Vec::new();
@@ -97,7 +91,7 @@ mod tests {
     fn own_pidfd_is_open_and_not_ready() {
         let fd = PidFd::open(std::process::id() as Pid).expect("self pidfd");
         assert!(
-            PidFd::ready_indices(&[fd.as_raw_fd()], Duration::ZERO).is_empty(),
+            PidFd::ready_indices(&[&fd], Duration::ZERO).is_empty(),
             "a live process is never waitable"
         );
     }
@@ -114,12 +108,12 @@ mod tests {
             .expect("spawn");
         let fd = PidFd::open(child.id() as Pid).expect("pidfd");
         assert!(
-            PidFd::ready_indices(&[fd.as_raw_fd()], Duration::ZERO).is_empty(),
+            PidFd::ready_indices(&[&fd], Duration::ZERO).is_empty(),
             "live child must not poll ready"
         );
         child.kill().expect("SIGKILL delivered");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while PidFd::ready_indices(&[fd.as_raw_fd()], POLL).is_empty() {
+        while PidFd::ready_indices(&[&fd], POLL).is_empty() {
             assert!(Instant::now() < deadline, "pidfd never turned ready");
             std::thread::sleep(POLL);
         }

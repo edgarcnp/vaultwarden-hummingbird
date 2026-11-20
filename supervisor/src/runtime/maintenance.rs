@@ -24,7 +24,8 @@ use super::backup::tick as backup_tick;
 use super::sync::{sync_state, wait_for_rsa_key};
 use super::{POLL, stopping};
 use crate::config::{
-    BACKUP_FIRST_DELAY, DbBackupConfig, SYNC_FIRST_DELAY, SYNC_RSA_WAIT, SYNC_TIMEOUT, SyncConfig,
+    BACKUP_FIRST_DELAY, BACKUP_RUN_BUDGET, DbBackupConfig, SYNC_FIRST_DELAY, SYNC_RSA_WAIT,
+    SYNC_TIMEOUT, SyncConfig,
 };
 use crate::util::log;
 
@@ -88,7 +89,10 @@ impl Task {
             name: "db backup",
             first_delay: BACKUP_FIRST_DELAY,
             cadence: Some(cfg.interval),
-            run: Box::new(move |token| backup_tick(&periodic, || token.stopping())),
+            run: Box::new(move |token| {
+                let deadline = Instant::now() + BACKUP_RUN_BUDGET;
+                backup_tick(&periodic, || token.stopping() || Instant::now() >= deadline)
+            }),
             finish: Some(Box::new(move |abort| backup_tick(&cfg, abort))),
         }
     }
@@ -290,18 +294,33 @@ fn flush(tasks: Vec<Task>, budget: Duration, forced_budget: Duration, token: &To
                 deadline
             }
     };
+    let mut remaining = tasks.iter().filter(|task| task.finish.is_some()).count();
     for task in tasks {
         let Some(finish) = task.finish else {
             continue;
         };
-        if abort() {
+        let now = Instant::now();
+        let global = if token.forced() {
+            forced_deadline
+        } else {
+            deadline
+        };
+        if now >= global {
             log::err(&format!(
                 "maintenance: {} final flush skipped (persist budget exhausted)",
                 task.name
             ));
+            remaining = remaining.saturating_sub(1);
             continue;
         }
-        finish(&abort);
+        // Share what is left across the tasks still to run, so one slow
+        // flush cannot consume the whole budget and skip the next.
+        let slots = u32::try_from(remaining.max(1)).unwrap_or(u32::MAX);
+        let share = global.saturating_duration_since(now) / slots;
+        let task_deadline = now + share;
+        let task_abort = || abort() || Instant::now() >= task_deadline;
+        finish(&task_abort);
+        remaining = remaining.saturating_sub(1);
     }
 }
 
@@ -396,6 +415,44 @@ mod tests {
         reactor.drain(Duration::from_secs(2), Duration::from_secs(1));
         assert_eq!(runs.load(Ordering::SeqCst), 0, "no periodic run");
         assert_eq!(finals.load(Ordering::SeqCst), 1, "shutdown flush ran");
+    }
+
+    /// One slow flush may not consume the whole drain budget: each task gets
+    /// a share, so the state push still runs when a large DB dump overruns.
+    #[test]
+    fn a_slow_flush_does_not_starve_the_next() {
+        let second_ran = Arc::new(AtomicBool::new(false));
+        let ran = Arc::clone(&second_ran);
+        let first = Task {
+            name: "slow",
+            first_delay: Duration::from_secs(3600),
+            cadence: None,
+            run: Box::new(|_| panic!("must not run periodically")),
+            finish: Some(Box::new(|abort| {
+                let give_up = Instant::now() + Duration::from_secs(5);
+                while !abort() && Instant::now() < give_up {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })),
+        };
+        let second = Task {
+            name: "next",
+            first_delay: Duration::from_secs(3600),
+            cadence: None,
+            run: Box::new(|_| panic!("must not run periodically")),
+            finish: Some(Box::new(move |abort| {
+                assert!(!abort(), "the second task must get its own budget");
+                ran.store(true, Ordering::SeqCst);
+            })),
+        };
+        Reactor::start(vec![first, second])
+            .expect("reactor starts")
+            .expect("one task schedules a reactor")
+            .drain(Duration::from_millis(250), Duration::from_millis(120));
+        assert!(
+            second_ran.load(Ordering::SeqCst),
+            "the second flush must not be starved"
+        );
     }
 
     /// The final flush is deadline-bounded: a stuck finish must end at the

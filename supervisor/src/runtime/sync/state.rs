@@ -44,8 +44,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::Instant;
 
-use crate::config::{SYNC_TIMEOUT, SyncConfig};
+use crate::config::{BOOT_RESTORE_BUDGET, SYNC_TIMEOUT, SyncConfig};
 use crate::s3::{Client, Expect, GetError, Listed, MAX_SYNC_OBJECT_BYTES};
 use crate::util::fs::{create_real_dirs, read_capped, write_atomic};
 use crate::util::log;
@@ -435,7 +436,10 @@ struct Target {
 /// local files. Only keys inside the synced set are written, and every
 /// manifest entry is hash-verified before it is published.
 pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
-    restore_state_at(&Roots::production(), cfg, abort)
+    let deadline = Instant::now() + BOOT_RESTORE_BUDGET;
+    restore_state_at(&Roots::production(), cfg, || {
+        abort() || Instant::now() >= deadline
+    })
 }
 
 /// [`restore_state`] with explicit roots (tests use a scratch directory).

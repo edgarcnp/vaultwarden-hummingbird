@@ -194,6 +194,10 @@ impl Client {
             .timeout_send_body(Some(BODY_TIMEOUT))
             .timeout_recv_response(Some(timeout))
             .timeout_recv_body(Some(BODY_TIMEOUT))
+            // A black-holed peer must not hold a body attempt for the whole
+            // 600-second budget; a progressing transfer still gets it.
+            .timeout_per_read(Some(timeout))
+            .timeout_per_write(Some(timeout))
             .timeout_global(None)
             // A presigned URL must never be re-signed by a redirect; a 3xx
             // is then not an error, so every call site checks the status.
@@ -290,21 +294,23 @@ impl Client {
         if abort() {
             bail!("aborted");
         }
-        let response = retrying(|| {
+        // CreateMultipartUpload is not idempotent: retrying after a lost
+        // response would create a second upload ID whose first copy can
+        // never be aborted. One attempt; the next whole put retries.
+        let response = {
             let url = self
                 .bucket
                 .create_multipart_upload(Some(&self.credentials), key)
                 .sign(SIGN_EXPIRE);
             self.agent.post(url.as_str()).send_empty()
-        })
+        }
         .map_err(|e| anyhow!("creating the upload of {key} failed: {}", http_err(&e)))?;
         let response = checked("create upload", key, response)?;
-        let mut body = String::new();
-        response
+        let body = response
             .into_body()
-            .into_reader()
-            .take(MULTIPART_XML_CAP)
-            .read_to_string(&mut body)
+            .into_with_config()
+            .limit(MULTIPART_XML_CAP)
+            .read_to_string()
             .map_err(|e| anyhow!("creating the upload of {key}: {e}"))?;
         let upload_id = CreateMultipartUpload::parse_response(&body)
             .map_err(|_| anyhow!("creating the upload of {key}: unparseable response"))?
@@ -341,16 +347,18 @@ impl Client {
         };
         // S3 may answer CompleteMultipartUpload with HTTP 200 and an
         // <Error> document; the object then does not exist.
-        let mut body = String::new();
-        if let Err(e) = response
+        let body = match response
             .into_body()
-            .into_reader()
-            .take(MULTIPART_XML_CAP)
-            .read_to_string(&mut body)
+            .into_with_config()
+            .limit(MULTIPART_XML_CAP)
+            .read_to_string()
         {
-            self.abort_upload(key, &upload_id);
-            return Err(anyhow!("completing the upload of {key}: {e}"));
-        }
+            Ok(body) => body,
+            Err(e) => {
+                self.abort_upload(key, &upload_id);
+                return Err(anyhow!("completing the upload of {key}: {e}"));
+            }
+        };
         if body.contains("<Error") {
             self.abort_upload(key, &upload_id);
             bail!("completing the upload of {key} failed: provider returned an error body");
@@ -487,16 +495,12 @@ impl Client {
             Err(ureq::Error::StatusCode(404)) => return Ok(None),
             Err(e) => return Err(anyhow!("download of {key} failed: {}", http_err(&e))),
         };
-        let mut text = String::new();
-        response
+        let text = response
             .into_body()
-            .into_reader()
-            .take(max_bytes + 1)
-            .read_to_string(&mut text)
+            .into_with_config()
+            .limit(max_bytes)
+            .read_to_string()
             .map_err(|e| anyhow!("download of {key}: {e}"))?;
-        if text.len() as u64 > max_bytes {
-            bail!("download of {key}: exceeds the {max_bytes}-byte cap");
-        }
         Ok(Some(text))
     }
 
@@ -714,13 +718,11 @@ impl Client {
                 self.agent.get(url.as_str()).call()
             })
             .map_err(|e| anyhow!("listing {prefix:?} failed: {}", http_err(&e)))?;
-            let mut reader = checked("listing", &format!("{prefix:?}"), response)?
+            let body = checked("listing", &format!("{prefix:?}"), response)?
                 .into_body()
-                .into_reader()
-                .take(LIST_BODY_CAP);
-            let mut body = String::new();
-            reader
-                .read_to_string(&mut body)
+                .into_with_config()
+                .limit(LIST_BODY_CAP)
+                .read_to_string()
                 .map_err(|e| anyhow!("listing {prefix:?}: {e}"))?;
             // The XML error type belongs to a transitive crate; the
             // message adds nothing — a listing that does not parse is
