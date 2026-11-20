@@ -27,9 +27,10 @@ pub fn is_supervisor_consumed(key: &str) -> bool {
 
 /// The child-side name for a `VAULTWARDEN_*` key: the prefix is stripped so
 /// the child sees the plain upstream name (`VAULTWARDEN_DATABASE_URL` ->
-/// `DATABASE_URL`). `None` = not a prefixed key (forwarded verbatim). A
-/// bare `VAULTWARDEN_` (empty remainder) is not a meaningful namespace
-/// member and is left untouched.
+/// `DATABASE_URL`). `None` = not a prefixed key; bare upstream names are
+/// not forwarded to the child (the dotenv file rejects them). A bare
+/// `VAULTWARDEN_` (empty remainder) is not a meaningful namespace member
+/// and is left untouched.
 pub fn vaultwarden_key(key: &str) -> Option<&str> {
     key.strip_prefix("VAULTWARDEN_").filter(|k| !k.is_empty())
 }
@@ -42,10 +43,10 @@ pub(super) fn non_empty(v: Option<String>) -> Option<String> {
 /// `Some(v)` only for a valid 1-65535 port; invalid values warn and are
 /// ignored (the caller's next source — the file value or the default —
 /// wins, so do not name a fallback here).
-pub(super) fn valid_port(v: Option<String>) -> Option<String> {
+pub(super) fn valid_port(v: Option<String>) -> Option<u16> {
     let v = non_empty(v)?;
     match v.parse::<u16>() {
-        Ok(p) if p != 0 => Some(v),
+        Ok(p) if p != 0 => Some(p),
         _ => {
             log::err(&format!(
                 "config: invalid port '{}' (want 1-65535); ignoring it",
@@ -172,9 +173,9 @@ mod tests {
 
     #[test]
     fn port_validation() {
-        assert_eq!(valid_port(Some("8080".into())).as_deref(), Some("8080"));
-        assert_eq!(valid_port(Some("1".into())).as_deref(), Some("1"));
-        assert_eq!(valid_port(Some("65535".into())).as_deref(), Some("65535"));
+        assert_eq!(valid_port(Some("8080".into())), Some(8080));
+        assert_eq!(valid_port(Some("1".into())), Some(1));
+        assert_eq!(valid_port(Some("65535".into())), Some(65535));
         assert_eq!(valid_port(Some("0".into())), None);
         assert_eq!(valid_port(Some("65536".into())), None);
         assert_eq!(valid_port(Some("-1".into())), None);

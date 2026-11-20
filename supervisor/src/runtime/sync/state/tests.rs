@@ -663,6 +663,45 @@ fn a_hash_mismatch_marks_the_path_for_repair() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A manifest is bucket-controlled; entries outside the durable set must
+/// be ignored rather than pulled into the vault or backup namespace.
+#[test]
+fn a_manifest_entry_outside_the_set_is_ignored() {
+    let root = std::env::temp_dir().join(format!("vw-sup-mfilter-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let sha = "a".repeat(64);
+    let (endpoint, seen) = fake_bucket(move |line| {
+        let path = req_path(line);
+        if line.starts_with("GET") && path.ends_with("/manifest") {
+            (
+                200,
+                format!("v1\n{sha} 4 db/sqlite-1.sqlite3\n").into_bytes(),
+            )
+        } else if line.starts_with("GET") && path.ends_with("/tombstones") {
+            (404, Vec::new())
+        } else if line.starts_with("GET") && line.contains("list-type=2") {
+            (200, empty_listing())
+        } else {
+            (404, Vec::new())
+        }
+    });
+    assert!(restore_state_at(
+        &Roots::one(&root),
+        &sync_cfg(&endpoint),
+        || false
+    ));
+    assert!(!root.join("db/sqlite-1.sqlite3").exists());
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|l| l.contains("/objects/db/")),
+        "a backup key must not be pulled: {seen:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A legacy listing shares the prefix with DB backups; only the durable
+/// set is pulled.
 #[test]
 fn a_legacy_listing_ignores_backup_objects() {
     let root = std::env::temp_dir().join(format!("vw-sup-shared-{}", std::process::id()));

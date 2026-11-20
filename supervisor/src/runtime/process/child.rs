@@ -170,7 +170,7 @@ pub fn spawn_as(cmd: &mut Command, creds: Credentials) -> Option<Handle> {
 /// Signal the whole process group of a child spawned via [`spawn`] (pgid ==
 /// pid), falling back to the bare pid if the group vanished. Refuses
 /// pid <= 1: `kill(-1, …)` would signal every process in the namespace.
-pub fn signal_group(pid: Pid, sig: Signal) -> bool {
+pub(super) fn signal_group(pid: Pid, sig: Signal) -> bool {
     if pid <= 1 {
         return false;
     }
@@ -195,41 +195,65 @@ pub fn signal_child(child: &Handle, sig: Signal) -> bool {
     delivered
 }
 
-/// Drop every capability except `keep` and arrange for the allowed ones to
-/// survive `exec` through the ambient set. Runs in the forked child only:
-/// syscalls, no allocation.
+/// The Linux capability API v3 header for `capget`/`capset`.
 #[cfg(target_os = "linux")]
-fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
-    #[repr(C)]
-    struct Header {
-        version: u32,
-        pid: i32,
-    }
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
 
-    #[repr(C)]
-    #[derive(Clone, Copy, Default)]
-    struct Data {
-        effective: u32,
-        permitted: u32,
-        inheritable: u32,
-    }
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
 
-    const VERSION_3: u32 = 0x2008_0522;
-    const PR_CAP_AMBIENT: libc::c_int = 47;
-    const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
-    const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
+#[cfg(target_os = "linux")]
+const CAP_VERSION_3: u32 = 0x2008_0522;
 
-    let mut header = Header {
-        version: VERSION_3,
+/// Read this process's effective/permitted/inheritable sets.
+#[cfg(target_os = "linux")]
+fn capget() -> std::io::Result<[CapData; 2]> {
+    let mut header = CapHeader {
+        version: CAP_VERSION_3,
         pid: 0,
     };
-    let mut data = [Data::default(); 2];
+    let mut data = [CapData::default(); 2];
     // SAFETY: capget reads two capability data words into the array and
     // writes only the version/pid header, which is owned here.
     let rc = unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    Ok(data)
+}
+
+/// The probe-side half of the capability contract: every set is empty.
+#[cfg(target_os = "linux")]
+pub fn caps_are_empty() -> std::io::Result<bool> {
+    Ok(capget()?
+        .iter()
+        .all(|word| word.effective == 0 && word.permitted == 0 && word.inheritable == 0))
+}
+
+/// Drop every capability except `keep` and arrange for the allowed ones to
+/// survive `exec` through the ambient set. Runs in the forked child only:
+/// syscalls, no allocation.
+#[cfg(target_os = "linux")]
+fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
+    const PR_CAP_AMBIENT: libc::c_int = 47;
+    const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
+    const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
+
+    let header = CapHeader {
+        version: CAP_VERSION_3,
+        pid: 0,
+    };
+    let mut data = capget()?;
     let mut mask = 0u64;
     for cap in keep {
         if *cap < 64 {
@@ -279,6 +303,11 @@ fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn caps_are_empty() -> std::io::Result<bool> {
+    Ok(true)
 }
 
 #[cfg(not(target_os = "linux"))]

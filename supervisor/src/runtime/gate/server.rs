@@ -41,12 +41,9 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// socket (`net.ipv6.bindv6only=0`, the common default), prefer `[::]` so
 /// a platform probing over either family reaches `/alive`; otherwise bind
 /// IPv4 only, as before. Failure means the deployment is broken (health
-/// checks unreachable); the caller exits. An unparseable port is a bind
-/// error, never a silent ephemeral fallback.
-pub fn bind(port: &str) -> std::io::Result<TcpListener> {
-    let port: u16 = port
-        .parse()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid port"))?;
+/// checks unreachable); the caller exits. `0` asks the kernel for an
+/// ephemeral port (tests only); config never resolves to it.
+pub fn bind(port: u16) -> std::io::Result<TcpListener> {
     if dual_stack_wildcard()
         && let Ok(listener) = TcpListener::bind(("::", port))
     {
@@ -113,7 +110,7 @@ pub(super) fn serve_with(listener: TcpListener, vault: Option<std::net::SocketAd
 }
 
 /// Boot-time log line describing the exposure model (single line, no secrets).
-pub fn describe(exposed: &str, vault: &str) {
+pub fn describe(exposed: u16, vault: u16) {
     log::info(&format!(
         "gatekeeper: /alive on the exposed port {exposed} (IPv4, and IPv6 where available); \
          API loopback-only on 127.0.0.1:{vault} (tailnet via tailscale serve)"

@@ -22,12 +22,16 @@ pub struct RemoteSpec {
     pub prefix: String,
     pub key_id: String,
     pub key_secret: String,
-    /// S3-compatible endpoint; required, no provider is a default
-    pub endpoint: String,
+    /// S3-compatible endpoint; required, no provider is a default. Parsed
+    /// once at config resolution and reused by every request.
+    pub endpoint: url::Url,
     /// Permit plaintext HTTP to a non-loopback endpoint. Off by default:
     /// SigV4 credentials would otherwise cross the network in clear text.
     pub allow_http: bool,
     /// Optional PEM CA bundle replacing the built-in roots (private S3).
+    /// Config resolution and the transport both require it under the
+    /// supervisor-only state root, and the transport never follows a
+    /// symlink or opens a non-regular file.
     pub ca_file: Option<String>,
     /// SigV4 region; `None` derives it from an AWS endpoint (`auto`
     /// elsewhere).

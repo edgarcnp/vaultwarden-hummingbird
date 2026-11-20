@@ -24,7 +24,7 @@ pub(crate) enum Default {
     Bool(bool),
 }
 
-pub(crate) struct Knob {
+struct Knob {
     pub name: &'static str,
     pub policy: FilePolicy,
     /// `None` = the resolver owning the knob handles its default.

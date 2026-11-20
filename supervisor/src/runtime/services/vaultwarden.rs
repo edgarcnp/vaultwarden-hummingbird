@@ -21,7 +21,7 @@ const VAULT_CREDENTIALS: Credentials = Credentials {
 /// vaultwarden in the foreground with a *granted* environment (see
 /// [`granted_env`]) and the dedicated vault identity. Spawn failure
 /// returns `None`; the caller tears down and exits 1.
-pub fn run_vaultwarden(vault_port: &str, extra_env: &[(String, String)]) -> Option<Handle> {
+pub fn run_vaultwarden(vault_port: u16, extra_env: &[(String, String)]) -> Option<Handle> {
     let mut cmd = Command::new(VAULTWARDEN);
     granted_env(env::vars_os(), extra_env, vault_port).apply(&mut cmd);
     spawn_as(&mut cmd, VAULT_CREDENTIALS)
@@ -83,7 +83,7 @@ const IMAGE_DEFAULTS: &[(&str, &str)] = &[
 fn granted_env(
     ambient: impl Iterator<Item = (OsString, OsString)>,
     file: &[(String, String)],
-    vault_port: &str,
+    vault_port: u16,
 ) -> EnvGrant {
     let grant = EnvGrant::new()
         .layer(
@@ -108,8 +108,9 @@ fn granted_env(
         Some((key, value)) => grant.pin(key, value),
         None => grant,
     };
+    let vault_port = vault_port.to_string();
     grant
-        .pin("ROCKET_PORT", vault_port)
+        .pin("ROCKET_PORT", &vault_port)
         .pin("ROCKET_ADDRESS", "127.0.0.1")
         .pin("DATA_FOLDER", "/data")
         .pin("WEB_VAULT_FOLDER", "/web-vault")
@@ -288,7 +289,7 @@ mod tests {
             ("DOMAIN".to_string(), "https://f.example".to_string()),
         ];
         let env: std::collections::BTreeMap<String, String> =
-            granted_env(ambient.into_iter(), &file, "8081")
+            granted_env(ambient.into_iter(), &file, 8081)
                 .iter()
                 .map(|(k, v)| (k.clone(), v.to_string_lossy().into_owned()))
                 .collect();
@@ -343,7 +344,7 @@ mod tests {
     /// routing) and stay overridable by both user layers.
     #[test]
     fn image_defaults_apply_and_user_config_wins() {
-        let env = child_env(granted_env(std::iter::empty(), &[], "8081"));
+        let env = child_env(granted_env(std::iter::empty(), &[], 8081));
         assert_eq!(
             env.get("ORG_ATTACHMENT_LIMIT").map(String::as_str),
             Some("0"),
@@ -362,7 +363,7 @@ mod tests {
         );
 
         let file = [("ORG_ATTACHMENT_LIMIT".to_string(), "1024".to_string())];
-        let env = child_env(granted_env(std::iter::empty(), &file, "8081"));
+        let env = child_env(granted_env(std::iter::empty(), &file, 8081));
         assert_eq!(
             env.get("ORG_ATTACHMENT_LIMIT").map(String::as_str),
             Some("1024"),
@@ -373,7 +374,7 @@ mod tests {
             OsString::from("VAULTWARDEN_ORG_ATTACHMENT_LIMIT"),
             OsString::from("2048"),
         )];
-        let env = child_env(granted_env(ambient.into_iter(), &file, "8081"));
+        let env = child_env(granted_env(ambient.into_iter(), &file, 8081));
         assert_eq!(
             env.get("ORG_ATTACHMENT_LIMIT").map(String::as_str),
             Some("2048"),
@@ -401,7 +402,7 @@ mod tests {
                 OsString::new(),
             ),
         ];
-        let env = child_env(granted_env(ambient.into_iter(), &file, "8081"));
+        let env = child_env(granted_env(ambient.into_iter(), &file, 8081));
         assert_eq!(
             env.get("DATABASE_URL").map(String::as_str),
             Some("sqlite:///data/file.sqlite3"),

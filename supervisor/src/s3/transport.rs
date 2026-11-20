@@ -5,10 +5,15 @@
 //! made safe.
 
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
+use nix::fcntl::OFlag;
 use url::Url;
+
+use crate::util::fs::{STATE_ROOT, under_root};
 
 /// Presigned-URL lifetime; must comfortably exceed the per-request
 /// timeout (the request is issued immediately after signing).
@@ -97,21 +102,27 @@ pub fn validate_ca_file(path: &str) -> anyhow::Result<()> {
 }
 
 pub(super) fn ca_certs(path: &str) -> anyhow::Result<Vec<ureq::tls::Certificate<'static>>> {
+    ca_certs_in(path, Path::new(STATE_ROOT))
+}
+
+fn ca_certs_in(path: &str, root: &Path) -> anyhow::Result<Vec<ureq::tls::Certificate<'static>>> {
     const MAX_CA_BYTES: u64 = 1024 * 1024;
-    // The CA decides which server is trusted; it must not live on a
-    // vault-writable volume. Config resolution checks this too; keeping it
-    // here covers direct callers.
-    let isolated = crate::config::paths::under_root(
-        std::path::Path::new(crate::config::SUPERVISOR_STATE),
-        path,
-    );
-    if !isolated {
+    // The CA decides which server is trusted; it must live on the
+    // supervisor-only state volume. Config resolution checks this first;
+    // repeating it here keeps the transport safe for direct callers.
+    if !under_root(root, path) {
         bail!(
             "SUPERVISOR_S3_CA_FILE {path} must live under {}",
-            crate::config::SUPERVISOR_STATE
+            root.display()
         );
     }
-    let meta = std::fs::metadata(path)
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlag::O_NOFOLLOW.bits() | OFlag::O_NONBLOCK.bits())
+        .open(path)
+        .map_err(|e| anyhow!("cannot read SUPERVISOR_S3_CA_FILE {path}: {e}"))?;
+    let meta = file
+        .metadata()
         .map_err(|e| anyhow!("cannot read SUPERVISOR_S3_CA_FILE {path}: {e}"))?;
     if !meta.is_file() {
         bail!("SUPERVISOR_S3_CA_FILE {path} is not a regular file");
@@ -119,8 +130,13 @@ pub(super) fn ca_certs(path: &str) -> anyhow::Result<Vec<ureq::tls::Certificate<
     if meta.len() > MAX_CA_BYTES {
         bail!("SUPERVISOR_S3_CA_FILE {path} exceeds the {MAX_CA_BYTES}-byte cap");
     }
-    let bytes = std::fs::read(path)
+    let mut bytes = Vec::new();
+    file.take(MAX_CA_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| anyhow!("cannot read SUPERVISOR_S3_CA_FILE {path}: {e}"))?;
+    if bytes.len() as u64 > MAX_CA_BYTES {
+        bail!("SUPERVISOR_S3_CA_FILE {path} exceeds the {MAX_CA_BYTES}-byte cap");
+    }
     let certs: Vec<_> = ureq::tls::parse_pem(&bytes)
         .filter_map(|item| match item {
             Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
@@ -256,5 +272,56 @@ pub(super) fn http_err(e: &ureq::Error) -> String {
         ureq::Error::StatusCode(code) => format!("HTTP {code}"),
         ureq::Error::Io(io) => format!("I/O error: {io}"),
         _ => "transport error".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_symlinked_ca_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("vw-ca-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.pem");
+        std::fs::write(&real, b"not a certificate").unwrap();
+        let link = dir.join("link.pem");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = ca_certs_in(link.to_str().unwrap(), &dir).expect_err("a symlink is refused");
+        assert!(err.to_string().contains("cannot read"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_non_pem_ca_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("vw-ca-junk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for bytes in [&b""[..], &b"not a certificate"[..]] {
+            let path = dir.join("junk.pem");
+            std::fs::write(&path, bytes).unwrap();
+            let err = ca_certs_in(path.to_str().unwrap(), &dir)
+                .expect_err("a bundle with no certificate must be refused");
+            assert!(
+                err.to_string().contains("holds no PEM certificate"),
+                "{err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fifo_ca_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("vw-ca-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("ca.pem");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let start = std::time::Instant::now();
+        let err = ca_certs_in(fifo.to_str().unwrap(), &dir).expect_err("a FIFO is refused");
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

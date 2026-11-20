@@ -50,8 +50,8 @@ pub fn install_signal_handlers() -> bool {
     ok
 }
 
-/// Consume the stop request: true at most once. The main loop's only
-/// signal interface.
+/// Consume the current stop request. A later signal sets the flag again;
+/// the main loop's only signal interface.
 pub fn take_stop() -> bool {
     flag().swap(false, Ordering::SeqCst)
 }

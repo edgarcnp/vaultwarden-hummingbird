@@ -2,6 +2,8 @@
 //! every source file under the 1,000-line limit).
 
 use super::super::transport::*;
+mod fifo;
+
 use super::*;
 use std::time::Duration;
 
@@ -76,7 +78,7 @@ fn spec(endpoint: &str) -> RemoteSpec {
         prefix: String::new(),
         key_id: "id".into(),
         key_secret: "secret".into(),
-        endpoint: endpoint.into(),
+        endpoint: endpoint.parse().expect("test endpoint"),
         allow_http: true,
         ca_file: None,
         region: None,
@@ -84,11 +86,11 @@ fn spec(endpoint: &str) -> RemoteSpec {
     }
 }
 
-/// No endpoint is a construction error (no provider is a default);
-/// every spelled-out endpoint — AWS or S3-compatible — builds.
+/// Every spelled-out http(s) endpoint — AWS or S3-compatible — builds;
+/// another scheme is a construction error, never a panic. Missing and
+/// unparseable endpoints are refused earlier, at config resolution.
 #[test]
-fn client_builds_only_with_an_endpoint() {
-    assert!(Client::connect(&spec(""), Duration::from_secs(60)).is_err());
+fn client_builds_only_with_an_http_endpoint() {
     assert!(
         Client::connect(
             &spec("https://s3.eu-central-1.amazonaws.com"),
@@ -103,8 +105,7 @@ fn client_builds_only_with_an_endpoint() {
         )
         .is_ok()
     );
-    // An unparseable endpoint is a construction error, never a panic.
-    assert!(Client::connect(&spec("not a url"), Duration::from_secs(60)).is_err());
+    assert!(Client::connect(&spec("ftp://example.invalid"), Duration::from_secs(60)).is_err());
 }
 
 /// Operations against a non-listening endpoint fail closed, bounded,
@@ -749,17 +750,9 @@ fn connect_refuses_remote_plaintext_http() {
 }
 
 #[test]
-fn ca_file_must_be_a_readable_pem_bundle() {
-    let dir = scratch("ca");
-    let missing = dir.join("missing.pem");
-    assert!(validate_ca_file(missing.to_str().unwrap()).is_err());
-    let empty = dir.join("empty.pem");
-    std::fs::write(&empty, b"").unwrap();
-    assert!(validate_ca_file(empty.to_str().unwrap()).is_err());
-    let junk = dir.join("junk.pem");
-    std::fs::write(&junk, b"not a certificate").unwrap();
-    assert!(validate_ca_file(junk.to_str().unwrap()).is_err());
-    let _ = std::fs::remove_dir_all(&dir);
+fn ca_file_must_live_under_state() {
+    let err = validate_ca_file("/tmp/not-a-ca.pem").expect_err("outside /state is refused");
+    assert!(err.to_string().contains("must live under"), "{err}");
 }
 
 /// The upload body reader aborts before the next chunk when the stop

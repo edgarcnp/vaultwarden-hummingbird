@@ -10,7 +10,9 @@
 //! manifest (legacy bucket) the name listing is used, and an unreadable
 //! manifest falls back to that listing loudly as recovery.
 
-use crate::config::DbBackupConfig;
+use std::time::Instant;
+
+use crate::config::{DB_RESTORE_BUDGET, DbBackupConfig};
 use crate::s3::{Expect, GetError, MAX_DB_OBJECT_BYTES};
 use crate::util::log;
 
@@ -103,11 +105,22 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
         );
         return RestoreOutcome::Ready;
     }
+    // A hostile or broken bucket can supply thousands of full-size invalid
+    // candidates; the state pull has a boot budget and this fallback needs
+    // one too.
+    let deadline = Instant::now() + DB_RESTORE_BUDGET;
     for candidate in candidates {
         if abort() {
             return RestoreOutcome::Aborted;
         }
-        log::info(&format!("db restore: importing {}", candidate.key));
+        if Instant::now() >= deadline {
+            log::err("db restore: candidate budget exhausted; refusing to start the vault");
+            return RestoreOutcome::Failed;
+        }
+        log::info(&format!(
+            "db restore: importing {}",
+            log::sanitize(&candidate.key)
+        ));
         match restore_object(&s3, cfg, &candidate, &abort) {
             Attempt::Imported => {
                 log::info("db restore: done");
@@ -116,7 +129,7 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
             Attempt::Invalid => {
                 log::err(&format!(
                     "db restore: {} is not a usable database; trying the next older backup",
-                    candidate.key
+                    log::sanitize(&candidate.key)
                 ));
             }
             Attempt::Failed => {
@@ -126,7 +139,7 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
                 log::err(&format!(
                     "db restore: {} could not be fetched or published; refusing to \
                      fall back to an older backup on a non-corruption failure",
-                    candidate.key
+                    log::sanitize(&candidate.key)
                 ));
                 return RestoreOutcome::Failed;
             }
@@ -285,7 +298,7 @@ fn restore_object(
         Err(GetError::Missing | GetError::Invalid(_)) => {
             log::err(&format!(
                 "db restore: {} is missing or invalid; trying the next older backup",
-                candidate.key
+                log::sanitize(&candidate.key)
             ));
             return Attempt::Invalid;
         }

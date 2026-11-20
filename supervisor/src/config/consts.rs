@@ -7,10 +7,13 @@ pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
 pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
 pub const VAULTWARDEN: &str = "/vaultwarden";
 
+// Path policy: the supervisor-only state volume root (shared with the
+// transport and path checks).
+pub use crate::util::fs::STATE_ROOT as SUPERVISOR_STATE;
+
 // Process identities. The supervisor and tailscaled share the image UID;
 // the vault runs as a different UID in the shared data group so it cannot
 // read the supervisor's state volume, LocalAPI socket, or environment.
-pub const SUPERVISOR_STATE: &str = "/state";
 pub const SUPERVISOR_UID: u32 = 65532;
 pub const SUPERVISOR_GID: u32 = 65532;
 pub const VAULT_UID: u32 = 65533;
@@ -53,6 +56,11 @@ pub const SYNC_RSA_WAIT: Duration = Duration::from_secs(120);
 /// better than an unbounded boot, and the next boot retries.
 pub const BOOT_RESTORE_BUDGET: Duration = Duration::from_secs(30 * 60);
 
+/// Overall budget for the DB-restore candidate fallback. A bucket can list
+/// thousands of full-size invalid candidates; each is bounded, but the
+/// fallback as a whole must not hold boot indefinitely.
+pub const DB_RESTORE_BUDGET: Duration = Duration::from_secs(30 * 60);
+
 /// Overall budget for one periodic state push, independent of the number
 /// of objects and attempts.
 pub const SYNC_RUN_BUDGET: Duration = Duration::from_secs(60 * 60);
@@ -62,22 +70,22 @@ pub const SYNC_RUN_BUDGET: Duration = Duration::from_secs(60 * 60);
 pub const BACKUP_RUN_BUDGET: Duration = Duration::from_secs(60 * 60);
 
 // Default cadences/counts; seconds where applicable.
-pub const SYNC_INTERVAL_DEFAULT: u64 = 3600;
-pub const BACKUP_INTERVAL_DEFAULT: u64 = 21600;
-pub const BACKUP_KEEP_DEFAULT: u64 = 3;
+pub(crate) const SYNC_INTERVAL_DEFAULT: u64 = 3600;
+pub(crate) const BACKUP_INTERVAL_DEFAULT: u64 = 21600;
+pub(crate) const BACKUP_KEEP_DEFAULT: u64 = 3;
 
 /// Upper bound for every interval knob: `Instant + Duration` panics on
 /// overflow (and aborts the container under `panic = "abort"`), and no
 /// legitimate cadence is longer than a week. Larger values degrade to the
 /// knob's default, loudly.
-pub const MAX_INTERVAL_SECS: u64 = 7 * 24 * 3600;
+pub(crate) const MAX_INTERVAL_SECS: u64 = 7 * 24 * 3600;
 
 /// Upper bound for `SUPERVISOR_DB_BACKUP_KEEP`: the manifest has a 256 KiB
 /// read cap, so an unbounded keep could write a manifest this process
 /// could never read back (~75 bytes per entry).
-pub const MAX_BACKUP_KEEP: u64 = 1000;
+pub(crate) const MAX_BACKUP_KEEP: u64 = 1000;
 
 /// Local staging directory on the supervisor-only state volume for
 /// in-flight dumps and restore pulls; swept before each run and after each
 /// restore.
-pub const BACKUP_STAGING: &str = "/state/db-backups";
+pub(crate) const BACKUP_STAGING: &str = "/state/db-backups";

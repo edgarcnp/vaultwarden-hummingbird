@@ -13,10 +13,10 @@
 //! Every phase is bounded and non-fatal: a failed backup logs and
 //! continues; the vault never waits on it.
 //!
-//! Safety model (miss-never-corrupt): dumps stage on the data volume and
-//! are pushed to a NEW timestamped object (S3 objects are atomic — a
-//! partial upload never materializes); pruning runs strictly after the
-//! manifest write that dropped the entry. The manifest (`manifest`) is
+//! Safety model (miss-never-corrupt): dumps stage on the supervisor-only
+//! state volume and are pushed to a NEW timestamped object (S3 objects are
+//! atomic — a partial upload never materializes); pruning runs strictly
+//! after the manifest write that dropped the entry. The manifest (`manifest`) is
 //! the bucket-side authority for which dumps exist and in which
 //! generation order; nothing here writes to the live DB except the opt-in
 //! restore, which only ever touches a verifiably empty database. Two

@@ -15,6 +15,12 @@ pub(crate) fn dump(path: &str, staged: &str, abort: &(impl Fn() -> bool + Sync))
     if abort() {
         return false;
     }
+    // The DB path is vault-writable: refuse a FIFO/symlink before SQLite's
+    // own open can block on it.
+    if let Err(e) = crate::util::fs::open_regular(path) {
+        log::err(&format!("db backup: cannot open sqlite db: {e}"));
+        return false;
+    }
     let conn = match rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -101,6 +107,26 @@ mod tests {
             &|| true
         ));
         assert!(!staged.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The vault can replace its DB with a FIFO; the dump must skip, not
+    /// block the maintenance thread.
+    #[test]
+    fn sqlite_dump_refuses_a_fifo_source() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-bkfifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.sqlite3");
+        nix::unistd::mkfifo(&src, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let staged = dir.join("dumped.sqlite3");
+        let start = std::time::Instant::now();
+        assert!(!dump(
+            src.to_str().unwrap(),
+            staged.to_str().unwrap(),
+            &|| false
+        ));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

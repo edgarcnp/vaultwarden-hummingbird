@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use super::super::consts::{MAX_INTERVAL_SECS, SYNC_INTERVAL_DEFAULT, SYNC_TIMEOUT};
+use super::super::env::schema;
 use super::super::env::{parse_count, parse_flag};
 use super::spec::SyncConfig;
 use crate::config::consts::SUPERVISOR_STATE;
@@ -14,7 +15,7 @@ use crate::util::log;
 /// A CA bundle decides which server the supervisor trusts; the vault must
 /// not be able to replace it. Require a normal path under `/state`.
 fn ca_path_isolated(path: &str) -> bool {
-    super::super::paths::under_root(std::path::Path::new(SUPERVISOR_STATE), path)
+    crate::util::fs::under_root(std::path::Path::new(SUPERVISOR_STATE), path)
 }
 
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
@@ -63,7 +64,7 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
         sync.set_allow_http(parse_flag(
             "SUPERVISOR_S3_ALLOW_HTTP",
             &knob("SUPERVISOR_S3_ALLOW_HTTP", ""),
-            false,
+            schema::bool_default("SUPERVISOR_S3_ALLOW_HTTP"),
         ));
         let ca = knob("SUPERVISOR_S3_CA_FILE", "");
         if !ca.is_empty() {
@@ -98,7 +99,12 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
             }
             sync.set_region(region);
         }
-        match knob("SUPERVISOR_S3_URL_STYLE", "path").as_str() {
+        match knob(
+            "SUPERVISOR_S3_URL_STYLE",
+            schema::string_default("SUPERVISOR_S3_URL_STYLE"),
+        )
+        .as_str()
+        {
             "path" => sync.set_style(BucketStyle::Path),
             "virtual" | "virtual-hosted" => sync.set_style(BucketStyle::VirtualHosted),
             other => {
@@ -176,8 +182,8 @@ mod tests {
         assert_eq!(sync.target.bucket, "vw-state");
         assert_eq!(sync.prefix(), "");
         assert_eq!(
-            sync.target.endpoint,
-            "https://acct.r2.cloudflarestorage.com"
+            sync.target.endpoint.as_str(),
+            "https://acct.r2.cloudflarestorage.com/"
         );
         assert_eq!(sync.interval, Duration::from_secs(90));
     }

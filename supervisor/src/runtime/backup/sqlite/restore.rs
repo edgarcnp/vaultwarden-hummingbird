@@ -26,9 +26,11 @@ const LIVE_MODE: u32 = 0o660;
 /// or truncated file). Corrupt or unreadable files are ambiguous (Err) —
 /// never silently treated as empty, never silently kept.
 pub(crate) fn is_empty(path: &str) -> anyhow::Result<bool> {
-    match Path::new(path).try_exists() {
-        Ok(false) => return Ok(true),
-        Ok(true) => {}
+    // SQLite opens the path itself; prove it is a regular file first so a
+    // FIFO left by the vault cannot block the open (O_NONBLOCK).
+    match crate::util::fs::open_regular(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(e) => return Err(anyhow::anyhow!("cannot inspect existing db: {e}")),
     }
     let conn = rusqlite::Connection::open_with_flags(
@@ -185,7 +187,7 @@ pub(crate) fn import(
             let _ = std::fs::remove_file(format!("{path}-journal"));
             // Make the publication durable before the vault starts. A
             // failure here is reported but does not unpublish the file.
-            if let Err(e) = std::fs::File::open(path).and_then(|file| file.sync_all()) {
+            if let Err(e) = crate::util::fs::open_regular(path).and_then(|file| file.sync_all()) {
                 log::err(&format!("db restore: cannot fsync the live DB: {e}"));
             }
             if let Some(parent) = Path::new(path).parent()
@@ -249,6 +251,22 @@ mod tests {
 
     fn cleanup(path: &str) {
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A FIFO at the live path is refused without blocking the boot.
+    #[test]
+    fn a_fifo_db_is_refused_without_blocking() {
+        let path = scratch("fifo");
+        cleanup(&path);
+        nix::unistd::mkfifo(
+            path.as_str(),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        assert!(is_empty(&path).is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        cleanup(&path);
     }
 
     /// A missing file is empty (nothing to lose).

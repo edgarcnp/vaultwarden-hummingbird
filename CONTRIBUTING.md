@@ -102,7 +102,7 @@ These shape most decisions in the codebase, so they're worth knowing before you 
 
 - **When in doubt, refuse.** If Tailscale can't start, the container doesn't run the vault. Restore only into a database we're sure is empty. If a process's exit status is lost, treat it as a failure. Being down beats being quietly compromised or corrupted.
 - **Secrets stay out of sight.** No credentials on command lines or in log lines. Keys go into 0600 files, a 0700 supervisor-only directory, or environment variables that get cleaned up afterwards.
-- **Nothing hangs.** Every external call (Tailscale, S3, database) has a timeout, and every parser has a size cap. Both are named `const`s near the code they guard.
+- **Nothing hangs.** Every external call (Tailscale, S3, database) has a per-request timeout, every long-running feature has a run budget, and every parser has a size cap. The bounds are named `const`s near the code they guard.
 - **Tests share one process.** Don't touch the process environment in tests, and make temp paths unique. The existing test helpers show the pattern.
 
 ## Testing the whole image

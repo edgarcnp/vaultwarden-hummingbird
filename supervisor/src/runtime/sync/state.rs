@@ -150,7 +150,16 @@ pub(super) fn load_manifest(
     abort: &impl Fn() -> bool,
 ) -> anyhow::Result<Option<Manifest>> {
     match client.get_optional_text(&manifest_key(cfg), MAX_MANIFEST_BYTES, abort)? {
-        Some(text) => Manifest::parse(&text).map(Some),
+        Some(text) => {
+            let mut manifest = Manifest::parse(&text)?;
+            let dropped = manifest.retain(|rel| is_synced_file(rel, cfg.state_file.as_deref()));
+            if dropped > 0 {
+                log::err(&format!(
+                    "state sync: ignoring {dropped} manifest entries outside the durable set"
+                ));
+            }
+            Ok(Some(manifest))
+        }
         None => Ok(None),
     }
 }

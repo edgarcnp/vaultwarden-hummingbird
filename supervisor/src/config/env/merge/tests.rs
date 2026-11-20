@@ -221,8 +221,8 @@ fn temporary_storage_strictness() {
 #[test]
 fn defaults_and_merge_order() {
     let cfg = mk(&[]);
-    assert_eq!(cfg.port, "8080");
-    assert_eq!(cfg.vault_port.as_deref(), Some("8081"));
+    assert_eq!(cfg.port, 8080);
+    assert_eq!(cfg.vault_port, Some(8081));
     assert_eq!(cfg.socket, "/state/tailscaled.sock");
     assert_eq!(cfg.state, "/state/tailscaled.state");
     assert_eq!(cfg.hostname, "vaultwarden-hummingbird");
@@ -233,14 +233,14 @@ fn defaults_and_merge_order() {
     assert!(cfg.sync.is_none());
 
     let cfg = mk(&[("VAULTWARDEN_PORT", "3000")]);
-    assert_eq!(cfg.port, "3000");
-    assert_eq!(cfg.vault_port.as_deref(), Some("3001"));
+    assert_eq!(cfg.port, 3000);
+    assert_eq!(cfg.vault_port, Some(3001));
     let cfg = mk(&[("VAULTWARDEN_PORT", "")]);
-    assert_eq!(cfg.port, "8080");
+    assert_eq!(cfg.port, 8080);
 
     // 65535 leaves no room above the exposed port: fail closed.
     let cfg = mk(&[("VAULTWARDEN_PORT", "65535")]);
-    assert_eq!(cfg.port, "65535");
+    assert_eq!(cfg.port, 65535);
     assert_eq!(cfg.vault_port, None);
 }
 
@@ -255,7 +255,7 @@ fn dotenv_file_merges_below_process_env() {
     let path_str = path.to_str().unwrap();
 
     let cfg = mk_with_file(&[], FileConfig::load_from(Some(path_str)));
-    assert_eq!(cfg.port, "2222");
+    assert_eq!(cfg.port, 2222);
     assert_eq!(cfg.hostname, "file-host");
     assert_eq!(cfg.authkey.as_deref(), Some("file-key"));
     assert!(!cfg.serve);
@@ -302,20 +302,20 @@ fn port_resolves_from_env_then_file() {
         &[],
         FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_PORT=8443\n"))),
     );
-    assert_eq!(cfg.port, "8443");
-    assert_eq!(cfg.vault_port.as_deref(), Some("8444"));
+    assert_eq!(cfg.port, 8443);
+    assert_eq!(cfg.vault_port, Some(8444));
     // env beats the file
     let cfg = mk_with_file(
         &[("VAULTWARDEN_PORT", "3000")],
         FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_PORT=8443\n"))),
     );
-    assert_eq!(cfg.port, "3000");
+    assert_eq!(cfg.port, 3000);
     // an invalid env value warns and falls through to the file
     let cfg = mk_with_file(
         &[("VAULTWARDEN_PORT", "not-a-port")],
         FileConfig::load_from(Some(&env_dotenv("VAULTWARDEN_PORT=8443\n"))),
     );
-    assert_eq!(cfg.port, "8443");
+    assert_eq!(cfg.port, 8443);
 }
 
 /// Legacy port spellings refuse the boot with a message naming the
@@ -474,7 +474,7 @@ fn s3_endpoint_defaults_to_https_and_options_apply() {
         std::time::Duration::from_secs(60),
     )
     .expect("a bare host gets the safe scheme");
-    assert_eq!(cfg.target.endpoint, "https://s3.example.com");
+    assert_eq!(cfg.target.endpoint.as_str(), "https://s3.example.com/");
     assert!(!cfg.target.allow_http);
 }
 

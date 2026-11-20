@@ -58,6 +58,10 @@ ARG VAULTWARDEN_WEB_VAULT
 ARG TAILSCALE_VERSION
 ARG TAILSCALE_SHA256_AMD64
 ARG TAILSCALE_SHA256_ARM64
+# Build-stage tools only: base images above are digest-pinned, but these
+# packages come from the image's live repositories and are not individually
+# version-pinned (dnf verifies their signatures). Nothing installed in this
+# stage reaches the runtime image.
 # hadolint ignore=DL3041
 RUN dnf -y install tar gzip && dnf clean all
 WORKDIR /fetch
@@ -108,6 +112,8 @@ FROM ${BUILDER_IMAGE} AS vw-build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG TARGETARCH
 ARG VW_VERSION
+# tar/gzip extract the release tarball; tzdata feeds the runtime zoneinfo
+# copy; openssl-devel compiles vaultwarden. Build-stage only, as above.
 # hadolint ignore=DL3041
 RUN dnf -y install tar gzip tzdata openssl-devel && dnf clean all
 WORKDIR /build
@@ -158,8 +164,9 @@ COPY --from=fetch --chown=65532:65532 /data /data
 # folder, so an API-only build stays API-only under the supervisor too.
 # Volatile storage: pointing /data at tmpfs (or running without a volume)
 # loses everything on exit. vaultwarden's upstream
-# I_REALLY_WANT_VOLATILE_STORAGE gate did NOT trigger on 1.37.2 (verified:
-# a tmpfs /data boots clean, no refusal, no warning) — the safety net here
+# I_REALLY_WANT_VOLATILE_STORAGE gate did NOT trigger on 1.37.2 (verified
+# on that version; recheck on upgrade: a tmpfs /data boots clean, no
+# refusal, no warning) — the safety net here
 # is the supervisor's state sync + DB backup, not the vault's own check.
 
 ENV DATA_FOLDER=/data \

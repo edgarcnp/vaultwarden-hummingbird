@@ -19,19 +19,13 @@ use crate::util::wait_until;
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Must be called before any boot side effect: spawns no children, touches
-/// no Tailscale state. An unparseable port is a failed check, never a panic.
-pub fn healthcheck(exposed: &str) -> bool {
-    let port = match exposed.parse::<u16>() {
-        // 0 is never a real listener (boot-time `valid_port` rejects it too).
-        Ok(p @ 1..) => p,
-        _ => {
-            log::err(&format!(
-                "healthcheck: invalid exposed port '{}'",
-                log::sanitize(exposed)
-            ));
-            return false;
-        }
-    };
+/// no Tailscale state. A zero port is a failed check, never a panic.
+pub fn healthcheck(port: u16) -> bool {
+    // 0 is never a real listener (config never resolves to it).
+    if port == 0 {
+        log::err("healthcheck: invalid exposed port 0");
+        return false;
+    }
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     healthcheck_until(addr, HEALTHCHECK_TIMEOUT)
 }
@@ -65,7 +59,7 @@ mod tests {
     /// serving would not do), probing `vault` exactly like the real gate.
     /// Returns the exposed port.
     fn fake_gate(vault: Option<SocketAddr>) -> u16 {
-        let listener = bind("0").unwrap();
+        let listener = bind(0).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(std::thread::spawn(move || {
             let live = Arc::new(Liveness::new(vault));
@@ -109,7 +103,7 @@ mod tests {
     #[test]
     fn healthcheck_is_bounded_when_the_gate_is_not_bound() {
         // Claim an ephemeral port, then release it: nothing listens there.
-        let free = bind("0").unwrap();
+        let free = bind(0).unwrap();
         let addr = format!("127.0.0.1:{}", free.local_addr().unwrap().port());
         drop(free);
         let budget = Duration::from_millis(300);
@@ -122,9 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn healthcheck_rejects_an_invalid_exposed_port() {
-        for port in ["", "not-a-port", "0", "65536", "-1"] {
-            assert!(!healthcheck(port), "{port}");
-        }
+    fn healthcheck_rejects_port_zero() {
+        assert!(!healthcheck(0));
     }
 }

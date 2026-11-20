@@ -16,6 +16,12 @@ concurrency:
 permissions:
   contents: read
 
+# The crate's declared MSRV (supervisor/Cargo.toml `rust-version`), verified
+# by the lint job; test and build use the same compiler so a passing run
+# proves the minimum, not whatever stable happened to ship on the runner.
+env:
+  RUST_VERSION: "1.95.0"
+
 defaults:
   run:
     working-directory: supervisor
@@ -28,12 +34,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # ubuntu-latest ships with a stable rustup toolchain preinstalled.
+      # ubuntu-latest ships rustup; install the MSRV explicitly instead of
+      # trusting the preinstalled stable to be in range.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+
+      - name: Check the MSRV pin matches Cargo.toml
+        run: |
+          declared=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          pinned=$(printf '%s' "$RUST_VERSION" | cut -d. -f1-2)
+          test "$declared" = "$pinned" || {
+            echo "Cargo.toml declares rust-version=$declared, workflow pins $RUST_VERSION"
+            exit 1
+          }
+
       - name: cargo fmt
-        run: cargo fmt --check
+        run: cargo +"$RUST_VERSION" fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo +"$RUST_VERSION" clippy --all-targets --locked -- -D warnings
 
   test:
     name: Test
@@ -54,9 +73,11 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('supervisor/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
 
-      # ubuntu-latest ships with a stable rustup toolchain preinstalled.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+
       - name: cargo test
-        run: cargo test --locked
+        run: cargo +"$RUST_VERSION" test --locked
 
   build:
     name: Build
@@ -77,6 +98,8 @@ jobs:
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('supervisor/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-build-
 
-      # ubuntu-latest ships with a stable rustup toolchain preinstalled.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal
+
       - name: cargo build
-        run: cargo build --locked --all-targets
+        run: cargo +"$RUST_VERSION" build --locked --all-targets

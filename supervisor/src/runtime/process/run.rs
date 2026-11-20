@@ -160,7 +160,7 @@ pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn(
 /// The child runs as its own process-group leader, so the expiry/abort kill
 /// reaches anything it spawned, not just the direct child. Its environment
 /// is allow-listed ([`apply_env`]) — the supervisor's env never leaks.
-pub fn run_bounded_env(
+fn run_bounded_env(
     timeout: Duration,
     prog: &str,
     args: &[&str],

@@ -35,7 +35,7 @@ fn counting_vault() -> (SocketAddr, Arc<AtomicUsize>) {
 /// the probe with it, the answer would be 503, not what these tests
 /// expect from the 403 paths.
 fn roundtrip(request: &[u8], vault: Option<SocketAddr>) -> String {
-    let listener = bind("0").expect("ephemeral bind");
+    let listener = bind(0).expect("ephemeral bind");
     let addr = listener.local_addr().unwrap();
     let live = Arc::new(Liveness::new(vault));
     let t = std::thread::spawn(move || {
@@ -56,11 +56,9 @@ fn roundtrip(request: &[u8], vault: Option<SocketAddr>) -> String {
 fn alive_answers_200_when_vault_is_healthy() {
     let vault = fake_vault("200 OK");
     let resp = roundtrip(b"GET /alive HTTP/1.1\r\nHost: x\r\n\r\n", Some(vault));
-    assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"), "{resp}");
-    assert!(resp.contains("Connection: close"), "{resp}");
-    assert!(
-        !resp.contains("Content-Length: 0\r\n\r\n"),
-        "bare status only"
+    assert_eq!(
+        resp, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "exactly one bare status response"
     );
 }
 
@@ -171,7 +169,7 @@ fn malformed_or_empty_requests_answer_403() {
 /// Requests that never finish must not hold a gatekeeper thread forever.
 #[test]
 fn silent_connections_are_bounded_by_read_timeout() {
-    let listener = bind("0").expect("ephemeral bind");
+    let listener = bind(0).expect("ephemeral bind");
     let addr = listener.local_addr().unwrap();
     let t = std::thread::spawn(move || {
         let s = listener.incoming().next().unwrap().unwrap();
@@ -189,7 +187,7 @@ fn silent_connections_are_bounded_by_read_timeout() {
 /// window held a slot for minutes (and 32 such peers starved the gate).
 #[test]
 fn a_trickling_request_cannot_extend_the_head_budget() {
-    let listener = bind("0").expect("ephemeral bind");
+    let listener = bind(0).expect("ephemeral bind");
     let addr = listener.local_addr().unwrap();
     let t = std::thread::spawn(move || {
         let s = listener.incoming().next().unwrap().unwrap();
@@ -228,16 +226,16 @@ fn a_trickling_request_cannot_extend_the_head_budget() {
 /// The gate must not double-bind a port already in use.
 #[test]
 fn bind_conflict_is_an_error() {
-    let listener = bind("0").expect("ephemeral bind");
+    let listener = bind(0).expect("ephemeral bind");
     let port = listener.local_addr().unwrap().port();
-    assert!(bind(&port.to_string()).is_err());
+    assert!(bind(port).is_err());
 }
 
 /// The gate accepts IPv4 loopback probes (health checks), and IPv6 too
 /// when the kernel's wildcard default is dual-stack.
 #[test]
 fn bind_accepts_loopback_probes() {
-    let listener = bind("0").expect("ephemeral bind");
+    let listener = bind(0).expect("ephemeral bind");
     let port = listener.local_addr().unwrap().port();
     std::net::TcpStream::connect(("127.0.0.1", port)).expect("IPv4 loopback reaches the gate");
     if super::server::dual_stack_wildcard() {
@@ -286,7 +284,7 @@ fn liveness_verdict_expires_with_the_window() {
 #[test]
 fn admission_bounds_concurrent_handlers() {
     let (vault, hits) = counting_vault();
-    let listener = bind("0").unwrap();
+    let listener = bind(0).unwrap();
     let addr = listener.local_addr().unwrap();
     drop(std::thread::spawn(move || {
         serve_with(listener, Some(vault), 1)

@@ -5,19 +5,7 @@
 
 use std::path::{Component, Path};
 
-/// Whether `path` is an absolute path under `root` with no `..` or other
-/// non-normal component (and no control character in `value`).
-pub(crate) fn under_root(root: &Path, value: &str) -> bool {
-    if value.chars().any(char::is_control) {
-        return false;
-    }
-    let path = Path::new(value);
-    path.is_absolute()
-        && path.starts_with(root)
-        && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-}
+use crate::util::fs::under_root;
 
 /// The identity file: `mem:` (Tailscale's in-memory state) or a direct
 /// child of the state root. The daemon derives its `--statedir` (and thus
@@ -77,6 +65,9 @@ pub(crate) fn reserved_state_name(rel: &str) -> bool {
     ) || rel.starts_with("rsa_key")
         || rel.starts_with("db-backups")
         || rel.starts_with("db-")
+        // StagedFile::create_in(STATE_ROOT, "ts-authkey") reclaims this
+        // namespace by name; a state file there would be unlinked.
+        || rel.starts_with("ts-authkey")
 }
 
 #[cfg(test)]
@@ -155,6 +146,8 @@ mod tests {
             "objects",
             "rsa_key",
             "rsa_key.pem",
+            "ts-authkey-1-0",
+            "ts-authkey",
             "sub/node.state",
             "bad\nname",
         ] {

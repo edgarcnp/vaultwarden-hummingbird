@@ -16,6 +16,42 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use nix::fcntl::{OFlag, openat};
 use nix::sys::stat::Mode;
 
+/// The supervisor-only state volume root.
+pub const STATE_ROOT: &str = "/state";
+
+/// Open `path` read-only, never following a symlink, and prove it is a
+/// regular file. `O_NONBLOCK` keeps a pre-created FIFO from blocking the
+/// open; a consumer that opens the path again (SQLite) can still race a
+/// writer, but the crafted-artifact hang is refused here first.
+pub(crate) fn open_regular(path: &str) -> std::io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+/// Whether `path` is an absolute path under `root` with no `..` or other
+/// non-normal component (and no control character in `value`). The one
+/// helper behind every `/state` containment check.
+pub(crate) fn under_root(root: &Path, value: &str) -> bool {
+    if value.chars().any(char::is_control) {
+        return false;
+    }
+    let path = Path::new(value);
+    path.is_absolute()
+        && path.starts_with(root)
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+}
+
 /// Suffix for supervisor partial downloads. User files may legitimately
 /// end in `.part`, so the supervisor uses a distinct name.
 pub const PART_SUFFIX: &str = ".vw-part";
@@ -38,7 +74,7 @@ pub fn is_real_file(path: &str) -> bool {
 }
 
 /// Whether `path` is a real directory, never following a final symlink.
-pub fn is_real_dir(path: &str) -> bool {
+pub(crate) fn is_real_dir(path: &str) -> bool {
     std::fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_dir())
         .unwrap_or(false)

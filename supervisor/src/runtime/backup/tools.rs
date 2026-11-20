@@ -6,7 +6,7 @@
 use crate::config::{DbBackupConfig, SYNC_TIMEOUT};
 pub(crate) use crate::s3::Client;
 
-use super::manifest::{MAX_MANIFEST_BYTES, Manifest};
+use super::manifest::{MAX_MANIFEST_BYTES, Manifest, valid_name};
 
 /// One client for a backup run. `Err` = unusable configuration; callers
 /// log the cause and skip rather than guess.
@@ -53,6 +53,19 @@ pub(crate) fn store_manifest(
     client.put_bytes(&manifest_key(cfg), rendered.as_bytes(), abort)
 }
 
+/// The dump-name filter: a key inside the backup prefix whose relative
+/// name is safe to address and matches this database's dump shape.
+fn dump_name<'a>(
+    key: &'a str,
+    bucket_prefix: &str,
+    name_prefix: &str,
+    name_suffix: &str,
+) -> Option<&'a str> {
+    let name = key.strip_prefix(bucket_prefix)?;
+    (valid_name(name) && name.starts_with(name_prefix) && name.ends_with(name_suffix))
+        .then_some(name)
+}
+
 /// The legacy dump listing (`<prefix><label>-*.<ext>`, name + size,
 /// sorted): used while no manifest exists and as the recovery fallback
 /// when one is unreadable. `Err` = listing failed — callers must never
@@ -69,9 +82,8 @@ pub(crate) fn list_objects(
     let mut names: Vec<(String, u64)> = keys
         .into_iter()
         .filter_map(|listed| {
-            let name = listed.key.strip_prefix(&bucket_prefix)?;
-            (name.starts_with(&name_prefix) && name.ends_with(&name_suffix))
-                .then(|| (name.to_string(), listed.size))
+            dump_name(&listed.key, &bucket_prefix, &name_prefix, &name_suffix)
+                .map(|name| (name.to_string(), listed.size))
         })
         .collect();
     names.sort();
@@ -124,13 +136,22 @@ mod tests {
                 size: 22,
                 last_modified: String::new(),
             },
+            Listed {
+                key: format!("{}sqlite-two\nlines.sqlite3", bucket_prefix),
+                size: 0,
+                last_modified: String::new(),
+            },
+            Listed {
+                key: format!("{}sqlite-sub/dir.sqlite3", bucket_prefix),
+                size: 0,
+                last_modified: String::new(),
+            },
         ];
         let mut names: Vec<(String, u64)> = listed
             .into_iter()
             .filter_map(|l| {
-                let name = l.key.strip_prefix(&bucket_prefix)?;
-                (name.starts_with(&name_prefix) && name.ends_with(&name_suffix))
-                    .then(|| (name.to_string(), l.size))
+                dump_name(&l.key, &bucket_prefix, &name_prefix, &name_suffix)
+                    .map(|name| (name.to_string(), l.size))
             })
             .collect();
         names.sort();

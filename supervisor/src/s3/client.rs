@@ -18,7 +18,6 @@ use std::time::Duration;
 use anyhow::{anyhow, bail};
 use rusty_s3::actions::CreateMultipartUpload;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
-use url::Url;
 
 use super::remote::{BucketStyle, RemoteSpec};
 use super::transport::{
@@ -159,22 +158,16 @@ impl Client {
     /// endpoint URL) — callers treat it as a failed operation, per each
     /// caller's own failure semantics.
     pub fn connect(spec: &RemoteSpec, timeout: Duration) -> anyhow::Result<Self> {
-        if spec.endpoint.is_empty() {
-            bail!(
-                "SUPERVISOR_S3_ENDPOINT is required; every S3-compatible provider \
-                 (AWS included) is configured by its endpoint"
-            );
+        let endpoint = spec.endpoint.clone();
+        if !matches!(endpoint.scheme(), "http" | "https") {
+            bail!("invalid S3 endpoint scheme (want http or https)");
         }
-        let endpoint: Url = spec
-            .endpoint
-            .parse()
-            .map_err(|e| anyhow!("invalid S3 endpoint: {e}"))?;
         if endpoint.scheme() == "http" && !spec.allow_http && !loopback(&endpoint) {
             bail!(
                 "SUPERVISOR_S3_ENDPOINT {} uses plaintext HTTP; SigV4 credentials \
                  would cross the network in clear text. Use https, or set \
                  SUPERVISOR_S3_ALLOW_HTTP=true only on a trusted network",
-                crate::util::log::sanitize(&spec.endpoint)
+                crate::util::log::sanitize(&endpoint.origin().ascii_serialization())
             );
         }
         let endpoint = normalize_endpoint(endpoint);
@@ -578,9 +571,20 @@ impl Client {
                     .truncate(start == 0)
                     .append(start > 0)
                     .mode(expect.mode)
-                    .custom_flags(nix::libc::O_NOFOLLOW)
+                    .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
                     .open(&tmp)
                     .map_err(|e| GetError::Local(format!("cannot create {tmp}: {e}")))?;
+                // A pre-created FIFO opens without O_NONBLOCK only when a
+                // reader is present; never write into anything but a file.
+                if !out
+                    .metadata()
+                    .map_err(|e| GetError::Local(format!("cannot inspect {tmp}: {e}")))?
+                    .is_file()
+                {
+                    return Err(GetError::Local(format!(
+                        "cannot create {tmp}: not a regular file"
+                    )));
+                }
                 let mut buf = [0u8; 64 * 1024];
                 let mut total = start;
                 loop {

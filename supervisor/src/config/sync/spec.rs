@@ -9,9 +9,9 @@ use anyhow::bail;
 
 use crate::s3::{BucketStyle, RemoteSpec};
 
-/// S3-backed persistence for the durable /data set (opt-in): the same
-/// tailnet node, vaultwarden RSA keys, and user content survive ephemeral
-/// redeploys.
+/// S3-backed persistence for the durable set across `/data` and `/state`
+/// (opt-in): the same tailnet node, vaultwarden RSA keys, and user content
+/// survive ephemeral redeploys.
 #[derive(Clone)]
 pub struct SyncConfig {
     /// the remote as configured (e.g. `r2:vw-state/sub`), for logs
@@ -63,7 +63,13 @@ impl SyncConfig {
         if !matches!(parsed.scheme(), "http" | "https") {
             bail!("SUPERVISOR_S3_ENDPOINT must use http or https");
         }
-        let target = parse_remote(&remote, key_id, key_secret, endpoint)?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            bail!(
+                "SUPERVISOR_S3_ENDPOINT must not embed credentials; use \
+                 SUPERVISOR_S3_ACCESS_KEY_ID and SUPERVISOR_S3_SECRET_ACCESS_KEY"
+            );
+        }
+        let target = parse_remote(&remote, key_id, key_secret, parsed)?;
         Ok(Self {
             remote,
             target,
@@ -122,7 +128,7 @@ fn parse_remote(
     remote: &str,
     key_id: String,
     key_secret: String,
-    endpoint: String,
+    endpoint: url::Url,
 ) -> anyhow::Result<RemoteSpec> {
     let Some((_, path)) = remote.split_once(':') else {
         bail!("must be remote:bucket[/prefix]");
@@ -257,6 +263,16 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            SyncConfig::new(
+                "r2:vw-state".into(),
+                "id".into(),
+                "secret".into(),
+                "https://user:pass@s3.example.invalid".into(),
+                Duration::from_secs(60)
+            )
+            .is_err()
+        );
     }
 
     /// A bare host gets HTTPS; an explicit scheme is preserved.
@@ -270,7 +286,7 @@ mod tests {
             Duration::from_secs(60),
         )
         .expect("bare host");
-        assert_eq!(cfg.target.endpoint, "https://s3.example.invalid");
+        assert_eq!(cfg.target.endpoint.as_str(), "https://s3.example.invalid/");
         let cfg = SyncConfig::new(
             "r2:vw-state".into(),
             "id".into(),
@@ -279,7 +295,7 @@ mod tests {
             Duration::from_secs(60),
         )
         .expect("explicit https");
-        assert_eq!(cfg.target.endpoint, "https://s3.example.invalid");
+        assert_eq!(cfg.target.endpoint.as_str(), "https://s3.example.invalid/");
     }
 
     /// No provider is a default: the endpoint is required, AWS included.

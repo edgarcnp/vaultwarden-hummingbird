@@ -466,7 +466,10 @@ fn clear_entries(dir: &mut Dir, removed: &mut usize, depth: usize) {
             continue;
         };
         if name_str.ends_with(crate::util::fs::PART_SUFFIX) {
-            if matches!(kind, Type::File | Type::Symlink)
+            // A FIFO/socket/device at a temp name is a crafted hang, not
+            // a half-download; unlink everything but a directory (which
+            // unlinkat would refuse anyway).
+            if !matches!(kind, Type::Directory)
                 && unlinkat(&*dir, name.as_c_str(), UnlinkatFlags::NoRemoveDir).is_ok()
             {
                 *removed += 1;
@@ -703,6 +706,21 @@ mod tests {
         assert!(!root.join("attachments/sub/v.vw-part").exists());
         assert!(root.join("certs/keep.crt").exists());
         assert_eq!(clear_partials(&roots, None), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A FIFO at a temp name is a crafted open-block; the sweep unlinks it
+    /// like any other stale partial.
+    #[test]
+    fn a_fifo_partial_is_cleared() {
+        let root = std::env::temp_dir().join(format!("vw-sup-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        let fifo = root.join("attachments/bad.vw-part");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let roots = Roots::one(&root);
+        assert_eq!(clear_partials(&roots, None), 1);
+        assert!(!fifo.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

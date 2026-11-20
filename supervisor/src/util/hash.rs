@@ -39,7 +39,7 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 /// Lowercase hex of a digest.
-pub fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

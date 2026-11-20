@@ -18,7 +18,7 @@ use super::schema;
 /// `..` component must be refused even when the textual prefix matches:
 /// `/state/../data/.env` would otherwise read a vault-writable file.
 fn env_file_isolated(path: &str) -> bool {
-    paths::under_root(Path::new(SUPERVISOR_STATE), path)
+    crate::util::fs::under_root(Path::new(SUPERVISOR_STATE), path)
 }
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
@@ -34,10 +34,10 @@ pub struct Config {
     /// or file) and a bare `ROCKET_PORT` in the dotenv file refuse the
     /// boot — see [`Self::from_env`]; an ambient bare `ROCKET_PORT` is
     /// filtered, not fatal.
-    pub port: String,
+    pub port: u16,
     /// vaultwarden's port (`port + 1`, loopback-only). None = exposed port
     /// is 65535: boot must fail closed.
-    pub vault_port: Option<String>,
+    pub vault_port: Option<u16>,
     /// node name announced to the tailnet (`TAILSCALE_HOSTNAME`)
     pub hostname: String,
     /// Tailscale auth key or OAuth client secret (`TAILSCALE_AUTHKEY`;
@@ -169,12 +169,12 @@ impl Config {
         ]
         .into_iter()
         .find_map(valid_port)
-        .unwrap_or_else(|| schema::string_default("VAULTWARDEN_PORT").to_string());
-        let vault_port = port
-            .parse::<u16>()
-            .ok()
-            .and_then(|p| p.checked_add(1))
-            .map(|p| p.to_string());
+        .unwrap_or_else(|| {
+            schema::string_default("VAULTWARDEN_PORT")
+                .parse()
+                .expect("schema default is a valid port")
+        });
+        let vault_port = port.checked_add(1);
 
         let knob = |key: &str, default: &str| -> String {
             non_empty(lookup(key))

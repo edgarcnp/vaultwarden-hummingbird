@@ -172,7 +172,7 @@ impl Boot {
                 if !self.cfg.serve {
                     return Outcome::Next;
                 }
-                let Some(vault_port) = &self.cfg.vault_port else {
+                let Some(vault_port) = self.cfg.vault_port else {
                     log::err("no room for the internal vault port; refusing to start");
                     return Outcome::Exit(1);
                 };

@@ -1,8 +1,9 @@
 //! Backup lineage continuity: the stale-DB shadow guard. "Newest wins"
 //! restore is only sound if every push comes from the lineage that owns the
-//! bucket's newest generation. A sidecar next to the live database records
-//! that ownership as the manifest generation this volume last pushed or
-//! imported; pushes from a DB that cannot prove continuity are refused
+//! bucket's newest generation. A sidecar on the supervisor-only /state
+//! volume records that ownership as the manifest generation this volume
+//! last pushed or imported; pushes from a DB that cannot prove continuity
+//! are refused
 //! instead of silently shadowing good backups. An explicit adoption
 //! (`SUPERVISOR_DB_BACKUP_RESTORE=true`) overwrites a stale or missing
 //! sidecar: the remedy must work, or a crash between the manifest write

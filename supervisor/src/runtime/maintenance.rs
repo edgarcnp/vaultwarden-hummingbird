@@ -32,7 +32,7 @@ use crate::util::log;
 /// Monotonic maintenance lifecycle token. `stop` is set at most once and
 /// never cleared: an in-flight abort closure keeps seeing it until the
 /// process exits.
-pub struct Token {
+struct Token {
     stop: AtomicBool,
     forced: AtomicBool,
 }
@@ -46,12 +46,12 @@ impl Token {
     }
 
     /// Whether the shutdown drain has been requested (periodic runs abort).
-    pub fn stopping(&self) -> bool {
+    fn stopping(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
 
     /// Whether a stop request arrived while draining ("hurry up").
-    pub fn forced(&self) -> bool {
+    fn forced(&self) -> bool {
         self.forced.load(Ordering::SeqCst)
     }
 

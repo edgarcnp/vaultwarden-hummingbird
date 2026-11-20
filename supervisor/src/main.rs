@@ -69,7 +69,9 @@ fn security_probe() -> ! {
         log::info("isolation probe: ok");
         std::process::exit(0);
     }
-    log::err("isolation probe: FAILED: a child retained the ability to change uid");
+    log::err(
+        "isolation probe: FAILED: a child retained privileges (uid change, capabilities, or no_new_privs)",
+    );
     std::process::exit(1);
 }
 
@@ -79,6 +81,25 @@ fn security_probe_child(current: u32, target: u32) -> ! {
     if nix::unistd::geteuid().as_raw() != current {
         log::err("isolation probe: child has an unexpected uid");
         std::process::exit(2);
+    }
+    // setresuid failing is necessary but not sufficient: a retained
+    // capability (same-uid spawn) or a missing no_new_privs (a setuid/file-
+    // cap exec could re-grant the bounding set) must also fail the probe.
+    #[cfg(target_os = "linux")]
+    if !nix::sys::prctl::get_no_new_privs().unwrap_or(false) {
+        log::err("isolation probe: child has no_new_privs unset");
+        std::process::exit(1);
+    }
+    match runtime::caps_are_empty() {
+        Ok(true) => {}
+        Ok(false) => {
+            log::err("isolation probe: child retained capabilities");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            log::err(&format!("isolation probe: cannot read capabilities: {e}"));
+            std::process::exit(1);
+        }
     }
     let target = nix::unistd::Uid::from_raw(target);
     match nix::unistd::setresuid(target, target, target) {
@@ -98,7 +119,7 @@ fn security_probe_child(current: u32, target: u32) -> ! {
 fn healthcheck() -> ! {
     let healthy = match Config::from_env() {
         Some(cfg) => {
-            if gate_healthcheck(&cfg.port) {
+            if gate_healthcheck(cfg.port) {
                 true
             } else {
                 log::err(

@@ -26,28 +26,22 @@ use crate::util::log;
 /// vault nobody can reach is worse than a short outage.
 pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
     // fail closed on a missing internal port: co-binding would expose the vault
-    let Some(vault_port) = &cfg.vault_port else {
+    let Some(vault_port) = cfg.vault_port else {
         log::err("no room for the internal vault port above the exposed port; refusing to start");
         shutdown(Some(tsd), None, 1, None)
     };
-    let gate = match gate_bind(&cfg.port) {
+    let gate = match gate_bind(cfg.port) {
         Ok(g) => g,
         Err(e) => {
             log::err(&format!(
                 "gatekeeper bind failed on 0.0.0.0:{}: {e}",
-                log::sanitize(&cfg.port)
+                cfg.port
             ));
             shutdown(Some(tsd), None, 1, None)
         }
     };
-    gate_describe(&cfg.port, vault_port);
-    let Ok(vault_addr) = vault_port
-        .parse::<u16>()
-        .map(|p| std::net::SocketAddr::from(([127, 0, 0, 1], p)))
-    else {
-        log::err("internal vault port is not a valid port; refusing to start");
-        shutdown(Some(tsd), None, 1, None)
-    };
+    gate_describe(cfg.port, vault_port);
+    let vault_addr = std::net::SocketAddr::from(([127, 0, 0, 1], vault_port));
     // The gate thread is the only public listener. A thread that cannot
     // start is a failed boot, not a vault nobody can health-check.
     let gate_thread = std::thread::Builder::new()

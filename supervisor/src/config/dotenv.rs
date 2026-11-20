@@ -44,7 +44,7 @@ impl FileConfig {
     }
 
     /// path=None = no config file (tests).
-    pub fn load_from(path: Option<&str>) -> Self {
+    pub(crate) fn load_from(path: Option<&str>) -> Self {
         let Some(path) = path else {
             return Self::default();
         };

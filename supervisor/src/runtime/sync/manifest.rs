@@ -1,5 +1,5 @@
-//! The sync manifest: the bucket-side record of the last pushed /data
-//! state, one `<sha256> <size> <rel>` line per synced file. Pushes compare
+//! The sync manifest: the bucket-side record of the last pushed durable
+//! set, one `<sha256> <size> <rel>` line per synced file. Pushes compare
 //! content against it (not just size), and pulls use its hashes to verify
 //! what they write. A missing manifest means the legacy layout (the
 //! listing is authoritative); an unreadable one is treated as empty and
@@ -52,6 +52,12 @@ impl Manifest {
                 .parse()
                 .map_err(|_| anyhow::anyhow!("line {}: bad size", i + 2))?;
             ensure!(!rel.is_empty(), "line {}: empty path", i + 2);
+            ensure!(
+                rel.trim() == rel && !rel.chars().any(char::is_control),
+                "line {}: invalid path",
+                i + 2
+            );
+            ensure!(!entries.contains_key(rel), "line {}: duplicate path", i + 2);
             entries.insert(
                 rel.to_string(),
                 Entry {
@@ -79,6 +85,15 @@ impl Manifest {
 
     pub(super) fn get(&self, rel: &str) -> Option<&Entry> {
         self.entries.get(rel)
+    }
+
+    /// Drop entries outside the caller's durable set, returning how many.
+    /// A bucket-controlled manifest must not name DB backups, sidecars, or
+    /// traversal paths.
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|rel, _| keep(rel));
+        before - self.entries.len()
     }
 
     pub(super) fn insert(&mut self, rel: String, entry: Entry) {
@@ -144,5 +159,13 @@ mod tests {
         }
         assert!(Manifest::parse("v1\n").unwrap().is_empty());
         assert!(Manifest::parse("v1\n\n").unwrap().is_empty());
+        let hash = "a".repeat(64);
+        for bad in [
+            "v1\na 1 x\nbad\n".to_string(),
+            format!("v1\n{hash} 1 x\n{hash} 1 x\n"),
+            format!("v1\n{hash} 1 shared\n{} 1 shared\n", "b".repeat(64)),
+        ] {
+            assert!(Manifest::parse(&bad).is_err(), "must reject {bad:?}");
+        }
     }
 }

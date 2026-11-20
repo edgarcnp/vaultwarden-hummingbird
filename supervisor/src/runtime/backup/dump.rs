@@ -114,7 +114,7 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
     if !super::sqlite::dump(&cfg.db_path, &staged, &abort) {
         log::err(
             "db backup: dump failed; nothing was uploaded or deleted, the next tick \
-             retries (if it repeats, check free space on /data)",
+             retries (if it repeats, check free space on /state)",
         );
         return;
     }

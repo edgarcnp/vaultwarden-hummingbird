@@ -24,9 +24,9 @@ pub use maintenance::Reactor;
 pub(crate) use maintenance::Task;
 pub use migrate::migrate_layout;
 pub use process::{
-    Credentials, EnvGrant, Gone, Handle, POLL, TERM_GRACE, TUN_CAPS, apply_env, exit_code,
-    install_signal_handlers, reap_until_gone, run_bounded, run_bounded_capture, shutdown,
-    signal_child, spawn, spawn_as, spawn_with_caps, start_vw, stopping, take_stop,
+    Credentials, EnvGrant, Gone, Handle, POLL, TERM_GRACE, TUN_CAPS, apply_env, caps_are_empty,
+    exit_code, install_signal_handlers, reap_until_gone, run_bounded, run_bounded_capture,
+    shutdown, signal_child, spawn, spawn_as, spawn_with_caps, start_vw, stopping, take_stop,
 };
 pub use services::{run_vaultwarden, spawn_tailscaled, tailscale_serve, tailscale_up};
 pub use sync::{restore_state, sync_state};

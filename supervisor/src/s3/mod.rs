@@ -1,8 +1,8 @@
 //! In-process S3 transport: the minimal client the supervisor's optional
 //! persistence features share (state sync, DB backup). Callers resolve
-//! their knobs into a [`RemoteSpec`] and connect; the only image-wide
-//! policy here is that a custom CA bundle must live on the supervisor-only
-//! state volume.
+//! their knobs into a [`RemoteSpec`] and connect; config resolution owns
+//! the CA-location policy (a custom bundle must live on the supervisor-only
+//! state volume), so this layer only parses the validated file.
 //!
 //! Siblings: `client` (put/get/list/delete over one bucket), `remote`
 //! (the resolved remote as pure data).

@@ -109,7 +109,7 @@ pub fn tailscale_up(
 /// The whole sequence shares one `timeout` budget: a slow CLI must not
 /// multiply the phase's bound by the number of calls (up to six).
 pub fn tailscale_serve(
-    port: &str,
+    port: u16,
     service: Option<&str>,
     socket: &str,
     timeout: Duration,
