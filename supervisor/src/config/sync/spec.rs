@@ -121,9 +121,11 @@ impl SyncConfig {
 
 /// Parse `name:bucket[/prefix]` into a [`RemoteSpec`]. The name before
 /// the colon is rclone legacy and is accepted but ignored. Bucket
-/// sanity: non-empty, no `/`, `:`, or whitespace — provider-specific
-/// rules are the operator's business, exactly as they were with rclone.
-/// The prefix is normalized to end with `/` (or be empty).
+/// sanity: non-empty, no `/`, `:`, URL delimiters (`?`, `#`, `%`), control
+/// characters, whitespace, or `.`/`..` path segments — provider-specific
+/// naming rules are the operator's business, but a name that can change the
+/// request URL is not. The prefix is normalized to end with `/` (or be
+/// empty).
 fn parse_remote(
     remote: &str,
     key_id: String,
@@ -139,11 +141,16 @@ fn parse_remote(
         None => (path, ""),
     };
     if bucket.is_empty()
-        || bucket
-            .chars()
-            .any(|c| c.is_whitespace() || c == ':' || c == '/')
+        || bucket == "."
+        || bucket == ".."
+        || bucket.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, ':' | '/' | '?' | '#' | '%')
+        })
     {
-        bail!("bucket must be non-empty and free of whitespace, ':' and '/'");
+        bail!(
+            "bucket must be non-empty and free of whitespace, control characters, \
+             ':', '/', '?', '#', '%', and '.'/'..' segments"
+        );
     }
     // Empty stays empty; anything else becomes a directory-style prefix.
     let prefix = prefix.trim_start_matches('/');
@@ -205,6 +212,12 @@ mod tests {
             "r2:/sub",       // empty bucket before the slash
             "r2:my bucket",  // whitespace
             "r2:vw:state",   // colon in the bucket
+            "r2:.",          // path segment
+            "r2:..",         // path segment
+            "r2:a?b",        // query delimiter
+            "r2:a#b",        // fragment delimiter
+            "r2:a%b",        // percent escape
+            "r2:a\tb",       // control character
         ] {
             assert!(
                 SyncConfig::new(

@@ -10,6 +10,7 @@
 //! carry credentials) and skipped; later duplicates win.
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use super::env::schema::{self, FilePolicy};
 use super::env::{is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
@@ -51,7 +52,7 @@ impl FileConfig {
         // Every parser has a size cap: a huge config file must not be able
         // to exhaust PID 1's memory at boot.
         const MAX_FILE_BYTES: u64 = 1024 * 1024;
-        match std::fs::metadata(path) {
+        let meta = match std::fs::metadata(path) {
             Ok(meta) if meta.len() > MAX_FILE_BYTES => {
                 return Self {
                     fatal: Some(format!(
@@ -63,7 +64,7 @@ impl FileConfig {
                     ..Self::default()
                 };
             }
-            Ok(_) => {}
+            Ok(meta) => meta,
             Err(e) => {
                 return Self {
                     fatal: Some(format!(
@@ -74,7 +75,8 @@ impl FileConfig {
                     ..Self::default()
                 };
             }
-        }
+        };
+        warn_if_tailscaled_readable(path, &meta);
         // No-follow and capped: a symlink planted at the path must not
         // redirect the supervisor onto a vault-writable file.
         let raw = match crate::util::fs::read_capped(path, MAX_FILE_BYTES) {
@@ -138,6 +140,33 @@ impl FileConfig {
         }
         cfg
     }
+}
+
+/// The dotenv file holds the auth key and S3 credentials. `tailscaled` can
+/// traverse `/state` through the tailscale group; a world-readable file, or
+/// one readable by that group, exposes the secrets to it. The mount and its
+/// mode are the operator's choice, so warn rather than refuse (rootless
+/// bind mounts often cannot be chowned to the container uid).
+fn warn_if_tailscaled_readable(path: &str, meta: &std::fs::Metadata) {
+    if !meta.is_file() {
+        return;
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if env_mode_exposes_secrets(mode, meta.gid()) {
+        log::err(&format!(
+            "config: {} is mode {mode:03o}, readable by the tailscaled uid; the file \
+             holds the auth key and S3 credentials. Use 0600 owned by 65532, or 0640 \
+             with group 65532",
+            log::sanitize(path)
+        ));
+    }
+}
+
+/// Whether a dotenv mode/gid combination lets the tailscaled uid read it.
+/// The vault cannot traverse `/state`, so its shared group is safe; the
+/// tailscale group can, and world bits always can.
+fn env_mode_exposes_secrets(mode: u32, gid: u32) -> bool {
+    mode & 0o007 != 0 || (mode & 0o070 != 0 && gid == crate::config::TAILSCALE_GID)
 }
 
 #[cfg(test)]
@@ -370,5 +399,20 @@ not a valid line
         assert_eq!(cfg.child.len(), 1);
         assert_eq!(cfg.child.get("A").map(String::as_str), Some("2"));
         assert!(cfg.invalid.is_empty());
+    }
+
+    #[test]
+    fn a_tailscaled_readable_dotenv_is_detected() {
+        let ts = crate::config::TAILSCALE_GID;
+        assert!(env_mode_exposes_secrets(0o644, 65532), "world readable");
+        assert!(env_mode_exposes_secrets(0o640, ts), "tailscale group");
+        assert!(
+            !env_mode_exposes_secrets(0o640, 65532),
+            "the vault's group cannot traverse /state"
+        );
+        assert!(
+            !env_mode_exposes_secrets(0o600, ts),
+            "owner-only stays owner-only"
+        );
     }
 }

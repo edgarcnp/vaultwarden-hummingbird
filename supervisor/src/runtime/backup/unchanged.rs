@@ -37,14 +37,15 @@ fn legacy_path(state_dir: &str) -> String {
         .into_owned()
 }
 
-/// The SHA-256 of a staged dump, or `None` when it cannot be read (the
-/// upload proceeds; only the skip optimization is lost).
+/// The SHA-256 of a staged dump, or `None` when it cannot be read. The
+/// caller refuses to upload without a content identity (a v2 manifest entry
+/// needs its hash); the next tick retries.
 pub(super) fn fingerprint(staged: &str) -> Option<String> {
     match sha256_file(staged) {
         Ok(hash) => Some(hash),
         Err(e) => {
             log::err(&format!(
-                "db backup: cannot hash the staged dump ({e}); uploading it"
+                "db backup: cannot hash the staged dump ({e}); the tick will skip this dump"
             ));
             None
         }

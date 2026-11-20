@@ -296,6 +296,7 @@ mod tests {
                         S3_KNOBS[0],
                         S3_KNOBS[1],
                         S3_KNOBS[2],
+                        S3_KNOBS[3],
                         ("SUPERVISOR_DB_BACKUP", "true"),
                     ],
                     url,

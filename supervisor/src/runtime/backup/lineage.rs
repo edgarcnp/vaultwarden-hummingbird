@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use crate::util::fs::{is_real_file, read_capped, write_atomic};
+use crate::util::fs::{read_capped, write_atomic};
 use crate::util::log;
 
 /// On the supervisor-only state volume (not the vault-writable data
@@ -48,14 +48,16 @@ pub(super) enum Known {
 /// The recorded lineage, if any.
 pub(super) fn read(state_dir: &str, key: &str) -> Option<Known> {
     // The sidecar is a generation or a legacy object name; 1 KiB is ample.
-    // A symlink or an oversized/corrupt file is "no usable lineage". A
-    // corrupt keyed file must not silently fall back to a stale legacy
-    // record.
-    let path = sidecar_path(state_dir, key);
-    let path = if is_real_file(&path) {
-        path
-    } else {
-        legacy_path(state_dir)
+    // A symlink, directory, or oversized/corrupt file is "no usable
+    // lineage". Only a missing keyed file falls back to the legacy record:
+    // anything else at the keyed name must not silently adopt stale
+    // lineage (the same rule as the pre-keying fallback below).
+    let keyed = sidecar_path(state_dir, key);
+    let path = match std::fs::symlink_metadata(&keyed) {
+        Ok(meta) if meta.file_type().is_file() => keyed,
+        Ok(_) => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => legacy_path(state_dir),
+        Err(_) => return None,
     };
     let text = read_capped(&path, 1024).ok()?;
     let value = text.trim();
@@ -174,6 +176,24 @@ mod tests {
         assert!(matches!(read(&dir, "aabb"), Some(Known::Generation(9))));
         write(&dir, "aabb", 10);
         assert!(matches!(read(&dir, "aabb"), Some(Known::Generation(10))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink at the keyed sidecar is not a usable record, and it must
+    /// not silently fall back to an older legacy sidecar.
+    #[test]
+    fn a_symlinked_keyed_sidecar_never_falls_back_to_legacy() {
+        let dir = scratch("symlink");
+        std::fs::write(legacy_path(&dir), b"9\n").unwrap();
+        let target = Path::new(&dir).join("target.state");
+        std::fs::write(&target, b"12\n").unwrap();
+        let link = sidecar_path(&dir, "aabb");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(read(&dir, "aabb").is_none());
+
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, b"12\n").unwrap();
+        assert!(matches!(read(&dir, "aabb"), Some(Known::Generation(12))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

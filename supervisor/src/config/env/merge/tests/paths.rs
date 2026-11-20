@@ -17,6 +17,9 @@ fn the_dotenv_must_live_on_the_state_volume() {
     assert!(!env_file_isolated("/state-evil/.env"));
     // A textual prefix is not enough: this resolves onto the vault volume.
     assert!(!env_file_isolated("/state/../data/.env"));
+    // The tailscaled-writable subtree can replace a file regardless of mode.
+    assert!(!env_file_isolated("/state/tailscale/.env"));
+    assert!(!env_file_isolated("/state/tailscale/run/.env"));
     // A `.` component is normalized away and stays under the state root.
     assert!(env_file_isolated("/state/./.env"));
 }

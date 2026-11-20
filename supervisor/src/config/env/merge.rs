@@ -14,11 +14,16 @@ use super::super::paths;
 use super::knobs::{non_empty, parse_flag, resolve_service, valid_port};
 use super::schema;
 
-/// Whether a dotenv path is inside the supervisor-only state volume. A
-/// `..` component must be refused even when the textual prefix matches:
-/// `/state/../data/.env` would otherwise read a vault-writable file.
+/// Whether a dotenv path is inside the supervisor-only state volume and
+/// outside the tailscaled-writable subtree. A `..` component must be
+/// refused even when the textual prefix matches: `/state/../data/.env`
+/// would otherwise read a vault-writable file. `/state/tailscale` is
+/// refused because tailscaled can replace a file there regardless of its
+/// mode.
 fn env_file_isolated(path: &str) -> bool {
-    crate::util::fs::under_root(Path::new(SUPERVISOR_STATE), path)
+    let root = Path::new(SUPERVISOR_STATE);
+    let tailscale = Path::new(crate::config::TAILSCALE_DIR);
+    crate::util::fs::under_root(root, path) && !crate::util::fs::under_root(tailscale, path)
 }
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
@@ -88,9 +93,11 @@ impl Config {
             && !env_file_isolated(&path)
         {
             log::err(&format!(
-                "config: SUPERVISOR_ENV_FILE {} must live under {SUPERVISOR_STATE} \
-                 (the vault can read a file mounted on its volume); refusing to start",
-                log::sanitize(&path)
+                "config: SUPERVISOR_ENV_FILE {} must live under {SUPERVISOR_STATE} and \
+                 outside {}/tailscale (the vault can read a file mounted on its volume, \
+                 and tailscaled can replace a file in its subtree); refusing to start",
+                log::sanitize(&path),
+                SUPERVISOR_STATE
             ));
             return None;
         }
@@ -212,7 +219,8 @@ impl Config {
         }
         let state_rel = paths::state_rel(root, &state);
         let state_present = state != "mem:"
-            && std::fs::metadata(&state).is_ok_and(|meta| meta.is_file() && meta.len() > 0);
+            && crate::util::fs::is_real_file(&state)
+            && std::fs::metadata(&state).is_ok_and(|meta| meta.len() > 0);
         // The socket controls the LocalAPI: a socket on the vault volume
         // could be deleted or impersonated by the vault uid.
         let socket = value("TAILSCALE_SOCKET");
