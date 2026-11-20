@@ -52,7 +52,7 @@ use crate::util::fs::{create_real_dirs, read_capped, write_atomic};
 use crate::util::log;
 
 use super::manifest::{MANIFEST_NAME, MAX_MANIFEST_BYTES, Manifest};
-use super::synced::{Roots, clear_partials, is_synced_file};
+use super::synced::{DOWNLOAD_MODE, Roots, clear_partials, is_synced_file};
 use super::tombstone::{MAX_TOMBSTONES_BYTES, TOMBSTONES_NAME, Tombstones};
 
 /// Build the client for one sync run; a construction failure is a
@@ -369,7 +369,7 @@ fn reconcile_objects(
             size: Some(version.size),
             sha256: Some(&version.sha256),
             max_bytes: MAX_SYNC_OBJECT_BYTES,
-            mode: roots.mode(&rel, cfg.state_file.as_deref()),
+            mode: DOWNLOAD_MODE,
         };
         let local = local.to_string_lossy().into_owned();
         match client.get(&key, &local, expect, abort) {
@@ -592,7 +592,7 @@ fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -
             size: target.size,
             sha256: target.sha256.as_deref(),
             max_bytes: MAX_SYNC_OBJECT_BYTES,
-            mode: roots.mode(&target.rel, cfg.state_file.as_deref()),
+            mode: DOWNLOAD_MODE,
         };
         // Manifest entries name content-addressed objects; an entry a
         // bucket inherited from before the layout still lives at the old

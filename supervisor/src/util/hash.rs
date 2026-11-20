@@ -25,9 +25,10 @@ pub fn sha256_reader(reader: &mut impl Read) -> std::io::Result<String> {
 
 /// The lowercase hex SHA-256 of a file's contents.
 pub fn sha256_file(path: &str) -> std::io::Result<String> {
-    // A sync source may be replaced by a symlink after enumeration; never
-    // follow it (that would hash a supervisor-only file into the bucket).
-    let mut file = crate::util::fs::open_nofollow(path)?;
+    // The path may be a sync source or a staged dump that a compromised
+    // writer could have replaced with a FIFO after enumeration; refuse a
+    // non-regular file instead of blocking on it.
+    let mut file = crate::util::fs::open_regular(path)?;
     sha256_reader(&mut file)
 }
 
@@ -88,5 +89,22 @@ mod tests {
     fn hex_encodes_lowercase() {
         assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
         assert_eq!(hex(&[]), "");
+    }
+
+    /// Hashing a FIFO must not block the maintenance thread (the path could
+    /// have been swapped after enumeration).
+    #[test]
+    fn a_fifo_source_is_refused_without_blocking() {
+        let path = scratch("fifo");
+        let path = std::path::Path::new(&path);
+        let _ = std::fs::remove_file(path);
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let start = std::time::Instant::now();
+        assert!(sha256_file(path.to_str().unwrap()).is_err());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "a FIFO must not block the hash"
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

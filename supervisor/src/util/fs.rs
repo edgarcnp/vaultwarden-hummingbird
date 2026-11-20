@@ -197,7 +197,7 @@ pub fn read_capped(path: &str, max: u64) -> io::Result<String> {
 /// [`read_capped`] for binary files (the tailscaled identity is not
 /// guaranteed to be UTF-8).
 pub fn read_capped_bytes(path: &str, max: u64) -> io::Result<Vec<u8>> {
-    let mut file = open_nofollow(path)?;
+    let mut file = open_regular(path)?;
     let mut out = Vec::new();
     Read::by_ref(&mut file)
         .take(max.saturating_add(1))
@@ -399,6 +399,26 @@ mod tests {
             [0xff, 0x00]
         );
         assert!(read_capped(path.to_str().unwrap(), 2).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A FIFO at a sidecar path is a crafted open-block, not a readable
+    /// file: the cap reader must refuse it without waiting for a writer.
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let dir = scratch("fifo");
+        let path = dir.join("sidecar");
+        nix::unistd::mkfifo(
+            path.as_path(),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        assert!(read_capped(path.to_str().unwrap(), 64).is_err());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "a FIFO must not block the reader"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

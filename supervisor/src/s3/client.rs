@@ -22,7 +22,7 @@ use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use super::remote::{BucketStyle, RemoteSpec};
 use super::transport::{
     AbortReader, BODY_TIMEOUT, SIGN_EXPIRE, ca_certs, checked, http_err, loopback,
-    normalize_endpoint, region_for, retryable, retrying,
+    normalize_endpoint, read_body_capped, region_for, retryable, retrying,
 };
 
 /// Files at or above this size upload in parts: the body budget is then
@@ -131,9 +131,10 @@ pub struct Expect<'a> {
     pub sha256: Option<&'a str>,
     /// Absolute cap regardless of the expectations above.
     pub max_bytes: u64,
-    /// Exact mode of the published file. Identity/cert material is 0600;
-    /// vault data is 0660 so the vault's separate uid reaches it through
-    /// the shared data group.
+    /// Exact mode of the published file. Supervisor-owned and
+    /// group-writable (0660): the identity/cert tree is writable by
+    /// tailscaled's group, vault data by the vault's group; the owning
+    /// service reads through that group, never world access.
     pub mode: u32,
 }
 
@@ -493,11 +494,7 @@ impl Client {
             Err(ureq::Error::StatusCode(404)) => return Ok(None),
             Err(e) => return Err(anyhow!("download of {key} failed: {}", http_err(&e))),
         };
-        let text = response
-            .into_body()
-            .into_with_config()
-            .limit(max_bytes)
-            .read_to_string()
+        let text = read_body_capped(response, max_bytes, &abort)
             .map_err(|e| anyhow!("download of {key}: {e}"))?;
         Ok(Some(text))
     }
@@ -539,8 +536,8 @@ impl Client {
     /// file (same filesystem) bounded by [`Expect`], and only a transfer
     /// that meets every expectation is renamed into place: a failed,
     /// truncated, or mismatched download leaves `path` untouched and
-    /// removes the temp. The published file takes [`Expect::mode`]: 0600
-    /// for identity/cert material, 0660 for vault data.
+    /// removes the temp. The published file takes [`Expect::mode`] (0660:
+    /// group-writable for the owning service).
     pub fn get(
         &self,
         key: &str,
@@ -760,11 +757,8 @@ impl Client {
                 self.agent.get(url.as_str()).call()
             })
             .map_err(|e| anyhow!("listing {prefix:?} failed: {}", http_err(&e)))?;
-            let body = checked("listing", &format!("{prefix:?}"), response)?
-                .into_body()
-                .into_with_config()
-                .limit(LIST_BODY_CAP)
-                .read_to_string()
+            let body = checked("listing", &format!("{prefix:?}"), response)
+                .and_then(|response| read_body_capped(response, LIST_BODY_CAP, &abort))
                 .map_err(|e| anyhow!("listing {prefix:?}: {e}"))?;
             // The XML error type belongs to a transitive crate; the
             // message adds nothing — a listing that does not parse is
@@ -805,8 +799,10 @@ impl Client {
         Ok(names)
     }
 
-    /// Delete one object. Idempotent: a 404 means the object is already
-    /// gone (a concurrent/previous GC run), which is success.
+    /// Delete `keys` in batches of at most 1,000 (S3's DeleteObjects
+    /// limit). A per-key error leaves the other deletions applied; the
+    /// returned error names the failures so the caller can report the
+    /// orphans.
     pub fn delete_many(&self, keys: &[String], abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");
@@ -840,11 +836,7 @@ impl Client {
             })
             .map_err(|e| anyhow!("batch delete failed: {}", http_err(&e)))?;
             let response = checked("batch delete", "objects", response)?;
-            let text = response
-                .into_body()
-                .into_with_config()
-                .limit(DELETE_RESPONSE_CAP)
-                .read_to_string()
+            let text = read_body_capped(response, DELETE_RESPONSE_CAP, &abort)
                 .map_err(|e| anyhow!("batch delete response: {e}"))?;
             let parsed = DeleteObjectsResponse::parse(&text)
                 .map_err(|e| anyhow!("batch delete response: {e}"))?;

@@ -447,8 +447,7 @@ fn gc_objects(
         .iter()
         .map(|item| (item.key.as_str(), item.size))
         .collect();
-    let mut deletes = 0usize;
-    let mut failed = false;
+    let mut keys: Vec<String> = Vec::new();
     let mut capped = false;
     for item in &listed {
         if abort() {
@@ -491,7 +490,7 @@ fn gc_objects(
         if !delete {
             continue;
         }
-        if deletes >= MAX_GC_DELETES {
+        if keys.len() >= MAX_GC_DELETES {
             log::info(&format!(
                 "state sync: garbage collection hit its {MAX_GC_DELETES}-delete cap; \
                  the next push continues"
@@ -499,12 +498,17 @@ fn gc_objects(
             capped = true;
             break;
         }
-        match client.delete(key, abort) {
-            Ok(()) => deletes += 1,
+        keys.push(key.clone());
+    }
+    let mut deletes = 0usize;
+    let mut failed = false;
+    if !keys.is_empty() {
+        match client.delete_many(&keys, abort) {
+            Ok(()) => deletes = keys.len(),
             Err(e) => {
                 log::err(&format!(
-                    "state sync: cannot delete {} ({e}); the next push retries",
-                    log::sanitize(key)
+                    "state sync: cannot garbage-collect the selected objects ({e}); \
+                     the next push retries"
                 ));
                 failed = true;
             }

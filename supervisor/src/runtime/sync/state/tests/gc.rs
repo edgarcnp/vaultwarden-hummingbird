@@ -3,7 +3,9 @@
 use super::super::{read_repair, restore_state_at};
 use crate::runtime::sync::push::sync_state_at;
 use crate::runtime::sync::synced::Roots;
-use crate::runtime::sync::test_support::{empty_listing, fake_bucket, req_path, sync_cfg};
+use crate::runtime::sync::test_support::{
+    empty_listing, fake_bucket, fake_bucket_capturing, req_path, sync_cfg,
+};
 use crate::util::hash::sha256_file;
 
 /// Superseded content-addressed objects are deleted once the manifest
@@ -27,7 +29,7 @@ fn gc_deletes_only_superseded_objects() {
          <Contents><Key>objects/rsa_key/{sha}</Key><LastModified>2026-01-02T00:00:00.000Z</LastModified><Size>3</Size></Contents>\
          </ListBucketResult>"
     );
-    let (endpoint, seen) = fake_bucket(move |line| {
+    let (endpoint, seen) = fake_bucket_capturing(move |line| {
         let path = req_path(line);
         if line.starts_with("GET") && path.ends_with("/manifest") {
             (200, manifest.clone().into_bytes())
@@ -35,6 +37,14 @@ fn gc_deletes_only_superseded_objects() {
             (404, Vec::new())
         } else if line.starts_with("GET") && line.contains("list-type=2") {
             (200, listing.clone().into_bytes())
+        } else if line.starts_with("POST") && line.contains("delete=") {
+            (
+                200,
+                b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                  <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                  </DeleteResult>"
+                    .to_vec(),
+            )
         } else {
             (200, Vec::new())
         }
@@ -45,17 +55,16 @@ fn gc_deletes_only_superseded_objects() {
         || false
     ));
     let seen = seen.lock().unwrap().clone();
+    let batch = seen
+        .iter()
+        .find(|(line, _)| line.starts_with("POST") && line.contains("delete="))
+        .expect("a DeleteObjects POST");
+    let body = String::from_utf8_lossy(&batch.1);
     assert!(
-        seen.iter()
-            .any(|l| l.starts_with("DELETE") && l.contains(&old)),
-        "the superseded object is deleted: {seen:?}"
+        body.contains(&old),
+        "the superseded object is deleted: {body:?}"
     );
-    assert!(
-        !seen
-            .iter()
-            .any(|l| l.starts_with("DELETE") && l.contains(&sha)),
-        "the current object is kept: {seen:?}"
-    );
+    assert!(!body.contains(&sha), "the current object is kept: {body:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

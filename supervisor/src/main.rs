@@ -19,12 +19,12 @@ mod runtime;
 mod s3;
 mod util;
 
-use config::{Config, SUPERVISOR_UID, TAILSCALE_GID, TAILSCALED_UID, VAULT_GID, VAULT_UID};
+use config::{
+    Config, SUPERVISOR_UID, TAILSCALE_GID, TAILSCALED_GROUPS, TAILSCALED_UID, VAULT_GID, VAULT_UID,
+};
 use nix::sys::stat::{Mode, umask};
 use runtime::gate_healthcheck;
 use util::log;
-
-const TAILSCALED_GROUPS: [nix::unistd::Gid; 1] = [nix::unistd::Gid::from_raw(TAILSCALE_GID)];
 
 /// One-shot `--security-probe` mode: prove that a supervisor-spawned child
 /// cannot change identity. This is the regression test for the capability
@@ -73,10 +73,11 @@ fn security_probe() -> ! {
     let state_secret = "/state/.probe-secret";
     let data_secret = "/data/.probe-data";
     let write_path = "/state/tailscale/.probe-write";
-    let planted = std::fs::write(state_secret, b"secret")
-        .and_then(|()| crate::util::make_private(state_secret))
-        .and_then(|()| std::fs::write(data_secret, b"data"))
-        .and_then(|()| crate::util::make_private(data_secret))
+    // Atomic replace, never a write through a pre-planted symlink: /data is
+    // vault-writable, so a link at the probe path must not redirect the
+    // supervisor onto a supervisor-only file.
+    let planted = crate::util::fs::write_atomic(state_secret, b"secret", 0o600)
+        .and_then(|()| crate::util::fs::write_atomic(data_secret, b"data", 0o600))
         .is_ok();
     let tailscaled_ok = planted && {
         let mut probe = std::process::Command::new("/proc/self/exe");
@@ -127,7 +128,9 @@ fn tailscaled_probe_child(state_secret: &str, data_secret: &str, write_path: &st
         log::err("tailscaled probe: read the vault data volume");
         std::process::exit(1);
     }
-    if std::fs::write(write_path, b"probe").is_err() || std::fs::remove_file(write_path).is_err() {
+    if crate::util::fs::write_atomic(write_path, b"probe", 0o600).is_err()
+        || std::fs::remove_file(write_path).is_err()
+    {
         log::err("tailscaled probe: cannot write its own state tree");
         std::process::exit(1);
     }

@@ -79,14 +79,13 @@ impl Roots {
     pub(super) fn local(&self, rel: &str, state_file: Option<&str>) -> PathBuf {
         self.local_root(rel, state_file).join(rel)
     }
-
-    /// Exact mode for a downloaded file. The identity and cert tree is
-    /// group read/write for tailscaled; vault data is group read/write for
-    /// the vault uid.
-    pub(super) fn mode(&self, _rel: &str, _state_file: Option<&str>) -> u32 {
-        0o660
-    }
 }
+
+/// Exact mode for a downloaded file. Supervisor-owned and group-writable:
+/// the identity/cert tree is writable by tailscaled's group, vault data by
+/// the vault's group. The owning service reads through that group; it never
+/// needs world access.
+pub(super) const DOWNLOAD_MODE: u32 = 0o660;
 
 /// Whether a synced path may be removed by the tombstone lifecycle. The
 /// node identity and its certificates are never tombstoned: a transient
@@ -115,6 +114,7 @@ pub(super) fn is_synced_file(rel: &str, state_file: Option<&str>) -> bool {
             .any(|part| part.is_empty() || part == "." || part == "..")
         || rel.chars().any(char::is_control)
         || crate::util::fs::is_partial_name(rel)
+        || rel.split('/').count() > MAX_SYNC_COMPONENTS
     {
         return false;
     }
@@ -128,7 +128,7 @@ pub(super) fn is_synced_file(rel: &str, state_file: Option<&str>) -> bool {
     }
     if rel == "tailscaled.state"
         || rel == "config.json"
-        || state_file == Some(rel)
+        || (state_file == Some(rel) && !rel.contains('/'))
         || (rel.starts_with("rsa_key") && !rel.contains('/'))
     {
         return true;
@@ -147,6 +147,11 @@ const MAX_SCAN_ENTRIES: usize = 50_000;
 /// Bound on directory nesting. The tree is user-controlled; a depth this
 /// large is already pathological and keeps recursion/FD use bounded.
 const MAX_SCAN_DEPTH: usize = 32;
+
+/// The deepest bucket path the scan can reach: the tree name, up to
+/// [`MAX_SCAN_DEPTH`] directories, and the file. `is_synced_file` rejects
+/// deeper keys so a pull cannot create a tree the next push would refuse.
+const MAX_SYNC_COMPONENTS: usize = MAX_SCAN_DEPTH + 2;
 
 /// Why a scan could not prove the complete durable set. A push must refuse
 /// rather than treat a partial scan as "these files were deleted".
@@ -410,19 +415,25 @@ pub(super) fn local_synced_files(
 /// that died mid-pull leaves one, and it must never be resumed against
 /// different content, so each boot starts clean. User files ending `.part`
 /// are not touched. Staging directories outside the synced trees (backup
-/// dumps) are not touched.
+/// dumps) are not touched. The walk is bounded in depth and entries: a
+/// hostile tree must not make boot unbounded.
 pub(super) fn clear_partials(roots: &Roots, _state_file: Option<&str>) -> usize {
     let mut removed = 0;
-    clear_flat(&roots.data, &mut removed);
+    let mut budget = MAX_SCAN_ENTRIES;
+    clear_flat(&roots.data, &mut removed, &mut budget);
     if roots.state != roots.data {
-        clear_flat(&roots.state, &mut removed);
-        clear_flat(&roots.state.join("tailscale"), &mut removed);
+        clear_flat(&roots.state, &mut removed, &mut budget);
+        clear_flat(&roots.state.join("tailscale"), &mut removed, &mut budget);
     }
     for tree in DATA_TREES {
-        clear_recursive(&roots.data.join(tree), &mut removed);
+        clear_recursive(&roots.data.join(tree), &mut removed, &mut budget);
     }
     for tree in STATE_TREES {
-        clear_recursive(&roots.state.join("tailscale").join(tree), &mut removed);
+        clear_recursive(
+            &roots.state.join("tailscale").join(tree),
+            &mut removed,
+            &mut budget,
+        );
     }
     removed
 }
@@ -435,7 +446,13 @@ fn open_cleanup_dir(path: &Path) -> Option<Dir> {
     }
 }
 
-fn clear_entries(dir: &mut Dir, removed: &mut usize, depth: usize) {
+fn clear_entries(
+    dir: &mut Dir,
+    removed: &mut usize,
+    depth: usize,
+    budget: &mut usize,
+    recurse: bool,
+) {
     if depth > MAX_SCAN_DEPTH {
         return;
     }
@@ -455,6 +472,10 @@ fn clear_entries(dir: &mut Dir, removed: &mut usize, depth: usize) {
         listed.push((name.to_owned(), kind));
     }
     for (name, kind) in listed {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
         let Some(name_str) = name.to_str().ok() else {
             continue;
         };
@@ -467,23 +488,24 @@ fn clear_entries(dir: &mut Dir, removed: &mut usize, depth: usize) {
             {
                 *removed += 1;
             }
-        } else if kind == Type::Directory
+        } else if recurse
+            && kind == Type::Directory
             && let Ok(mut child) = open_child(dir, name.as_c_str(), Path::new(name_str))
         {
-            clear_entries(&mut child, removed, depth + 1);
+            clear_entries(&mut child, removed, depth + 1, budget, true);
         }
     }
 }
 
-fn clear_flat(path: &Path, removed: &mut usize) {
+fn clear_flat(path: &Path, removed: &mut usize, budget: &mut usize) {
     if let Some(mut dir) = open_cleanup_dir(path) {
-        clear_entries(&mut dir, removed, 0);
+        clear_entries(&mut dir, removed, 0, budget, false);
     }
 }
 
-fn clear_recursive(path: &Path, removed: &mut usize) {
+fn clear_recursive(path: &Path, removed: &mut usize, budget: &mut usize) {
     if let Some(mut dir) = open_cleanup_dir(path) {
-        clear_entries(&mut dir, removed, 0);
+        clear_entries(&mut dir, removed, 0, budget, true);
     }
 }
 
@@ -561,11 +583,22 @@ mod tests {
         assert!(!synced("certs/../../etc/passwd"));
         assert!(!synced("attachments/../../etc/passwd"));
         assert!(!synced("/etc/passwd"));
-        // a custom configured state file is inside the set (and only then)
+        // a custom configured state file is inside the set (and only then);
+        // it must be a direct child, matching the config invariant.
         assert!(is_synced_file("node.state", Some("node.state")));
-        assert!(is_synced_file("sub/x.state", Some("sub/x.state")));
+        assert!(!is_synced_file("sub/x.state", Some("sub/x.state")));
         assert!(!is_synced_file("node.state", None));
         assert!(!is_synced_file("other.state", Some("node.state")));
+        // A bucket key deeper than the scan can walk is not accepted: a pull
+        // must not create a tree that makes the next push refuse.
+        assert!(synced(&format!(
+            "attachments/{}file",
+            "d/".repeat(MAX_SCAN_DEPTH)
+        )));
+        assert!(!synced(&format!(
+            "attachments/{}file",
+            "d/".repeat(MAX_SCAN_DEPTH + 1)
+        )));
     }
 
     /// The push filter only treats regular files as synced files; a
@@ -654,22 +687,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Identity and certs live on the state volume, so a download there is
-    /// owner-only; vault data is shared with the vault's group.
+    /// Identity, certs, and vault data are all downloaded supervisor-owned
+    /// and group-writable: tailscaled and the vault reach their own files
+    /// through their groups, never through world access.
     #[test]
-    fn modes_follow_the_owning_volume() {
+    fn downloaded_files_are_group_writable() {
         let roots = Roots {
             data: PathBuf::from("/data"),
             state: PathBuf::from("/state"),
         };
-        assert_eq!(roots.mode("tailscaled.state", None), 0o660);
-        assert_eq!(roots.mode("certs/c.pem", None), 0o660);
-        assert_eq!(roots.mode("node.state", Some("node.state")), 0o660);
-        assert_eq!(roots.mode("rsa_key.pem", None), 0o660);
-        assert_eq!(roots.mode("attachments/u", None), 0o660);
+        assert_eq!(DOWNLOAD_MODE, 0o660);
+        assert_eq!(
+            roots.local("tailscaled.state", None),
+            PathBuf::from("/state/tailscale/tailscaled.state")
+        );
         assert_eq!(
             roots.local("certs/c.pem", None),
             PathBuf::from("/state/tailscale/certs/c.pem")
+        );
+        assert_eq!(
+            roots.local("node.state", Some("node.state")),
+            PathBuf::from("/state/tailscale/node.state")
+        );
+        assert_eq!(
+            roots.local("rsa_key.pem", None),
+            PathBuf::from("/data/rsa_key.pem")
         );
         assert_eq!(
             roots.local("attachments/u", None),
@@ -830,16 +872,13 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_state_parent_is_cleaned() {
+    fn a_custom_state_partial_is_cleaned() {
         let root = std::env::temp_dir().join(format!("vw-sup-statepart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("sub/node.state.vw-part"), b"partial").unwrap();
-        assert_eq!(
-            clear_partials(&Roots::one(&root), Some("sub/node.state")),
-            1
-        );
-        assert!(!root.join("sub/node.state.vw-part").exists());
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("node.state.vw-part"), b"partial").unwrap();
+        assert_eq!(clear_partials(&Roots::one(&root), Some("node.state")), 1);
+        assert!(!root.join("node.state.vw-part").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

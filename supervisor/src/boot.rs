@@ -121,7 +121,11 @@ impl Boot {
                 match spawn_tailscaled(&self.cfg.state, &self.cfg.socket, self.cfg.userspace) {
                     Some(tsd) => {
                         self.tsd = Some(tsd);
-                        log::info("tailscaled started (userspace networking)");
+                        log::info(if self.cfg.userspace {
+                            "tailscaled started (userspace networking)"
+                        } else {
+                            "tailscaled started (TUN mode)"
+                        });
                         Outcome::Next
                     }
                     None => {

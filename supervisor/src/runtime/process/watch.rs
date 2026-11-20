@@ -136,9 +136,9 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
 /// gone first, and the reactor is the only writer. The persist budget
 /// bounds the finish; a stop request observed while draining shortens it.
 /// Children that are already dead are fine: the escalation finds a
-/// delivered status and the bounded wait returns immediately. This
-/// function itself sends no TERM — callers do that before deciding to
-/// shut down (the escalation here is the SIGKILL escalation only).
+/// delivered status and the bounded wait returns immediately. The TERM is
+/// idempotent with a caller's earlier signal; this function also handles
+/// the boot-phase teardown where no caller sent one.
 pub fn shutdown(tsd: Option<Handle>, vw: Option<Handle>, code: i32, reactor: Option<Reactor>) -> ! {
     log::info("shutting down");
     if let Some(t) = &tsd {

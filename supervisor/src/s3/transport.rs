@@ -152,6 +152,30 @@ fn ca_certs_in(path: &str, root: &Path) -> anyhow::Result<Vec<ureq::tls::Certifi
     Ok(certs)
 }
 
+/// Read a capped response body, checking `abort` before every chunk. The
+/// body limit is enforced by reading one byte past it; a truncated read is
+/// an error, never a silently shortened manifest/list. Control-plane reads
+/// that ignored `abort` could hold a shutdown for the whole body budget.
+pub(super) fn read_body_capped(
+    response: ureq::http::Response<ureq::Body>,
+    max: u64,
+    abort: &impl Fn() -> bool,
+) -> anyhow::Result<String> {
+    let reader = response.into_body().into_reader();
+    let mut limited = reader.take(max.saturating_add(1));
+    let mut body = AbortReader {
+        inner: &mut limited,
+        abort,
+    };
+    let mut out = Vec::new();
+    body.read_to_end(&mut out)
+        .map_err(|e| anyhow!("cannot read response body: {e}"))?;
+    if out.len() as u64 > max {
+        bail!("response body exceeds the {max}-byte cap");
+    }
+    String::from_utf8(out).map_err(|_| anyhow!("response body is not UTF-8"))
+}
+
 /// Whether an endpoint names the local machine (plaintext HTTP is
 /// tolerable there; anywhere else it would expose SigV4 credentials).
 pub(super) fn loopback(endpoint: &Url) -> bool {
@@ -273,6 +297,7 @@ pub(super) fn checked(
 pub(super) fn http_err(e: &ureq::Error) -> String {
     match e {
         ureq::Error::StatusCode(code) => format!("HTTP {code}"),
+        ureq::Error::Timeout(_) => "timeout".into(),
         ureq::Error::Io(io) => format!("I/O error: {io}"),
         _ => "transport error".into(),
     }

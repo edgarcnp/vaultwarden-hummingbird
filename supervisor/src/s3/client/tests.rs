@@ -715,7 +715,7 @@ fn get_optional_text_refuses_an_oversized_body() {
     let err = client
         .get_optional_text("state/text", 1024, || false)
         .expect_err("a 2 KiB body over a 1 KiB cap must fail");
-    assert!(err.to_string().contains("limit"), "{err}");
+    assert!(err.to_string().contains("cap"), "{err}");
 }
 
 /// Delete is idempotent: a 404 means the object is already gone.

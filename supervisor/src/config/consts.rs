@@ -11,15 +11,22 @@ pub const VAULTWARDEN: &str = "/vaultwarden";
 // transport and path checks).
 pub use crate::util::fs::STATE_ROOT as SUPERVISOR_STATE;
 
-// Process identities. The supervisor and tailscaled share the image UID;
-// the vault runs as a different UID in the shared data group so it cannot
-// read the supervisor's state volume, LocalAPI socket, or environment.
+// Process identities. tailscaled has a dedicated uid and the tailscale
+// group; the supervisor joins that group so it can reach the LocalAPI
+// socket and read the daemon's files. The vault runs as a different uid in
+// the shared data group, so it cannot traverse the supervisor's state
+// volume, read the LocalAPI socket, or see PID 1's environment.
 pub const SUPERVISOR_UID: u32 = 65532;
 pub const SUPERVISOR_GID: u32 = 65532;
 pub const TAILSCALED_UID: u32 = 65531;
 pub const TAILSCALE_GID: u32 = 65531;
 pub const VAULT_UID: u32 = 65533;
 pub const VAULT_GID: u32 = 65532;
+
+/// The supplementary groups every tailscaled spawn (and the isolation
+/// probe) receives: the shared `tailscale` group. One definition so the
+/// probe and the real spawn cannot diverge.
+pub const TAILSCALED_GROUPS: [nix::unistd::Gid; 1] = [nix::unistd::Gid::from_raw(TAILSCALE_GID)];
 
 /// The group-writable subtree for tailscaled's state, certs, and LocalAPI
 /// socket: the supervisor and tailscaled share the `tailscale` group; the

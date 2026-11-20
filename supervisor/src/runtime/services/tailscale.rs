@@ -3,7 +3,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::config::{TAILSCALE, TAILSCALE_GID, TAILSCALED, TAILSCALED_UID};
+use crate::config::{TAILSCALE, TAILSCALE_GID, TAILSCALED, TAILSCALED_GROUPS, TAILSCALED_UID};
 use crate::runtime::{
     Credentials, Handle, TUN_CAPS, apply_env, run_bounded, run_bounded_capture, spawn_as,
     spawn_as_with_caps,
@@ -13,7 +13,6 @@ use crate::util::{StagedFile, log};
 /// tailscaled's dedicated identity: it owns the state tree and the LocalAPI
 /// socket, and is a member of the `tailscale` group (which the supervisor
 /// joins for its own access).
-const TAILSCALED_GROUPS: [nix::unistd::Gid; 1] = [nix::unistd::Gid::from_raw(TAILSCALE_GID)];
 const TAILSCALED_CREDS: Credentials = Credentials {
     uid: TAILSCALED_UID,
     gid: TAILSCALE_GID,

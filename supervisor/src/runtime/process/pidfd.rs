@@ -26,6 +26,10 @@ impl AsFd for PidFd {
 impl PidFd {
     /// `pidfd_open(2)`. Fails on kernels < 5.3 (ENOSYS) or an unknown
     /// pid; callers treat failure as a failed spawn (fail-closed boot).
+    /// Non-Linux builds compile but can never supervise: fail closed with
+    /// ENOSYS at runtime (the supervisor only ever runs as a Linux
+    /// container's PID 1).
+    #[cfg(target_os = "linux")]
     pub fn open(pid: Pid) -> std::io::Result<Self> {
         let fd = open_syscall(pid);
         if fd < 0 {
@@ -34,6 +38,11 @@ impl PidFd {
         // SAFETY: the syscall returned a fresh, solely-owned descriptor;
         // OwnedFd takes exclusive ownership and closes it on drop.
         Ok(Self(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn open(_pid: Pid) -> std::io::Result<Self> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
     /// Indices into `fds` with a pending event within `timeout`. Any
@@ -68,15 +77,6 @@ fn open_syscall(pid: Pid) -> libc::c_long {
     // SAFETY: pidfd_open takes a pid and flags; it allocates a descriptor
     // or fails, touching nothing else.
     unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_int, 0 as libc::c_uint) }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn open_syscall(_pid: Pid) -> libc::c_long {
-    // Non-Linux builds compile but can never supervise: fail closed with
-    // ENOSYS at runtime (the supervisor is only ever run as a Linux
-    // container's PID 1).
-    *nix::libc::__errno_location() = libc::ENOSYS;
-    -1
 }
 
 #[cfg(test)]
