@@ -1,10 +1,9 @@
 # The container image: build the real Containerfile and run the
 # fail-closed smoke suite (scripts/smoke-image.sh) on changes to the build
-# context. Main pushes are the validation point: one build per merged
-# change, instead of a ~15-minute build on every PR revision. Releases are
-# built and smoke-tested again by publish at tag time (both arches), so
-# this workflow does not run on tags; a manual dispatch covers ad-hoc
-# validation.
+# context. Main pushes and pull requests that touch the context both build,
+# so an image regression is caught before merge; releases are built and
+# smoke-tested again by publish at tag time (both arches). This workflow
+# does not run on tags; a manual dispatch covers ad-hoc validation.
 name: Image
 
 on:
@@ -12,7 +11,7 @@ on:
   push:
     branches:
       - main
-    paths:
+    paths: &image_paths
       - Containerfile
       - .containerignore
       - .github/workflows/image.yml
@@ -20,6 +19,8 @@ on:
       # supervisor/ is copied into the image; a change there can break the
       # image build even when the crate's own test suite passes.
       - supervisor/**
+  pull_request:
+    paths: *image_paths
 
 # Superseded runs on the same branch don't need to finish.
 concurrency:
