@@ -19,6 +19,7 @@ use nix::unistd::{Gid, Pid as NixPid, Uid, getegid, geteuid, setgroups, setresgi
 
 use super::pidfd::PidFd;
 use super::reaper::{self, Handle};
+use crate::config::{SUPERVISOR_GID, TAILSCALE_GID};
 use crate::util::log;
 
 /// Poll cadence of the reap/watch/run loops; bounds signal-observation
@@ -116,6 +117,10 @@ fn spawn_inner(cmd: &mut Command) -> Option<Handle> {
 pub struct Credentials {
     pub uid: u32,
     pub gid: u32,
+    /// Supplementary groups the child keeps. The vault gets none; the
+    /// tailscaled children keep the `tailscale` group for the state tree
+    /// and LocalAPI socket.
+    pub groups: &'static [Gid],
     /// 0o007 = owner+group read/write, no access for others. The data
     /// group is how the vault's files stay readable by the supervisor.
     pub umask: u32,
@@ -135,16 +140,30 @@ pub struct Credentials {
 /// makes the restriction irreversible across `exec`. The closure only
 /// makes async-signal-safe syscalls.
 pub fn spawn_as(cmd: &mut Command, creds: Credentials) -> Option<Handle> {
+    spawn_as_with_caps(cmd, creds, &[])
+}
+
+/// [`spawn_as`] with an explicit capability allowlist, for tailscaled in
+/// TUN mode. `PR_SET_KEEPCAPS` is required before the uid change or the
+/// transition clears the permitted set; the allowlist is applied after.
+pub fn spawn_as_with_caps(
+    cmd: &mut Command,
+    creds: Credentials,
+    keep: &'static [u32],
+) -> Option<Handle> {
     let same_identity = geteuid().as_raw() == creds.uid && getegid().as_raw() == creds.gid;
     // SAFETY: pre_exec runs between fork and exec; the closure allocates
     // nothing and only calls the syscalls above.
     unsafe {
         cmd.pre_exec(move || {
             let fail = |e: nix::errno::Errno| std::io::Error::from_raw_os_error(e as i32);
-            // No identity transition means no group list to clear; this
+            // No identity transition means no group list to change; this
             // also keeps the path testable without CAP_SETGID.
             if !same_identity {
-                setgroups(&[]).map_err(fail)?;
+                setgroups(creds.groups).map_err(fail)?;
+            }
+            if !keep.is_empty() {
+                prctl::set_keepcaps(true).map_err(fail)?;
             }
             setresgid(
                 Gid::from_raw(creds.gid),
@@ -158,13 +177,21 @@ pub fn spawn_as(cmd: &mut Command, creds: Credentials) -> Option<Handle> {
                 Uid::from_raw(creds.uid),
             )
             .map_err(fail)?;
-            restrict_caps(&[])?;
+            restrict_caps(keep)?;
             prctl::set_no_new_privs().map_err(fail)?;
             umask(Mode::from_bits_truncate(creds.umask));
             Ok(())
         });
     }
     spawn_inner(cmd)
+}
+
+/// Join the `tailscale` group so the supervisor can read the identity,
+/// write restored state, and reach the LocalAPI socket. The vault child
+/// clears this list explicitly.
+pub fn join_tailscale_group() -> std::io::Result<()> {
+    let groups = [Gid::from_raw(SUPERVISOR_GID), Gid::from_raw(TAILSCALE_GID)];
+    setgroups(&groups).map_err(|e| std::io::Error::from_raw_os_error(e as i32))
 }
 
 /// Signal the whole process group of a child spawned via [`spawn`] (pgid ==
@@ -262,7 +289,9 @@ fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
     }
     for (index, word) in data.iter_mut().enumerate() {
         let bits = (mask >> (index * 32)) as u32;
-        word.effective &= bits;
+        // After a uid change with KEEPCAPS, effective is cleared; the
+        // allowlist must become effective again for the child to use it.
+        word.effective = word.permitted & bits;
         word.permitted &= bits;
         word.inheritable &= bits;
     }
@@ -344,6 +373,7 @@ mod tests {
             Credentials {
                 uid: geteuid().as_raw(),
                 gid: getegid().as_raw(),
+                groups: &[],
                 umask: 0o007,
             },
         )

@@ -22,8 +22,8 @@ fn the_dotenv_must_live_on_the_state_volume() {
 }
 
 /// The state file anchors the node identity and the `--statedir` derived
-/// from it: it must stay on the supervisor-only volume, directly under
-/// `/state`, so neither the vault nor a path escape can reach it.
+/// from it: it must stay in the group-writable `/state/tailscale` subtree,
+/// directly under it, so neither the vault nor a path escape can reach it.
 #[test]
 fn state_file_must_live_directly_under_the_state_root() {
     let lookup = |key: &str| (key == "TAILSCALE_AUTHKEY").then(|| "test-key".to_string());
@@ -38,18 +38,19 @@ fn state_file_must_live_directly_under_the_state_root() {
     rejects("TAILSCALE_STATE_FILE=/data/tailscaled.state\n");
     rejects("TAILSCALE_STATE_FILE=/custom/tailscaled.state\n");
     rejects("TAILSCALE_STATE_FILE=/state/../data/tailscaled.state\n");
-    rejects("TAILSCALE_STATE_FILE=/state/sub/node.state\n");
+    rejects("TAILSCALE_STATE_FILE=/state/tailscaled.state\n");
+    rejects("TAILSCALE_STATE_FILE=/state/tailscale/sub/node.state\n");
 
     let file = FileConfig::load_from(Some(&env_dotenv(
-        "TAILSCALE_STATE_FILE=/state/node.state\n",
+        "TAILSCALE_STATE_FILE=/state/tailscale/node.state\n",
     )));
-    let cfg = Config::build(file, lookup).expect("a direct /state child resolves");
-    assert_eq!(cfg.state, "/state/node.state");
+    let cfg = Config::build(file, lookup).expect("a direct subtree child resolves");
+    assert_eq!(cfg.state, "/state/tailscale/node.state");
 
     // A direct environment value keeps its whitespace; a trailing space is
     // a different (and unsafe) identity name.
     assert!(
-        mk_opt(&[("TAILSCALE_STATE_FILE", "/state/node.state ")]).is_none(),
+        mk_opt(&[("TAILSCALE_STATE_FILE", "/state/tailscale/node.state ")]).is_none(),
         "a trailing-space identity name must refuse"
     );
 
@@ -67,14 +68,18 @@ fn socket_must_live_under_the_state_root() {
         "/custom/tailscaled.sock",
         "/state/../data/tailscaled.sock",
         "tailscaled.sock",
-        "/state/tailscaled.sock ",
+        "/state/tailscaled.sock",
+        "/state/tailscale/tailscaled.sock ",
     ] {
         assert!(
             mk_opt(&[("TAILSCALE_SOCKET", socket)]).is_none(),
             "{socket} must refuse the boot"
         );
     }
-    for socket in ["/state/tailscaled.sock", "/state/run/tailscaled.sock"] {
+    for socket in [
+        "/state/tailscale/tailscaled.sock",
+        "/state/tailscale/run/tailscaled.sock",
+    ] {
         let cfg = mk(&[("TAILSCALE_SOCKET", socket)]);
         assert_eq!(cfg.socket, socket);
     }
@@ -101,14 +106,14 @@ fn reserved_state_names_refuse_the_boot() {
         "certs",
         "rsa_key.pem",
     ] {
-        let path = format!("/state/{name}");
+        let path = format!("/state/tailscale/{name}");
         assert!(
             mk_opt(&[("TAILSCALE_STATE_FILE", path.as_str())]).is_none(),
             "{name} must be reserved"
         );
     }
     for name in ["node.state", "tailscaled.state", "identity"] {
-        let path = format!("/state/{name}");
+        let path = format!("/state/tailscale/{name}");
         assert!(
             mk_opt(&[("TAILSCALE_STATE_FILE", path.as_str())]).is_some(),
             "{name} must be a usable identity name"
@@ -129,9 +134,9 @@ fn custom_state_files_are_wired_into_sync() {
     ];
 
     let mut vars = SYNC.to_vec();
-    vars.push(("TAILSCALE_STATE_FILE", "/state/node.state"));
+    vars.push(("TAILSCALE_STATE_FILE", "/state/tailscale/node.state"));
     let cfg = mk(&vars);
-    assert_eq!(cfg.state, "/state/node.state");
+    assert_eq!(cfg.state, "/state/tailscale/node.state");
     assert_eq!(
         cfg.sync
             .as_ref()
@@ -144,7 +149,7 @@ fn custom_state_files_are_wired_into_sync() {
     // A state file that collides with a vault data key would shadow it in
     // the bucket: refuse the boot rather than merge two different files.
     let mut vars = SYNC.to_vec();
-    vars.push(("TAILSCALE_STATE_FILE", "/state/config.json"));
+    vars.push(("TAILSCALE_STATE_FILE", "/state/tailscale/config.json"));
     assert!(
         mk_opt(&vars).is_none(),
         "a colliding state name must refuse"
@@ -153,16 +158,16 @@ fn custom_state_files_are_wired_into_sync() {
     // Outside /state cannot ride along and must refuse the boot, not
     // silently run the identity on a volume the vault can rewrite.
     let mut vars = SYNC.to_vec();
-    vars.push(("TAILSCALE_STATE_FILE", "/state/sub/node.state"));
+    vars.push(("TAILSCALE_STATE_FILE", "/state/tailscaled.state"));
     assert!(
         mk_opt(&vars).is_none(),
-        "an identity outside /state must refuse"
+        "an identity outside the subtree must refuse"
     );
 
-    // A subdirectory would put tailscaled's cert cache outside the synced
-    // cert tree; only a direct child is covered.
+    // A deeper subdirectory would put tailscaled's cert cache outside the
+    // synced cert tree; only a direct child is covered.
     let mut vars = SYNC.to_vec();
-    vars.push(("TAILSCALE_STATE_FILE", "/state/sub/node.state"));
+    vars.push(("TAILSCALE_STATE_FILE", "/state/tailscale/sub/node.state"));
     assert!(
         mk_opt(&vars).is_none(),
         "a state file in a subdirectory must refuse"

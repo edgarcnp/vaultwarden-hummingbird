@@ -19,10 +19,12 @@ mod runtime;
 mod s3;
 mod util;
 
-use config::{Config, SUPERVISOR_UID, VAULT_GID, VAULT_UID};
+use config::{Config, SUPERVISOR_UID, TAILSCALE_GID, TAILSCALED_UID, VAULT_GID, VAULT_UID};
 use nix::sys::stat::{Mode, umask};
 use runtime::gate_healthcheck;
 use util::log;
+
+const TAILSCALED_GROUPS: [nix::unistd::Gid; 1] = [nix::unistd::Gid::from_raw(TAILSCALE_GID)];
 
 /// One-shot `--security-probe` mode: prove that a supervisor-spawned child
 /// cannot change identity. This is the regression test for the capability
@@ -51,6 +53,7 @@ fn security_probe() -> ! {
         runtime::Credentials {
             uid: VAULT_UID,
             gid: VAULT_GID,
+            groups: &[],
             umask: 0o007,
         },
     ));
@@ -65,14 +68,85 @@ fn security_probe() -> ! {
         .arg(VAULT_UID.to_string());
     let helper_ok = run(runtime::spawn(&mut helper));
 
-    if vault_ok && helper_ok {
+    // 3. tailscaled's uid must be unable to read supervisor secrets or the
+    //    vault's data, while still writing its own state tree.
+    let state_secret = "/state/.probe-secret";
+    let data_secret = "/data/.probe-data";
+    let write_path = "/state/tailscale/.probe-write";
+    let planted = std::fs::write(state_secret, b"secret")
+        .and_then(|()| crate::util::make_private(state_secret))
+        .and_then(|()| std::fs::write(data_secret, b"data"))
+        .and_then(|()| crate::util::make_private(data_secret))
+        .is_ok();
+    let tailscaled_ok = planted && {
+        let mut probe = std::process::Command::new("/proc/self/exe");
+        probe.args([
+            "--tailscaled-probe-child",
+            state_secret,
+            data_secret,
+            write_path,
+        ]);
+        run(runtime::spawn_as(
+            &mut probe,
+            runtime::Credentials {
+                uid: TAILSCALED_UID,
+                gid: TAILSCALE_GID,
+                groups: &TAILSCALED_GROUPS,
+                umask: 0o007,
+            },
+        ))
+    };
+    let _ = std::fs::remove_file(state_secret);
+    let _ = std::fs::remove_file(data_secret);
+    let _ = std::fs::remove_file(write_path);
+
+    if vault_ok && helper_ok && tailscaled_ok {
         log::info("isolation probe: ok");
         std::process::exit(0);
     }
     log::err(
-        "isolation probe: FAILED: a child retained privileges (uid change, capabilities, or no_new_privs)",
+        "isolation probe: FAILED: a child retained privileges or crossed a \
+         supervisor/vault boundary",
     );
     std::process::exit(1);
+}
+
+/// Child side of the tailscaled boundary probe: run as the tailscaled uid
+/// and prove it cannot read a supervisor secret or `/data`, but can write
+/// its own state tree.
+fn tailscaled_probe_child(state_secret: &str, data_secret: &str, write_path: &str) -> ! {
+    if nix::unistd::geteuid().as_raw() != TAILSCALED_UID {
+        log::err("tailscaled probe: child has an unexpected uid");
+        std::process::exit(2);
+    }
+    if std::fs::read(state_secret).is_ok() {
+        log::err("tailscaled probe: read a supervisor secret");
+        std::process::exit(1);
+    }
+    if std::fs::read(data_secret).is_ok() {
+        log::err("tailscaled probe: read the vault data volume");
+        std::process::exit(1);
+    }
+    if std::fs::write(write_path, b"probe").is_err() || std::fs::remove_file(write_path).is_err() {
+        log::err("tailscaled probe: cannot write its own state tree");
+        std::process::exit(1);
+    }
+    #[cfg(target_os = "linux")]
+    if !nix::sys::prctl::get_no_new_privs().unwrap_or(false) {
+        log::err("tailscaled probe: no_new_privs is unset");
+        std::process::exit(1);
+    }
+    match runtime::caps_are_empty() {
+        Ok(true) => std::process::exit(0),
+        Ok(false) => {
+            log::err("tailscaled probe: retained capabilities");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            log::err(&format!("tailscaled probe: cannot read capabilities: {e}"));
+            std::process::exit(1);
+        }
+    }
 }
 
 /// One-shot child side of [`security_probe`]: report whether a setuid to
@@ -150,6 +224,19 @@ fn main() {
     let mode = mode.as_deref();
     if mode == Some(std::ffi::OsStr::new("--security-probe")) {
         security_probe();
+    }
+    if mode == Some(std::ffi::OsStr::new("--tailscaled-probe-child")) {
+        let next = |value: Option<std::ffi::OsString>| {
+            value.and_then(|value| value.to_str().map(str::to_string))
+        };
+        let state = next(args.next());
+        let data = next(args.next());
+        let write = next(args.next());
+        let (Some(state), Some(data), Some(write)) = (state, data, write) else {
+            log::err("tailscaled probe: child wants <state-secret> <data-secret> <write-path>");
+            std::process::exit(2);
+        };
+        tailscaled_probe_child(&state, &data, &write);
     }
     if mode == Some(std::ffi::OsStr::new("--security-probe-child")) {
         let parse = |value: Option<std::ffi::OsString>| {

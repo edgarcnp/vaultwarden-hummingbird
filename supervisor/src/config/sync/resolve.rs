@@ -12,10 +12,13 @@ use crate::config::consts::SUPERVISOR_STATE;
 use crate::s3::{BucketStyle, Client, validate_ca_file};
 use crate::util::log;
 
-/// A CA bundle decides which server the supervisor trusts; the vault must
-/// not be able to replace it. Require a normal path under `/state`.
+/// A CA bundle decides which server the supervisor trusts; neither the
+/// vault nor tailscaled may replace it. Require a normal path under
+/// `/state` but outside the tailscaled-writable subtree.
 fn ca_path_isolated(path: &str) -> bool {
-    crate::util::fs::under_root(std::path::Path::new(SUPERVISOR_STATE), path)
+    let root = std::path::Path::new(SUPERVISOR_STATE);
+    let tailscale = std::path::Path::new(crate::config::TAILSCALE_DIR);
+    crate::util::fs::under_root(root, path) && !crate::util::fs::under_root(tailscale, path)
 }
 
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
@@ -156,6 +159,14 @@ mod tests {
         ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
         ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
     ];
+
+    #[test]
+    fn ca_file_must_be_outside_the_tailscaled_subtree() {
+        assert!(ca_path_isolated("/state/s3-ca.pem"));
+        assert!(ca_path_isolated("/state/ca/s3-ca.pem"));
+        assert!(!ca_path_isolated("/state/tailscale/s3-ca.pem"));
+        assert!(!ca_path_isolated("/data/s3-ca.pem"));
+    }
 
     #[test]
     fn disabled_without_credentials_or_remote() {

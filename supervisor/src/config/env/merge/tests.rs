@@ -47,7 +47,7 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
     // no authkey from env or file, no state sync, no local state: fail closed
     let map: BTreeMap<String, String> = [(
         "TAILSCALE_STATE_FILE".to_string(),
-        "/state/nonexistent-vw-sup.state".to_string(),
+        "/state/tailscale/nonexistent-vw-sup.state".to_string(),
     )]
     .into_iter()
     .collect();
@@ -60,7 +60,7 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
         ("TAILSCALE_AUTHKEY".to_string(), String::new()),
         (
             "TAILSCALE_STATE_FILE".to_string(),
-            "/state/nonexistent-vw-sup.state".to_string(),
+            "/state/tailscale/nonexistent-vw-sup.state".to_string(),
         ),
     ]
     .into_iter()
@@ -115,7 +115,7 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
         ("SUPERVISOR_S3_REMOTE".to_string(), "r2:vw".to_string()),
         (
             "TAILSCALE_STATE_FILE".to_string(),
-            "/state/nonexistent-vw-sup.state".to_string(),
+            "/state/tailscale/nonexistent-vw-sup.state".to_string(),
         ),
     ]
     .into_iter()
@@ -133,9 +133,10 @@ fn authkey_gate_considers_the_local_state_and_sync_coverage() {
     let root = std::env::temp_dir().join(format!("vw-sup-state-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let state = root.join("tailscaled.state");
+    std::fs::create_dir_all(root.join("tailscale")).unwrap();
+    let state = root.join("tailscale/tailscaled.state");
     std::fs::write(&state, b"identity").unwrap();
-    let socket = root.join("tailscaled.sock");
+    let socket = root.join("tailscale/tailscaled.sock");
 
     let map: BTreeMap<String, String> = [
         (
@@ -159,7 +160,7 @@ fn authkey_gate_considers_the_local_state_and_sync_coverage() {
         ("SUPERVISOR_S3_SECRET_ACCESS_KEY", "secret"),
         ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
     ];
-    for state in ["mem:", "/state/sub/node.state"] {
+    for state in ["mem:", "/state/tailscale/sub/node.state"] {
         let mut map: BTreeMap<String, String> = sync
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -225,8 +226,8 @@ fn defaults_and_merge_order() {
     let cfg = mk(&[]);
     assert_eq!(cfg.port, 8080);
     assert_eq!(cfg.vault_port, Some(8081));
-    assert_eq!(cfg.socket, "/state/tailscaled.sock");
-    assert_eq!(cfg.state, "/state/tailscaled.state");
+    assert_eq!(cfg.socket, "/state/tailscale/tailscaled.sock");
+    assert_eq!(cfg.state, "/state/tailscale/tailscaled.state");
     assert_eq!(cfg.hostname, "vaultwarden-hummingbird");
     assert_eq!(cfg.authkey.as_deref(), Some("test-key"));
     assert!(cfg.serve && cfg.userspace);

@@ -65,13 +65,16 @@ if cid=$(podman create "$IMAGE" 2>/dev/null); then
   # with the vault's group (0770).
   state_mode=$(printf '%s\n' "$listing" |
     awk '{ p=$NF; sub("^\\./", "", p); if (p == "state/") { print $1; exit } }')
+  state_ts_mode=$(printf '%s\n' "$listing" |
+    awk '{ p=$NF; sub("^\\./", "", p); if (p == "state/tailscale/") { print $1; exit } }')
   data_mode=$(printf '%s\n' "$listing" |
     awk '{ p=$NF; sub("^\\./", "", p); if (p == "data/") { print $1; exit } }')
-  if [ "$state_mode" = "drwx------" ] && [ "$data_mode" = "drwxrwx---" ]; then
-    echo "PASS  volume-modes (/state 0700, /data 0770)"
+  if [ "$state_mode" = "drwx--s---" ] && [ "$state_ts_mode" = "drwxrws---" ] \
+    && [ "$data_mode" = "drwxrwx---" ]; then
+    echo "PASS  volume-modes (/state 2710, /state/tailscale 2770, /data 0770)"
     PASS=$((PASS + 1))
   else
-    echo "FAIL  volume-modes (state='$state_mode' data='$data_mode')"
+    echo "FAIL  volume-modes (state='$state_mode' tailscale='$state_ts_mode' data='$data_mode')"
     FAIL=$((FAIL + 1))
   fi
 else
@@ -90,24 +93,32 @@ printf 'TAILSCALE_AUTHKEY=tskey-invalid-smoke\nVAULTWARDEN_DOMAIN=https://smoke.
 #    resolution before probing, and exit 1 proves the binary runs here.
 run healthcheck-no-config 1 "refusing" -- --entrypoint /entrypoint "$IMAGE" --healthcheck
 
+# Boot cases need the deployment capabilities: PID 1 joins the tailscale
+# group and spawns children under separate uids.
+CAPS=(--cap-add=SETUID --cap-add=SETGID --cap-add=KILL)
+
 # 2. No config at all: fail closed naming the missing key.
-run no-config 1 "no identity source" -- "$IMAGE"
+run no-config 1 "no identity source" -- "${CAPS[@]}" "$IMAGE"
 
 # 3. Strict dotenv: a bare upstream key refuses, naming it.
 run bare-key 1 "unrecognized dotenv file keys (DATABASE_URL)" -- \
-  -e SUPERVISOR_ENV_FILE=/state/.env -v "$WORK/bare.env:/state/.env:ro,z" "$IMAGE"
+  "${CAPS[@]}" -e SUPERVISOR_ENV_FILE=/state/.env \
+  -v "$WORK/bare.env:/state/.env:ro,z" "$IMAGE"
 
 # 4. An unknown supervisor-namespace key refuses, naming it.
 run unknown-supervisor-key 1 "SUPERVISOR_DB_BACKUP_RESTOR" -- \
-  -e SUPERVISOR_ENV_FILE=/state/.env -v "$WORK/supervisor.env:/state/.env:ro,z" "$IMAGE"
+  "${CAPS[@]}" -e SUPERVISOR_ENV_FILE=/state/.env \
+  -v "$WORK/supervisor.env:/state/.env:ro,z" "$IMAGE"
 
 # 5. A relative state file refuses (it anchors the identity and statedir).
 run relative-state 1 "must be 'mem:' or a direct child" -- \
-  -e SUPERVISOR_ENV_FILE=/state/.env -v "$WORK/relative.env:/state/.env:ro,z" "$IMAGE"
+  "${CAPS[@]}" -e SUPERVISOR_ENV_FILE=/state/.env \
+  -v "$WORK/relative.env:/state/.env:ro,z" "$IMAGE"
 
 # 6. A dotenv file outside /state is refused: the vault uid could read it.
 run env-outside-state 1 "must live under /state" -- \
-  -e SUPERVISOR_ENV_FILE=/config/.env -v "$WORK/fake-auth.env:/config/.env:ro,z" "$IMAGE"
+  "${CAPS[@]}" -e SUPERVISOR_ENV_FILE=/config/.env \
+  -v "$WORK/fake-auth.env:/config/.env:ro,z" "$IMAGE"
 
 # 7. With a bogus auth key and no network, tailscaled must come up and the
 #    CLI must actually run and fail ("authenticating tailscale node..." is
@@ -115,7 +126,8 @@ run env-outside-state 1 "must live under /state" -- \
 #    refuse to run the vault (fail closed) rather than keep a vault nobody
 #    can reach.
 run tailscale-fails-closed 1 "authenticating tailscale node" -- \
-  -e SUPERVISOR_ENV_FILE=/state/.env -v "$WORK/fake-auth.env:/state/.env:ro,z" "$IMAGE"
+  "${CAPS[@]}" -e SUPERVISOR_ENV_FILE=/state/.env \
+  -v "$WORK/fake-auth.env:/state/.env:ro,z" "$IMAGE"
 
 # 8. Run the vault binary directly under its production uid. It must write
 #    its signing key on /data (the shared data group), then stop on the
@@ -136,7 +148,7 @@ run vault-cannot-reach-state 1 "Permission denied" -- \
 #     capabilities. This is the regression test for the vault's capability
 #     drop: without it the vault can setuid back to 65532 and read /state.
 run security-isolation 0 "isolation probe: ok" -- \
-  --cap-add=SETUID --cap-add=SETGID --cap-add=KILL "$IMAGE" --security-probe
+  "${CAPS[@]}" "$IMAGE" --security-probe
 
 echo
 echo "== summary: $PASS passed, $FAIL failed =="

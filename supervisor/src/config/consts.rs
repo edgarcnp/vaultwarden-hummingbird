@@ -16,8 +16,15 @@ pub use crate::util::fs::STATE_ROOT as SUPERVISOR_STATE;
 // read the supervisor's state volume, LocalAPI socket, or environment.
 pub const SUPERVISOR_UID: u32 = 65532;
 pub const SUPERVISOR_GID: u32 = 65532;
+pub const TAILSCALED_UID: u32 = 65531;
+pub const TAILSCALE_GID: u32 = 65531;
 pub const VAULT_UID: u32 = 65533;
 pub const VAULT_GID: u32 = 65532;
+
+/// The group-writable subtree for tailscaled's state, certs, and LocalAPI
+/// socket: the supervisor and tailscaled share the `tailscale` group; the
+/// vault is not a member.
+pub const TAILSCALE_DIR: &str = "/state/tailscale";
 
 // Hard timeouts: a hung child must never block the vault.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);

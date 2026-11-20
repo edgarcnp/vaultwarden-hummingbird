@@ -66,26 +66,25 @@ impl Roots {
         state_file == Some(rel) || rel == "tailscaled.state" || rel.starts_with("certs/")
     }
 
-    pub(super) fn root_of(&self, rel: &str, state_file: Option<&str>) -> &Path {
+    /// The local root for a rel: `/state/tailscale` for the identity and
+    /// cert tree, `/data` otherwise.
+    pub(super) fn local_root(&self, rel: &str, state_file: Option<&str>) -> PathBuf {
         if self.owns_state(rel, state_file) {
-            &self.state
+            self.state.join("tailscale")
         } else {
-            &self.data
+            self.data.clone()
         }
     }
 
     pub(super) fn local(&self, rel: &str, state_file: Option<&str>) -> PathBuf {
-        self.root_of(rel, state_file).join(rel)
+        self.local_root(rel, state_file).join(rel)
     }
 
-    /// Exact mode for a downloaded file. Identity and cert material stays
-    /// owner-only; vault data is group read/write for the other uid.
-    pub(super) fn mode(&self, rel: &str, state_file: Option<&str>) -> u32 {
-        if self.owns_state(rel, state_file) {
-            0o600
-        } else {
-            0o660
-        }
+    /// Exact mode for a downloaded file. The identity and cert tree is
+    /// group read/write for tailscaled; vault data is group read/write for
+    /// the vault uid.
+    pub(super) fn mode(&self, _rel: &str, _state_file: Option<&str>) -> u32 {
+        0o660
     }
 }
 
@@ -102,7 +101,7 @@ pub(super) fn is_deletable(rel: &str) -> bool {
 /// and absolute paths never pass, in any position; neither does a
 /// supervisor `.vw-part` staging file left by an interrupted download. A
 /// user file ending `.part` is ordinary user data and is synced. The
-/// configured state file (a direct child of `/state`) is always inside the
+/// configured state file (a direct child of `/state/tailscale`) is always inside the
 /// set; the default `tailscaled.state` spelling stays accepted even when a
 /// custom path is configured, so an identity synced by an earlier
 /// deployment remains restorable.
@@ -331,19 +330,20 @@ pub(super) fn local_synced_files(
     let mut files = Vec::new();
     let mut entries = 0usize;
 
+    let identity = roots.state.join("tailscale");
     flat_file(
-        &roots.state.join("tailscaled.state"),
+        &identity.join("tailscaled.state"),
         "tailscaled.state",
         &mut files,
     )?;
     if let Some(state) = state_file
         && state != "tailscaled.state"
     {
-        flat_file(&roots.state.join(state), state, &mut files)?;
+        flat_file(&identity.join(state), state, &mut files)?;
     }
     for tree in STATE_TREES {
         scan_root(
-            &roots.state.join(tree),
+            &identity.join(tree),
             tree,
             state_file,
             abort,
@@ -411,25 +411,18 @@ pub(super) fn local_synced_files(
 /// different content, so each boot starts clean. User files ending `.part`
 /// are not touched. Staging directories outside the synced trees (backup
 /// dumps) are not touched.
-pub(super) fn clear_partials(roots: &Roots, state_file: Option<&str>) -> usize {
+pub(super) fn clear_partials(roots: &Roots, _state_file: Option<&str>) -> usize {
     let mut removed = 0;
     clear_flat(&roots.data, &mut removed);
     if roots.state != roots.data {
         clear_flat(&roots.state, &mut removed);
+        clear_flat(&roots.state.join("tailscale"), &mut removed);
     }
     for tree in DATA_TREES {
         clear_recursive(&roots.data.join(tree), &mut removed);
     }
     for tree in STATE_TREES {
-        clear_recursive(&roots.state.join(tree), &mut removed);
-    }
-    // A custom state file may live in a non-tree subdirectory; its parent
-    // can still contain a `.vw-part` from a dead transfer.
-    if let Some(state) = state_file
-        && let Some(parent) = Path::new(state).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        clear_recursive(&roots.state.join(parent), &mut removed);
+        clear_recursive(&roots.state.join("tailscale").join(tree), &mut removed);
     }
     removed
 }
@@ -581,13 +574,13 @@ mod tests {
     fn local_enumeration_walks_files_and_skips_directories() {
         let dir = std::env::temp_dir().join(format!("vw-sup-sync-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("certs/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("tailscale/certs/sub")).unwrap();
         std::fs::create_dir_all(dir.join("attachments")).unwrap();
         std::fs::create_dir_all(dir.join("sends/sub")).unwrap();
-        std::fs::write(dir.join("tailscaled.state"), b"x").unwrap();
+        std::fs::write(dir.join("tailscale/tailscaled.state"), b"x").unwrap();
         std::fs::create_dir(dir.join("rsa_key")).unwrap(); // a directory!
-        std::fs::write(dir.join("certs/example.com.crt"), b"x").unwrap();
-        std::fs::write(dir.join("certs/sub/deep.crt"), b"x").unwrap();
+        std::fs::write(dir.join("tailscale/certs/example.com.crt"), b"x").unwrap();
+        std::fs::write(dir.join("tailscale/certs/sub/deep.crt"), b"x").unwrap();
         std::fs::write(dir.join("attachments/uuid-1"), b"x").unwrap();
         std::fs::write(dir.join("attachments/uuid-1.part"), b"x").unwrap();
         std::fs::write(dir.join("sends/sub/uuid-2"), b"x").unwrap();
@@ -624,10 +617,10 @@ mod tests {
         for root in [&roots.data, &roots.state] {
             std::fs::create_dir_all(root).unwrap();
         }
-        std::fs::create_dir_all(roots.state.join("certs")).unwrap();
+        std::fs::create_dir_all(roots.state.join("tailscale/certs")).unwrap();
         std::fs::create_dir_all(roots.data.join("attachments")).unwrap();
-        std::fs::write(roots.state.join("tailscaled.state"), b"x").unwrap();
-        std::fs::write(roots.state.join("certs/c.crt"), b"x").unwrap();
+        std::fs::write(roots.state.join("tailscale/tailscaled.state"), b"x").unwrap();
+        std::fs::write(roots.state.join("tailscale/certs/c.crt"), b"x").unwrap();
         std::fs::write(roots.data.join("config.json"), b"{}").unwrap();
         std::fs::write(roots.data.join("rsa_key.pem"), b"x").unwrap();
         std::fs::write(roots.data.join("rsa_key.pub.pem"), b"x").unwrap();
@@ -647,7 +640,7 @@ mod tests {
             ]
         );
         // a configured custom state file rides along from /state
-        std::fs::write(roots.state.join("node.state"), b"x").unwrap();
+        std::fs::write(roots.state.join("tailscale/node.state"), b"x").unwrap();
         let files = local_synced_files(&roots, Some("node.state"), &|| false).expect("scan");
         assert!(files.contains(&"node.state".to_string()), "{files:?}");
         // the vault's copy of the same name is not the identity
@@ -669,14 +662,14 @@ mod tests {
             data: PathBuf::from("/data"),
             state: PathBuf::from("/state"),
         };
-        assert_eq!(roots.mode("tailscaled.state", None), 0o600);
-        assert_eq!(roots.mode("certs/c.pem", None), 0o600);
-        assert_eq!(roots.mode("node.state", Some("node.state")), 0o600);
+        assert_eq!(roots.mode("tailscaled.state", None), 0o660);
+        assert_eq!(roots.mode("certs/c.pem", None), 0o660);
+        assert_eq!(roots.mode("node.state", Some("node.state")), 0o660);
         assert_eq!(roots.mode("rsa_key.pem", None), 0o660);
         assert_eq!(roots.mode("attachments/u", None), 0o660);
         assert_eq!(
             roots.local("certs/c.pem", None),
-            PathBuf::from("/state/certs/c.pem")
+            PathBuf::from("/state/tailscale/certs/c.pem")
         );
         assert_eq!(
             roots.local("attachments/u", None),
@@ -693,18 +686,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("attachments/sub")).unwrap();
         std::fs::write(root.join("attachments/user.part"), b"x").unwrap();
-        std::fs::create_dir_all(root.join("certs")).unwrap();
+        std::fs::create_dir_all(root.join("tailscale/certs")).unwrap();
         std::fs::write(root.join("rsa_key.vw-part"), b"x").unwrap();
         std::fs::write(root.join("attachments/u.vw-part"), b"x").unwrap();
         std::fs::write(root.join("attachments/sub/v.vw-part"), b"x").unwrap();
-        std::fs::write(root.join("certs/keep.crt"), b"x").unwrap();
+        std::fs::write(root.join("tailscale/certs/keep.crt"), b"x").unwrap();
         let roots = Roots::one(&root);
         assert_eq!(clear_partials(&roots, None), 3);
         assert!(!root.join("rsa_key.vw-part").exists());
         assert!(root.join("attachments/user.part").exists());
         assert!(!root.join("attachments/u.vw-part").exists());
         assert!(!root.join("attachments/sub/v.vw-part").exists());
-        assert!(root.join("certs/keep.crt").exists());
+        assert!(root.join("tailscale/certs/keep.crt").exists());
         assert_eq!(clear_partials(&roots, None), 0);
         let _ = std::fs::remove_dir_all(&root);
     }

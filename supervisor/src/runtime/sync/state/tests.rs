@@ -76,6 +76,7 @@ fn a_pull_routes_each_key_to_its_volume() {
     for root in [&roots.data, &roots.state] {
         std::fs::create_dir_all(root).unwrap();
     }
+    std::fs::create_dir_all(roots.state.join("tailscale")).unwrap();
     let sha = |bytes: &[u8]| {
         let probe = base.join("probe");
         std::fs::write(&probe, bytes).unwrap();
@@ -104,7 +105,7 @@ fn a_pull_routes_each_key_to_its_volume() {
     assert!(restore_state_at(&roots, &sync_cfg(&endpoint), || false));
 
     assert_eq!(
-        std::fs::read(roots.state.join("tailscaled.state")).unwrap(),
+        std::fs::read(roots.state.join("tailscale/tailscaled.state")).unwrap(),
         b"state"
     );
     assert_eq!(
@@ -114,7 +115,7 @@ fn a_pull_routes_each_key_to_its_volume() {
     use std::os::unix::fs::PermissionsExt;
     let mode =
         |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&roots.state.join("tailscaled.state")), 0o600);
+    assert_eq!(mode(&roots.state.join("tailscale/tailscaled.state")), 0o660);
     assert_eq!(mode(&roots.data.join("attachments/u")), 0o660);
     let _ = std::fs::remove_dir_all(&base);
 }

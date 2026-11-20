@@ -2,7 +2,8 @@
 //! identity, cert cache, backup staging, and sync sidecars lived on the
 //! vault-writable `/data` volume.
 //!
-//! The supervisor now keeps those under `/state` (0700, owner 65532). The
+//! The supervisor now keeps those under `/state` (2710, owner 65532, group
+//! tailscale) and the identity/certs under `/state/tailscale` (2770). The
 //! vault runs as 65533:65532 and can neither traverse that directory nor
 //! read its files. `/data` stays the vault's volume: the supervisor only
 //! reads it (0660/0770 for the shared group).
@@ -18,14 +19,16 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
-use nix::unistd::geteuid;
+use nix::unistd::{Gid, chown, geteuid};
 
-use crate::config::{SUPERVISOR_GID, SUPERVISOR_STATE, SUPERVISOR_UID};
+use crate::config::{SUPERVISOR_GID, SUPERVISOR_STATE, SUPERVISOR_UID, TAILSCALE_GID};
 use crate::util::fs::{is_real_file, write_atomic};
 use crate::util::log;
 
-/// Marks a completed migration (and the recursive `/data` mode fix).
+/// Marks a completed `/data` -> `/state` migration.
 const MARKER: &str = ".layout-v2";
+/// Marks the tailscaled identity/certs move into `/state/tailscale`.
+const TAILSCALE_MARKER: &str = ".layout-v3";
 /// The identity, cert cache, and lineage sidecar are all small; the cap
 /// only bounds a corrupt/hostile file.
 const MAX_MIGRATED_BYTES: u64 = 16 * 1024 * 1024;
@@ -40,7 +43,8 @@ pub fn migrate_layout() -> bool {
 
 /// [`migrate_layout`] with explicit roots (tests use scratch directories).
 pub(super) fn migrate_layout_at(state: &Path, data: &Path) -> bool {
-    if let Err(e) = ensure_private_dir(state) {
+    let group = tailscale_group();
+    if let Err(e) = ensure_state_dir(state, group) {
         log::err(&format!(
             "layout: cannot prepare the supervisor state volume {}: {e}",
             log::sanitize(&state.to_string_lossy())
@@ -123,7 +127,106 @@ pub(super) fn migrate_layout_at(state: &Path, data: &Path) -> bool {
             ok = false;
         }
     }
-    ok
+    ok && migrate_tailscale_layout(state, group)
+}
+
+/// The production state volume and the tests share one rule: in the image
+/// the group is the fixed `tailscale` gid; in a developer test run the
+/// current gid is the only one the user may assign.
+fn tailscale_group() -> u32 {
+    if geteuid().as_raw() == SUPERVISOR_UID {
+        TAILSCALE_GID
+    } else {
+        nix::unistd::getegid().as_raw()
+    }
+}
+
+/// Prepare `/state`: owner supervisor, group tailscale, mode 2710 (owner
+/// rwx, group traverse, setgid for the subtree).
+fn ensure_state_dir(dir: &Path, group: u32) -> std::io::Result<()> {
+    ensure_private_dir(dir)?;
+    set_dir(dir, 0o2710)?;
+    set_group(dir, group)
+}
+
+fn set_group(path: &Path, group: u32) -> std::io::Result<()> {
+    chown(path, None, Some(Gid::from_raw(group)))
+        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+}
+
+/// Move the identity and cert cache into `/state/tailscale`, make the
+/// subtree group-writable for tailscaled, and mark the layout done. The
+/// bucket keys stay `tailscaled.state` and `certs/**`; only local paths
+/// move.
+fn migrate_tailscale_layout(state: &Path, group: u32) -> bool {
+    let dir = state.join("tailscale");
+    if let Err(e) = ensure_dir_group(&dir, group) {
+        log::err(&format!(
+            "layout: cannot prepare {}: {e}",
+            log::sanitize(&dir.to_string_lossy())
+        ));
+        return false;
+    }
+    // The cert tree is created up front (setgid, group tailscale) so a
+    // restored cert inherits the group tailscaled reads.
+    if let Err(e) = ensure_dir_group(&dir.join("certs"), group) {
+        log::err(&format!(
+            "layout: cannot prepare {}: {e}",
+            log::sanitize(&dir.join("certs").to_string_lossy())
+        ));
+        return false;
+    }
+    let marker = state.join(TAILSCALE_MARKER);
+    if is_real_file(&marker.to_string_lossy()) {
+        // A completed move still needs its modes enforced after an image
+        // or volume mode change.
+        return fix_tailscale_modes(&dir, group).is_ok();
+    }
+    let mut ok = true;
+    ok &= move_file(
+        &state.join("tailscaled.state"),
+        &dir.join("tailscaled.state"),
+    );
+    ok &= move_tree(&state.join("certs"), &dir.join("certs"));
+    if !ok {
+        log::err("layout: tailscaled state move incomplete; refusing to mark it done");
+        return false;
+    }
+    if let Err(e) = fix_tailscale_modes(&dir, group) {
+        log::err(&format!("layout: cannot set tailscaled modes: {e}"));
+        return false;
+    }
+    if let Err(e) = write_atomic(&marker.to_string_lossy(), b"3\n", 0o600) {
+        log::err(&format!("layout: cannot write the tailscale marker: {e}"));
+        return false;
+    }
+    log::info("layout: moved tailscaled identity and certs into /state/tailscale");
+    true
+}
+
+fn ensure_dir_group(dir: &Path, group: u32) -> std::io::Result<()> {
+    ensure_private_dir(dir)?;
+    set_dir(dir, 0o2770)?;
+    set_group(dir, group)
+}
+
+fn fix_tailscale_modes(dir: &Path, group: u32) -> std::io::Result<()> {
+    set_dir(dir, 0o2770)?;
+    set_group(dir, group)?;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            let _ = fs::remove_file(&path);
+        } else if kind.is_dir() {
+            fix_tailscale_modes(&path, group)?;
+        } else if kind.is_file() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o660))?;
+            set_group(&path, group)?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -483,13 +586,17 @@ mod tests {
         assert!(migrate_layout_at(&state, &data));
 
         assert_eq!(
-            fs::read(state.join("tailscaled.state")).unwrap(),
+            fs::read(state.join("tailscale/tailscaled.state")).unwrap(),
             b"identity"
         );
-        assert_eq!(mode(&state.join("tailscaled.state")), 0o600);
-        assert_eq!(fs::read(state.join("certs/sub/b.key")).unwrap(), b"key");
-        assert_eq!(mode(&state.join("certs/sub/b.key")), 0o600);
-        assert_eq!(mode(&state.join("certs")), 0o700);
+        assert_eq!(mode(&state.join("tailscale/tailscaled.state")), 0o660);
+        assert_eq!(
+            fs::read(state.join("tailscale/certs/sub/b.key")).unwrap(),
+            b"key"
+        );
+        assert_eq!(mode(&state.join("tailscale/certs/sub/b.key")), 0o660);
+        assert_eq!(mode(&state.join("tailscale/certs")), 0o770);
+        assert_eq!(mode(&state), 0o710);
         assert_eq!(fs::read(state.join("db-backups.state")).unwrap(), b"7\n");
         assert!(!data.join("tailscaled.state").exists());
         assert!(!data.join("certs").exists());
@@ -502,6 +609,7 @@ mod tests {
         assert_eq!(mode(&data.join("attachments/u/f")), 0o660);
         assert_eq!(mode(&data.join("attachments/u")), 0o770);
         assert!(state.join(MARKER).is_file());
+        assert!(state.join(TAILSCALE_MARKER).is_file());
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 
@@ -520,7 +628,7 @@ mod tests {
         assert!(!data.join("tailscaled.state").exists());
         assert!(!data.join("certs/key").exists());
         assert_eq!(fs::read(&victim).unwrap(), b"keep");
-        assert!(!state.join("tailscaled.state").exists());
+        assert!(!state.join("tailscale/tailscaled.state").exists());
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 
@@ -531,11 +639,11 @@ mod tests {
         let (state, data) = scratch("readopt");
         assert!(migrate_layout_at(&state, &data));
         assert!(state.join(MARKER).is_file());
-        fs::write(state.join("tailscaled.state"), b"real-identity").unwrap();
+        fs::write(state.join("tailscale/tailscaled.state"), b"real-identity").unwrap();
         fs::write(data.join("tailscaled.state"), b"planted").unwrap();
         assert!(migrate_layout_at(&state, &data));
         assert_eq!(
-            fs::read(state.join("tailscaled.state")).unwrap(),
+            fs::read(state.join("tailscale/tailscaled.state")).unwrap(),
             b"real-identity"
         );
         assert!(!data.join("tailscaled.state").exists());
@@ -545,10 +653,14 @@ mod tests {
     #[test]
     fn a_target_already_in_the_state_volume_wins() {
         let (state, data) = scratch("target");
-        fs::write(state.join("tailscaled.state"), b"new").unwrap();
+        fs::create_dir_all(state.join("tailscale")).unwrap();
+        fs::write(state.join("tailscale/tailscaled.state"), b"new").unwrap();
         fs::write(data.join("tailscaled.state"), b"old").unwrap();
         assert!(migrate_layout_at(&state, &data));
-        assert_eq!(fs::read(state.join("tailscaled.state")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(state.join("tailscale/tailscaled.state")).unwrap(),
+            b"new"
+        );
         assert!(!data.join("tailscaled.state").exists());
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }

@@ -42,12 +42,12 @@ static KNOBS: &[Knob] = &[
     Knob {
         name: "TAILSCALE_STATE_FILE",
         policy: FilePolicy::File,
-        default: Some(Default::Str("/state/tailscaled.state")),
+        default: Some(Default::Str("/state/tailscale/tailscaled.state")),
     },
     Knob {
         name: "TAILSCALE_SOCKET",
         policy: FilePolicy::File,
-        default: Some(Default::Str("/state/tailscaled.sock")),
+        default: Some(Default::Str("/state/tailscale/tailscaled.sock")),
     },
     Knob {
         name: "TAILSCALE_HOSTNAME",
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(string_default("SUPERVISOR_S3_URL_STYLE"), "path");
         assert_eq!(
             string_default("TAILSCALE_STATE_FILE"),
-            "/state/tailscaled.state"
+            "/state/tailscale/tailscaled.state"
         );
     }
 

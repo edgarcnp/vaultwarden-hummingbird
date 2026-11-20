@@ -356,7 +356,12 @@ fn reconcile_objects(
             continue;
         }
         let rel_parent = Path::new(&rel).parent().unwrap_or_else(|| Path::new(""));
-        if create_real_dirs(roots.root_of(&rel, cfg.state_file.as_deref()), rel_parent).is_err() {
+        if create_real_dirs(
+            &roots.local_root(&rel, cfg.state_file.as_deref()),
+            rel_parent,
+        )
+        .is_err()
+        {
             continue;
         }
         let key = format!("{}{}", cfg.prefix(), object_key(&rel, &version.sha256));
@@ -573,7 +578,7 @@ fn restore_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() -> bool) -
             .parent()
             .unwrap_or_else(|| Path::new(""));
         if let Err(e) = create_real_dirs(
-            roots.root_of(&target.rel, cfg.state_file.as_deref()),
+            &roots.local_root(&target.rel, cfg.state_file.as_deref()),
             rel_parent,
         ) {
             log::err(&format!(

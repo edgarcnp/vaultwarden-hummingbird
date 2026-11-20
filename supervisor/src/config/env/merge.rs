@@ -78,7 +78,7 @@ impl Config {
     /// without Tailscale, so boot must fail closed.
     pub fn from_env() -> Option<Self> {
         // The dotenv file holds the tailscale auth key and the S3
-        // credentials. It must live on the 0700 supervisor volume: a file
+        // credentials. It must live on the supervisor-only /state volume: a file
         // mounted elsewhere (the old /config/.env) is readable by the vault
         // uid whenever the runtime's uid mapping allows it to be read at
         // all. `--env-file` users have no file in the container and are
@@ -203,8 +203,8 @@ impl Config {
         let state = value("TAILSCALE_STATE_FILE");
         if !paths::state_file(root, &state) {
             log::err(&format!(
-                "config: TAILSCALE_STATE_FILE '{}' must be 'mem:' or a direct child of {}; \
-                 refusing to start",
+                "config: TAILSCALE_STATE_FILE '{}' must be 'mem:' or a direct child of \
+                 {}/tailscale; refusing to start",
                 log::sanitize(&state),
                 root.display()
             ));
@@ -218,7 +218,8 @@ impl Config {
         let socket = value("TAILSCALE_SOCKET");
         if !paths::socket(root, &socket) {
             log::err(&format!(
-                "config: TAILSCALE_SOCKET '{}' must be a path under {}; refusing to start",
+                "config: TAILSCALE_SOCKET '{}' must be a path under {}/tailscale; \
+                 refusing to start",
                 log::sanitize(&socket),
                 root.display()
             ));
@@ -232,7 +233,7 @@ impl Config {
         {
             log::err(&format!(
                 "config: TAILSCALE_STATE_FILE '{}' collides with a supervisor or vault \
-                 key; choose another name directly under {}",
+                 key; choose another name directly under {}/tailscale",
                 log::sanitize(&state),
                 root.display()
             ));

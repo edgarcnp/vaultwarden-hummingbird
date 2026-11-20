@@ -3,11 +3,23 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::config::{TAILSCALE, TAILSCALED};
+use crate::config::{TAILSCALE, TAILSCALE_GID, TAILSCALED, TAILSCALED_UID};
 use crate::runtime::{
-    Handle, TUN_CAPS, apply_env, run_bounded, run_bounded_capture, spawn, spawn_with_caps,
+    Credentials, Handle, TUN_CAPS, apply_env, run_bounded, run_bounded_capture, spawn_as,
+    spawn_as_with_caps,
 };
 use crate::util::{StagedFile, log};
+
+/// tailscaled's dedicated identity: it owns the state tree and the LocalAPI
+/// socket, and is a member of the `tailscale` group (which the supervisor
+/// joins for its own access).
+const TAILSCALED_GROUPS: [nix::unistd::Gid; 1] = [nix::unistd::Gid::from_raw(TAILSCALE_GID)];
+const TAILSCALED_CREDS: Credentials = Credentials {
+    uid: TAILSCALED_UID,
+    gid: TAILSCALE_GID,
+    groups: &TAILSCALED_GROUPS,
+    umask: 0o007,
+};
 
 /// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
 /// /dev/net/tun). `--statedir` (derived from the state file's dir, on the
@@ -15,8 +27,10 @@ use crate::util::{StagedFile, log};
 /// cert caching.
 ///
 /// Environment is allow-listed ([`apply_env`]) — no supervisor secrets —
-/// and every capability is dropped. TUN mode keeps only NET_ADMIN/NET_RAW
-/// (the container must grant them); userspace mode needs no capabilities.
+/// and the daemon runs as its own uid in the `tailscale` group. TUN mode
+/// keeps only NET_ADMIN/NET_RAW (the container must grant them);
+/// userspace mode needs no capabilities. Every other capability is
+/// dropped, and `no_new_privs` is set.
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Handle> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
@@ -24,7 +38,7 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Ha
         // `mem:` has no parent to derive a cert cache from. Keep the cache
         // on the supervisor volume so `serve` can still issue and store
         // certificates; the identity itself stays in memory.
-        cmd.arg("--statedir").arg(crate::config::SUPERVISOR_STATE);
+        cmd.arg("--statedir").arg(crate::config::TAILSCALE_DIR);
     } else if let Some(dir) = std::path::Path::new(state)
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -37,9 +51,9 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Ha
     }
     apply_env(&mut cmd, &[]);
     if userspace {
-        spawn(&mut cmd)
+        spawn_as(&mut cmd, TAILSCALED_CREDS)
     } else {
-        spawn_with_caps(&mut cmd, TUN_CAPS)
+        spawn_as_with_caps(&mut cmd, TAILSCALED_CREDS, TUN_CAPS)
     }
 }
 

@@ -189,14 +189,18 @@ ENV DATA_FOLDER=/data \
 #
 # VOLUME LAYOUT — /data is the vault's writable volume (0770, group 65532):
 # the vault runs as 65533:65532 and reaches it through the shared group.
-# /state is supervisor-only (0700, owner 65532): tailscaled state/socket,
-# cert cache, backup staging, sync sidecars, and the dotenv file. The vault
-# cannot traverse it.
+# /state is supervisor-only (2710, owner 65532, group tailscale 65531):
+# group traverse, no list, so the tailscaled uid can reach only its own
+# subtree. /state/tailscale (2770) holds the identity, cert cache, and
+# LocalAPI socket; the supervisor joins group 65531 for access. The vault
+# is not in that group and cannot traverse /state.
 USER 0
-RUN mkdir -p /state \
- && chown 65532:65532 /data /state \
+RUN mkdir -p /state/tailscale \
+ && chown 65532:65532 /data \
+ && chown 65532:65531 /state /state/tailscale \
  && chmod 0770 /data \
- && chmod 0700 /state \
+ && chmod 2710 /state \
+ && chmod 2770 /state/tailscale \
  && rm -f \
         /usr/bin/bash /usr/bin/sh /usr/bin/openssl \
         /usr/bin/base64 /usr/bin/cat /usr/bin/chmod /usr/bin/chown \

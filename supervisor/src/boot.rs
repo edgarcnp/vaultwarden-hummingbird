@@ -25,9 +25,9 @@
 
 use crate::config::{AUTH_TIMEOUT, Config, DAEMON_WAIT, SERVE_TIMEOUT};
 use crate::runtime::{
-    Handle, RestoreOutcome, adopt_lineage, install_signal_handlers, migrate_layout,
-    restore_if_empty, restore_state, shutdown, spawn_tailscaled, start_vw, stopping, sync_state,
-    tailscale_serve, tailscale_up, take_stop,
+    Handle, RestoreOutcome, adopt_lineage, install_signal_handlers, join_tailscale_group,
+    migrate_layout, restore_if_empty, restore_state, shutdown, spawn_tailscaled, start_vw,
+    stopping, sync_state, tailscale_serve, tailscale_up, take_stop,
 };
 use crate::util::{log, net};
 
@@ -217,6 +217,17 @@ impl Boot {
 pub fn run() -> ! {
     if !install_signal_handlers() {
         log::err("cannot register stop signals; refusing to run without graceful shutdown");
+        std::process::exit(1);
+    }
+    // Join the tailscale group before the layout migration (it sets the
+    // group on /state/tailscale) and before config resolution. Without the
+    // group the supervisor cannot restore the identity or reach the
+    // LocalAPI socket; a failure is a failed boot.
+    if let Err(e) = join_tailscale_group() {
+        log::err(&format!(
+            "cannot join the tailscale group ({e}); refusing to run without \
+             identity/socket access"
+        ));
         std::process::exit(1);
     }
     // Before config resolution: the identity gate reads the state file,

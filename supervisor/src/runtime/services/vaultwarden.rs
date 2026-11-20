@@ -11,10 +11,11 @@ use crate::runtime::{Credentials, EnvGrant, Handle, spawn_as};
 
 /// The vault's identity: a dedicated UID in the shared data group. It can
 /// write `/data` (0770, group 65532) but cannot traverse the supervisor's
-/// `/state` (0700), read the LocalAPI socket, or reach PID 1's environment.
+/// `/state` (2710, group traverse only), read the LocalAPI socket, or reach PID 1's environment.
 const VAULT_CREDENTIALS: Credentials = Credentials {
     uid: VAULT_UID,
     gid: VAULT_GID,
+    groups: &[],
     umask: 0o007,
 };
 

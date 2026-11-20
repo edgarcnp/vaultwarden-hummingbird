@@ -33,10 +33,11 @@ services:
       retries: 3
     # Least privilege: all capabilities dropped, then only the three the
     # supervisor needs. SETUID/SETGID let it start the vault as 65533:65532
-    # (a different uid from PID 1); KILL lets it signal that uid. The vault
-    # itself gets no capabilities across the uid change, and no-new-privileges
-    # keeps the restriction across exec. Writable paths: /data (vault
-    # volume), /state (supervisor volume), /tmp (tmpfs).
+    # and tailscaled as 65531:65531; KILL lets it signal them. The children
+    # get no capabilities across the uid change (tailscaled keeps only
+    # NET_ADMIN/NET_RAW in TUN mode), and no-new-privileges keeps the
+    # restriction across exec. Writable paths: /data (vault volume), /state
+    # (supervisor volume), /tmp (tmpfs).
     cap_drop:
       - ALL
     cap_add:
@@ -53,9 +54,10 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     # .env is the supervisor-owned dotenv file. It lives under /state
-    # (0700, owner 65532): the vault's uid cannot traverse the directory,
-    # so it cannot read the auth key or S3 credentials. vw-data persists
-    # the vault's files; vw-state persists the node identity, cert cache,
+    # (2710, owner 65532, group tailscale 65531): the group can traverse
+    # but not list, and 0600/0644 secrets stay owner-only; the vault's uid
+    # is not in the group, so it cannot reach them. vw-data persists the
+    # vault's files; vw-state persists the node identity, cert cache,
     # backup staging, and sync sidecars.
     volumes:
       - ./.env:/state/.env:ro,z

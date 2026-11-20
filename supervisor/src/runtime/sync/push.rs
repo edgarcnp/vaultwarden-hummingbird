@@ -260,8 +260,8 @@ pub(super) fn sync_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() ->
         if abort() {
             return false;
         }
-        let root = roots.root_of(rel, cfg.state_file.as_deref());
-        let mut file = match crate::util::fs::open_under(root, rel) {
+        let root = roots.local_root(rel, cfg.state_file.as_deref());
+        let mut file = match crate::util::fs::open_under(&root, rel) {
             Ok(file) => file,
             Err(e) => {
                 log::err(&format!(

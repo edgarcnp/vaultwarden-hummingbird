@@ -3,34 +3,45 @@
 //! One helper behind every check, so a hardening change cannot leave one
 //! copy of the rule weaker than another.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use crate::util::fs::under_root;
 
+/// The tailscaled-writable subtree under the state root.
+pub(crate) fn tailscale_dir(root: &Path) -> PathBuf {
+    root.join("tailscale")
+}
+
 /// The identity file: `mem:` (Tailscale's in-memory state) or a direct
-/// child of the state root. The daemon derives its `--statedir` (and thus
-/// the cert cache) from the file's parent; a subdirectory would move the
-/// cert cache outside the synced tree.
+/// child of `/state/tailscale`. The daemon derives its `--statedir` (and
+/// thus the cert cache) from the file's parent; the group-writable
+/// subtree is the only place tailscaled may write.
 pub(crate) fn state_file(root: &Path, value: &str) -> bool {
     if value == "mem:" {
         return true;
     }
-    value.trim() == value && under_root(root, value) && Path::new(value).parent() == Some(root)
+    let dir = tailscale_dir(root);
+    value.trim() == value
+        && under_root(&dir, value)
+        && Path::new(value).parent() == Some(dir.as_path())
 }
 
-/// The LocalAPI socket: any normal path under the state root. It need not
-/// be a direct child.
+/// The LocalAPI socket: any normal path under `/state/tailscale`. The CLI
+/// reaches it through the tailscale group.
 pub(crate) fn socket(root: &Path, value: &str) -> bool {
-    value.trim() == value && under_root(root, value) && Path::new(value) != root
+    let dir = tailscale_dir(root);
+    value.trim() == value && under_root(&dir, value) && Path::new(value) != dir
 }
 
 /// The direct-child name of a valid state file, for the sync manifest.
-/// `None` for `mem:` or anything outside the root.
+/// `None` for `mem:` or anything outside the subtree. The bucket key stays
+/// the bare name (`tailscaled.state`), independent of the local directory.
 pub(crate) fn state_rel<'a>(root: &Path, value: &'a str) -> Option<&'a str> {
     if !state_file(root, value) || value == "mem:" {
         return None;
     }
-    let rel = Path::new(value).strip_prefix(root).ok()?;
+    let dir = tailscale_dir(root);
+    let rel = Path::new(value).strip_prefix(&dir).ok()?;
     let mut parts = rel.components();
     let Component::Normal(name) = parts.next()? else {
         return None;
@@ -62,6 +73,7 @@ pub(crate) fn reserved_state_name(rel: &str) -> bool {
             | "db"
             | "db-backups"
             | "objects"
+            | "tailscaled.sock"
     ) || rel.starts_with("rsa_key")
         || rel.starts_with("db-backups")
         || rel.starts_with("db-")
@@ -79,18 +91,23 @@ mod tests {
     #[test]
     fn state_files_are_direct_children_of_the_root() {
         assert!(state_file(Path::new(ROOT), "mem:"));
-        assert!(state_file(Path::new(ROOT), "/state/tailscaled.state"));
-        assert!(state_file(Path::new(ROOT), "/state/node.state"));
+        assert!(state_file(
+            Path::new(ROOT),
+            "/state/tailscale/tailscaled.state"
+        ));
+        assert!(state_file(Path::new(ROOT), "/state/tailscale/node.state"));
         for path in [
             "/state",
             "/state/",
+            "/state/tailscaled.state",
             "/state/sub/node.state",
-            "/state/../data/node.state",
+            "/state/tailscale/sub/node.state",
+            "/state/tailscale/../data/node.state",
             "/data/node.state",
             "/custom/node.state",
             "node.state",
-            "/state/node\n.state",
-            "/state/node.state ",
+            "/state/tailscale/node\n.state",
+            "/state/tailscale/node.state ",
         ] {
             assert!(!state_file(Path::new(ROOT), path), "{path}");
         }
@@ -98,15 +115,19 @@ mod tests {
 
     #[test]
     fn sockets_stay_under_the_root() {
-        assert!(socket(Path::new(ROOT), "/state/tailscaled.sock"));
-        assert!(socket(Path::new(ROOT), "/state/run/tailscaled.sock"));
+        assert!(socket(Path::new(ROOT), "/state/tailscale/tailscaled.sock"));
+        assert!(socket(
+            Path::new(ROOT),
+            "/state/tailscale/run/tailscaled.sock"
+        ));
         for path in [
             "/state",
-            "/state/../data/sock",
+            "/state/tailscaled.sock",
+            "/state/tailscale/../data/sock",
             "/data/sock",
             "/custom/sock",
             "sock",
-            "/state/sock\n",
+            "/state/tailscale/sock\n",
         ] {
             assert!(!socket(Path::new(ROOT), path), "{path}");
         }
@@ -115,11 +136,15 @@ mod tests {
     #[test]
     fn state_rel_is_a_single_normal_component() {
         assert_eq!(
-            state_rel(Path::new(ROOT), "/state/node.state"),
+            state_rel(Path::new(ROOT), "/state/tailscale/node.state"),
             Some("node.state")
         );
         assert_eq!(state_rel(Path::new(ROOT), "mem:"), None);
-        assert_eq!(state_rel(Path::new(ROOT), "/state/sub/node.state"), None);
+        assert_eq!(
+            state_rel(Path::new(ROOT), "/state/tailscale/sub/node.state"),
+            None
+        );
+        assert_eq!(state_rel(Path::new(ROOT), "/state/node.state"), None);
         assert_eq!(state_rel(Path::new(ROOT), "/data/node.state"), None);
     }
 
@@ -146,6 +171,7 @@ mod tests {
             "objects",
             "rsa_key",
             "rsa_key.pem",
+            "tailscaled.sock",
             "ts-authkey-1-0",
             "ts-authkey",
             "sub/node.state",
