@@ -86,15 +86,20 @@ fn tick_pushes_prunes_and_heals_a_deleted_newest() {
         "the existence check ran"
     );
 
-    // Third tick: the newest object vanished externally; the unchanged
-    // dump is re-uploaded, the generation advances, and keep=1 prunes the
-    // old object only after the manifest that dropped it.
+    // Third tick: HEAD reports the newest object gone (the object is still
+    // stored, so the following prune has something to delete); the
+    // unchanged dump is re-uploaded, the generation advances, and keep=1
+    // prunes the old object only after the manifest that dropped it.
     bucket
-        .objects
+        .head_missing
         .lock()
         .unwrap()
-        .remove(&format!("db/{first}"));
+        .insert(format!("db/{first}"));
     tick(&cfg, || false);
+    assert!(
+        bucket.object(&format!("db/{first}")).is_none(),
+        "the prune batch removed the evicted object"
+    );
     let manifest = bucket_manifest(&bucket);
     assert_eq!(manifest.latest(), 2);
     assert_eq!(manifest.newest_first().count(), 1, "keep=1 evicts gen 1");
@@ -108,8 +113,8 @@ fn tick_pushes_prunes_and_heals_a_deleted_newest() {
         .expect("manifest PUT");
     let delete = log
         .iter()
-        .rposition(|(method, key)| method == "DELETE" && key == &format!("db/{first}"))
-        .expect("evicted object deleted");
+        .rposition(|(method, _)| method == "POST")
+        .expect("evicted objects batch-deleted");
     assert!(
         manifest_put < delete,
         "prune must follow the manifest write: {log:?}"

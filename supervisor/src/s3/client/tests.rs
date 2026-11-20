@@ -2,6 +2,7 @@
 //! every source file under the 1,000-line limit).
 
 use super::super::transport::*;
+mod delete_many;
 mod fifo;
 mod head;
 

@@ -16,7 +16,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
-use rusty_s3::actions::CreateMultipartUpload;
+use rusty_s3::actions::{CreateMultipartUpload, DeleteObjectsResponse, ObjectIdentifier};
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 
 use super::remote::{BucketStyle, RemoteSpec};
@@ -65,6 +65,11 @@ pub const MAX_SYNC_OBJECT_BYTES: u64 = 1024 * 1024 * 1024;
 /// Absolute download cap for one DB dump. The import's integrity check
 /// still decides validity; this only bounds a rogue endpoint.
 pub const MAX_DB_OBJECT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// S3's DeleteObjects limit per request.
+const MAX_DELETE_BATCH: usize = 1000;
+/// The delete response is a small XML document; cap it like every parser.
+const DELETE_RESPONSE_CAP: u64 = 1024 * 1024;
 
 /// Listing bound. The manifest caps at ~40k files; three content-addressed
 /// versions per file plus the legacy keys fit comfortably under 100k. A
@@ -802,6 +807,70 @@ impl Client {
 
     /// Delete one object. Idempotent: a 404 means the object is already
     /// gone (a concurrent/previous GC run), which is success.
+    pub fn delete_many(&self, keys: &[String], abort: impl Fn() -> bool) -> anyhow::Result<()> {
+        if abort() {
+            bail!("aborted");
+        }
+        for chunk in keys.chunks(MAX_DELETE_BATCH) {
+            if chunk.is_empty() {
+                continue;
+            }
+            if abort() {
+                bail!("aborted");
+            }
+            let objects: Vec<ObjectIdentifier> =
+                chunk.iter().cloned().map(ObjectIdentifier::new).collect();
+            let response = retrying(|| {
+                if abort() {
+                    return Err(ureq::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "aborted",
+                    )));
+                }
+                let action = self
+                    .bucket
+                    .delete_objects(Some(&self.credentials), objects.iter());
+                let url = action.sign(SIGN_EXPIRE);
+                let (body, content_md5) = action.body_with_md5();
+                self.agent
+                    .post(url.as_str())
+                    .header("Content-MD5", content_md5)
+                    .header("Content-Type", "application/xml")
+                    .send(body.as_bytes())
+            })
+            .map_err(|e| anyhow!("batch delete failed: {}", http_err(&e)))?;
+            let response = checked("batch delete", "objects", response)?;
+            let text = response
+                .into_body()
+                .into_with_config()
+                .limit(DELETE_RESPONSE_CAP)
+                .read_to_string()
+                .map_err(|e| anyhow!("batch delete response: {e}"))?;
+            let parsed = DeleteObjectsResponse::parse(&text)
+                .map_err(|e| anyhow!("batch delete response: {e}"))?;
+            if !parsed.errors.is_empty() {
+                let detail = parsed
+                    .errors
+                    .iter()
+                    .map(|error| {
+                        format!(
+                            "{}: {} ({})",
+                            crate::util::log::sanitize(&error.key),
+                            error.code,
+                            error.message
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "batch delete left {} object(s): {detail}",
+                    parsed.errors.len()
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete(&self, key: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");

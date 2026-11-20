@@ -63,6 +63,10 @@ pub(super) struct FakeBucket {
     pub(super) endpoint: String,
     pub(super) requests: Arc<Mutex<Vec<(String, String)>>>,
     pub(super) objects: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+    /// Keys whose HEAD reports 404 while the object remains stored; used
+    /// to exercise the external-deletion repair without losing the object
+    /// that the following prune batch must delete.
+    pub(super) head_missing: Arc<Mutex<std::collections::BTreeSet<String>>>,
 }
 
 impl FakeBucket {
@@ -78,8 +82,10 @@ impl FakeBucket {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let objects = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let head_missing = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
         let log = Arc::clone(&requests);
         let store = Arc::clone(&objects);
+        let missing = Arc::clone(&head_missing);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { continue };
@@ -105,6 +111,7 @@ impl FakeBucket {
                 let target = parts.next().unwrap_or("");
                 let path = target.split('?').next().unwrap_or("");
                 let list = target.contains("list-type=2");
+                let batch_delete = target.contains("delete=") && method == "POST";
                 let bucket_prefix = format!("/{bucket}");
                 let key = path
                     .strip_prefix(&bucket_prefix)
@@ -148,6 +155,9 @@ impl FakeBucket {
                         Some(value) => (200, value),
                         None => (404, Vec::new()),
                     },
+                    ("HEAD", _) if missing.lock().unwrap().contains(&key) => {
+                        (404, Vec::new())
+                    }
                     ("HEAD", _) => match store.lock().unwrap().get(&key) {
                         Some(value) => {
                             head_length = value.len();
@@ -158,6 +168,27 @@ impl FakeBucket {
                     ("DELETE", _) => {
                         store.lock().unwrap().remove(&key);
                         (204, Vec::new())
+                    }
+                    _ if batch_delete => {
+                        let mut deleted = String::new();
+                        if let Ok(text) = std::str::from_utf8(&body) {
+                            for part in text.split("<Key>").skip(1) {
+                                let Some(name) = part.split("</Key>").next() else {
+                                    continue;
+                                };
+                                if store.lock().unwrap().remove(name).is_some() {
+                                    deleted.push_str(&format!(
+                                        "<Deleted><Key>{name}</Key></Deleted>"
+                                    ));
+                                }
+                            }
+                        }
+                        let result = format!(
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                             <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                             {deleted}</DeleteResult>"
+                        );
+                        (200, result.into_bytes())
                     }
                     _ => (405, Vec::new()),
                 };
@@ -187,6 +218,7 @@ impl FakeBucket {
             endpoint,
             requests,
             objects,
+            head_missing,
         }
     }
 }

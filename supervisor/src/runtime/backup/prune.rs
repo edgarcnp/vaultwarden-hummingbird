@@ -15,19 +15,19 @@ pub(super) fn prune(
     evicted: &[Entry],
     abort: &impl Fn() -> bool,
 ) {
-    for entry in evicted {
-        let key = format!("{}{}", cfg.prefix(), entry.name);
-        match client.delete(&key, abort) {
-            Ok(()) => log::info(&format!(
-                "db backup: pruned {} (generation {})",
-                log::sanitize(&key),
-                entry.generation
-            )),
-            Err(e) => log::err(&format!(
-                "db backup: prune delete failed ({e}); the bucket keeps one extra \
-                 backup (check that the access key may delete)"
-            )),
-        }
+    if evicted.is_empty() {
+        return;
+    }
+    let keys: Vec<String> = evicted
+        .iter()
+        .map(|entry| format!("{}{}", cfg.prefix(), entry.name))
+        .collect();
+    match client.delete_many(&keys, abort) {
+        Ok(()) => log::info(&format!("db backup: pruned {} object(s)", keys.len())),
+        Err(e) => log::err(&format!(
+            "db backup: batch prune failed ({e}); the bucket may keep extra backups \
+             (check that the access key may delete)"
+        )),
     }
 }
 
