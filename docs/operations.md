@@ -25,9 +25,11 @@ root filesystem with a `/tmp` tmpfs, and the four required capabilities.
 
 ## Volumes and permissions
 
-`/data` and `/state` must both persist, and they belong together: `/state`
-holds the node identity that `/data`'s vault belongs to. Losing one without the
-other can leave a vault that cannot authenticate to the tailnet.
+In the default deployment, `/data` and `/state` persist and belong together:
+`/state` holds the node identity that `/data`'s vault belongs to. Losing one
+without the other can leave a vault that cannot authenticate to the tailnet.
+If the platform wipes them, use S3 state sync and database backups instead:
+the volumes become disposable, but the bucket must persist.
 
 Named volumes inherit the image's ownership and modes on first use. Bind mounts
 do not:
@@ -151,7 +153,9 @@ More detail: [configuration](configuration.md), [state sync](state-sync.md),
 
 On a platform with temporary storage, use
 `TAILSCALE_STATE_FILE=mem:` and an `ephemeral=true` auth key, and configure S3
-for the data you want to keep. Set `SUPERVISOR_EPHEMERAL=true` (or use `mem:`)
+for the data you want to keep. Ephemeral operation is supported; persistent
+volumes are not required when state sync and database backups cover the data.
+Set `SUPERVISOR_EPHEMERAL=true` (or use `mem:`)
 so an explicitly configured but unusable S3 or backup setting refuses the boot
 instead of silently losing persistence.
 

@@ -19,8 +19,9 @@ a package manager.
 - A [Tailscale](https://tailscale.com) account with MagicDNS and HTTPS
   certificates enabled. Both are switches in the Tailscale admin console.
 - Podman or Docker.
-- Persistent storage for `/data` and `/state`; the run command creates two
-  named volumes.
+- Persistent storage for `/data` and `/state`, or an S3-compatible bucket for
+  [state sync](docs/state-sync.md) and database backups when the host wipes
+  them. The run command creates two named volumes.
 
 ## Quick start
 
