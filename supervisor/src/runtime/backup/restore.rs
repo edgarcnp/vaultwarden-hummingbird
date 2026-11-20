@@ -10,7 +10,7 @@
 //! manifest (legacy bucket) the name listing is used, and an unreadable
 //! manifest falls back to that listing loudly as recovery.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::config::{DB_RESTORE_BUDGET, DbBackupConfig};
 use crate::s3::{Expect, GetError, MAX_DB_OBJECT_BYTES};
@@ -54,9 +54,20 @@ pub enum RestoreOutcome {
 /// an older backup. "No backup found" is not a failure (a fresh deployment
 /// legitimately boots on an empty DB).
 pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -> RestoreOutcome {
+    restore_if_empty_with_budget(cfg, abort, DB_RESTORE_BUDGET)
+}
+
+fn restore_if_empty_with_budget(
+    cfg: &DbBackupConfig,
+    abort: impl Fn() -> bool + Sync,
+    budget: Duration,
+) -> RestoreOutcome {
     if !cfg.restore {
         return RestoreOutcome::Ready;
     }
+    let deadline = Instant::now() + budget;
+    let stop = abort;
+    let abort = || stop() || Instant::now() >= deadline;
     match is_empty(cfg) {
         Err(e) => {
             log::err(&format!(
@@ -87,8 +98,15 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
     let candidates = match candidates(&s3, cfg, &abort) {
         Ok(candidates) => candidates,
         Err(e) => {
-            if abort() {
+            if stop() {
                 return RestoreOutcome::Aborted;
+            }
+            if Instant::now() >= deadline {
+                log::err(
+                    "db restore: candidate listing budget exhausted; refusing to start \
+                     the vault",
+                );
+                return RestoreOutcome::Failed;
             }
             log::err(&format!(
                 "db restore: cannot list the bucket ({e}); an empty database \
@@ -106,11 +124,11 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
         return RestoreOutcome::Ready;
     }
     // A hostile or broken bucket can supply thousands of full-size invalid
-    // candidates; the state pull has a boot budget and this fallback needs
-    // one too.
-    let deadline = Instant::now() + DB_RESTORE_BUDGET;
+    // candidates, and one candidate can stall or run a long integrity check.
+    // The deadline is threaded through the download/integrity abort too, so
+    // the whole fallback is bounded, not just the gaps between candidates.
     for candidate in candidates {
-        if abort() {
+        if stop() {
             return RestoreOutcome::Aborted;
         }
         if Instant::now() >= deadline {
@@ -133,7 +151,7 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
                 ));
             }
             Attempt::Failed => {
-                if abort() {
+                if stop() {
                     return RestoreOutcome::Aborted;
                 }
                 log::err(&format!(
@@ -143,7 +161,13 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
                 ));
                 return RestoreOutcome::Failed;
             }
-            Attempt::Aborted => return RestoreOutcome::Aborted,
+            Attempt::Aborted => {
+                if stop() {
+                    return RestoreOutcome::Aborted;
+                }
+                log::err("db restore: candidate budget exhausted; refusing to start the vault");
+                return RestoreOutcome::Failed;
+            }
         }
     }
     log::err(
@@ -455,6 +479,81 @@ mod tests {
         cfg.db_path = db_path;
         adopt_lineage(&cfg, || false);
         assert!(lineage::read(&cfg.state_dir, &cfg.sidecar_key()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A candidate whose body stalls must stop at the restore budget, not
+    /// spend the full per-request timeout (or an integrity check) while the
+    /// boot waits.
+    #[test]
+    fn a_stalled_candidate_is_bounded_by_the_restore_budget() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!("vw-sup-rbudget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                if request.contains("/manifest") {
+                    let body = b"v1\n1 sqlite-1.sqlite3 10\n";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes());
+                    let _ = sock.write_all(body);
+                } else if request.contains("sqlite-1.sqlite3") {
+                    // Headers, one byte, a short stall, then another byte:
+                    // the client must notice the budget on the chunk after
+                    // the stall instead of waiting for the whole body.
+                    let _ = sock.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\
+                          Connection: close\r\n\r\nx",
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    let _ = sock.write_all(b"y");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                } else {
+                    let _ = sock.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    );
+                }
+            }
+        });
+
+        let sync = SyncConfig::new(
+            "r2:vw-restore-budget".into(),
+            "id".into(),
+            "secret".into(),
+            format!("http://{addr}"),
+            Duration::from_secs(60),
+        )
+        .expect("valid test remote");
+        let mut cfg = support::cfg_with_sync(sync);
+        cfg.restore = true;
+        cfg.db_path = dir.join("db.sqlite3").to_string_lossy().into_owned();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            restore_if_empty_with_budget(&cfg, || false, Duration::from_millis(20)),
+            RestoreOutcome::Failed
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(150),
+            "the budget must end the stalled candidate between chunks"
+        );
+        assert!(
+            !std::path::Path::new(&cfg.db_path).exists(),
+            "no partial import may be published"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
