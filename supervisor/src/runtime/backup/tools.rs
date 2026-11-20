@@ -75,15 +75,29 @@ pub(crate) fn list_objects(
     cfg: &DbBackupConfig,
     abort: &impl Fn() -> bool,
 ) -> anyhow::Result<Vec<(String, u64)>> {
+    Ok(list_objects_with_time(client, cfg, abort)?
+        .into_iter()
+        .map(|(name, size, _)| (name, size))
+        .collect())
+}
+
+/// The dump listing including the provider's last-modified stamp, for the
+/// orphan sweep. The name is still the primary identity; the stamp is only
+/// used by callers that need one.
+pub(crate) fn list_objects_with_time(
+    client: &Client,
+    cfg: &DbBackupConfig,
+    abort: &impl Fn() -> bool,
+) -> anyhow::Result<Vec<(String, u64, String)>> {
     let keys = client.list(&cfg.prefix(), abort)?;
     let bucket_prefix = cfg.prefix();
     let name_prefix = format!("{}-", cfg.db_label());
     let name_suffix = format!(".{}", cfg.db_ext());
-    let mut names: Vec<(String, u64)> = keys
+    let mut names: Vec<(String, u64, String)> = keys
         .into_iter()
         .filter_map(|listed| {
             dump_name(&listed.key, &bucket_prefix, &name_prefix, &name_suffix)
-                .map(|name| (name.to_string(), listed.size))
+                .map(|name| (name.to_string(), listed.size, listed.last_modified))
         })
         .collect();
     names.sort();

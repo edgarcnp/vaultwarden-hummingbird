@@ -56,6 +56,29 @@ pub(super) fn cfg() -> DbBackupConfig {
     )
 }
 
+/// A ListObjectsV2 page for the stateful fake, including every stored key.
+/// The real listing uses the request prefix; the fake ignores it and the
+/// client's dump filter drops non-dump keys.
+fn listing_xml(objects: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut out = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Name>vw-state</Name><Prefix></Prefix><KeyCount>{}</KeyCount>\
+         <MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>",
+        objects.len()
+    );
+    for (key, value) in objects {
+        out.push_str(&format!(
+            "<Contents><Key>{key}</Key>\
+             <LastModified>2026-01-01T00:00:00.000Z</LastModified>\
+             <Size>{}</Size></Contents>",
+            value.len()
+        ));
+    }
+    out.push_str("</ListBucketResult>");
+    out.into_bytes()
+}
+
 /// A minimal stateful S3 stand-in for the backup tick: objects are stored
 /// by key, HEAD reports their size, and every request is logged. Enough to
 /// exercise dump -> manifest -> prune without a real bucket.
@@ -143,7 +166,10 @@ impl FakeBucket {
                         store.lock().unwrap().insert(key, body);
                         (200, Vec::new())
                     }
-                    ("GET", true) => (200, crate::runtime::test_support::empty_listing()),
+                    ("GET", true) => {
+                        let objects = store.lock().unwrap();
+                        (200, listing_xml(&objects))
+                    }
                     ("GET", false) => match store.lock().unwrap().get(&key).cloned() {
                         Some(value) => (200, value),
                         None => (404, Vec::new()),

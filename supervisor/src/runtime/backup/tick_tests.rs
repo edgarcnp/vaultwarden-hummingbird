@@ -27,6 +27,62 @@ fn bucket_manifest(bucket: &FakeBucket) -> Manifest {
 }
 
 #[test]
+fn tick_removes_an_old_crash_orphan() {
+    let base = std::env::temp_dir().join(format!("vw-sup-orphan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("state")).unwrap();
+    let db = base.join("db.sqlite3");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('one');")
+        .unwrap();
+    drop(conn);
+
+    let bucket = FakeBucket::start("vw-state");
+    let sync = SyncConfig::new(
+        "r2:vw-state".into(),
+        "id".into(),
+        "secret".into(),
+        bucket.endpoint.clone(),
+        Duration::from_secs(60),
+    )
+    .expect("valid test remote");
+    let mut cfg = support::cfg_with_sync(sync);
+    cfg.db_path = db.to_string_lossy().into_owned();
+    cfg.staging = base.join("staging").to_string_lossy().into_owned();
+    cfg.state_dir = base.join("state").to_string_lossy().into_owned();
+
+    // An existing v2 manifest (the local lineage owns generation 1) and a
+    // dump object uploaded before a crash, never referenced by it.
+    bucket.objects.lock().unwrap().insert(
+        "db/manifest".into(),
+        b"v2\n1 sqlite-20261120T000000Z-aaaaaaaa.sqlite3 3 -\n".to_vec(),
+    );
+    super::lineage::write(&cfg.state_dir, &cfg.sidecar_key(), 1);
+    let orphan = "db/sqlite-20200101T000000Z-bbbbbbbb.sqlite3";
+    bucket
+        .objects
+        .lock()
+        .unwrap()
+        .insert(orphan.into(), b"old".to_vec());
+
+    tick(&cfg, || false);
+
+    assert!(
+        bucket.object(orphan).is_none(),
+        "the unreferenced old dump is removed"
+    );
+    let manifest = bucket_manifest(&bucket);
+    assert_eq!(manifest.latest(), 2, "the normal push still happened");
+    assert!(
+        manifest
+            .find_name("sqlite-20261120T000000Z-aaaaaaaa.sqlite3")
+            .is_some(),
+        "the manifest's own entry is not treated as an orphan"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn tick_pushes_prunes_and_heals_a_deleted_newest() {
     let base = std::env::temp_dir().join(format!("vw-sup-tick-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);

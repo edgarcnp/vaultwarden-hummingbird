@@ -7,20 +7,21 @@ use crate::util::make_private;
 
 use super::lineage::{self, Known, Verdict};
 use super::manifest::{Entry, Manifest};
-use super::prune::prune;
+use super::prune::{gc_orphans, prune};
 use super::staging::sweep_staging;
 use super::timestamp::timestamp;
 use super::tools::{client, list_objects, load_manifest, store_manifest};
 use super::unchanged;
 
 /// One periodic backup cycle: sweep staging, dump, push, publish the
-/// manifest, prune. Runs on the maintenance reactor thread; never fatal,
-/// aborting early on a stop request.
+/// manifest, prune, sweep old crash orphans. Runs on the maintenance
+/// reactor thread; never fatal, aborting early on a stop request.
 ///
 /// Ordering: the dump object is PUT before the manifest that names it, so
 /// a crash leaves at most an unreferenced object — never a manifest
-/// pointing at a missing one; and evicted objects are deleted only after
-/// the manifest that dropped them is published.
+/// pointing at a missing one; evicted objects are deleted only after the
+/// manifest that dropped them is published, and an unreferenced object
+/// older than a day is removed by the orphan sweep.
 ///
 /// Guards run before anything is staged: an empty database has nothing to
 /// lose (and backing one up would let a wiped /data poison the bucket),
@@ -59,10 +60,10 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
             return;
         }
     };
-    let mut manifest = match load_manifest(&s3, cfg, &abort) {
-        Ok(Some(manifest)) => manifest,
+    let (mut manifest, manifest_loaded) = match load_manifest(&s3, cfg, &abort) {
+        Ok(Some(manifest)) => (manifest, true),
         Ok(None) => match list_objects(&s3, cfg, &abort) {
-            Ok(listed) => Manifest::from_listing(&listed),
+            Ok(listed) => (Manifest::from_listing(&listed), false),
             Err(e) => {
                 log::err(&format!(
                     "db backup: skipped: cannot list the bucket ({e}); refusing to back up \
@@ -194,6 +195,9 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
                 "db backup: pushed {key} ({size} bytes, generation {generation})"
             ));
             prune(&s3, cfg, &evicted, &abort);
+            if manifest_loaded {
+                gc_orphans(&s3, cfg, &manifest, &evicted, &abort);
+            }
         }
         Err(e) => {
             // The dump we just pushed is now unreferenced: remove it so a
