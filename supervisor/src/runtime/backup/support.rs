@@ -143,21 +143,12 @@ impl FakeBucket {
                         store.lock().unwrap().insert(key, body);
                         (200, Vec::new())
                     }
-                    ("GET", true) => (
-                        200,
-                        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                          <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                          <Name>vw</Name><Prefix></Prefix><KeyCount>0</KeyCount>\
-                          <MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>"
-                            .to_vec(),
-                    ),
+                    ("GET", true) => (200, crate::runtime::test_support::empty_listing()),
                     ("GET", false) => match store.lock().unwrap().get(&key).cloned() {
                         Some(value) => (200, value),
                         None => (404, Vec::new()),
                     },
-                    ("HEAD", _) if missing.lock().unwrap().contains(&key) => {
-                        (404, Vec::new())
-                    }
+                    ("HEAD", _) if missing.lock().unwrap().contains(&key) => (404, Vec::new()),
                     ("HEAD", _) => match store.lock().unwrap().get(&key) {
                         Some(value) => {
                             head_length = value.len();
@@ -177,9 +168,8 @@ impl FakeBucket {
                                     continue;
                                 };
                                 if store.lock().unwrap().remove(name).is_some() {
-                                    deleted.push_str(&format!(
-                                        "<Deleted><Key>{name}</Key></Deleted>"
-                                    ));
+                                    deleted
+                                        .push_str(&format!("<Deleted><Key>{name}</Key></Deleted>"));
                                 }
                             }
                         }

@@ -394,12 +394,8 @@ mod tests {
                 } else {
                     (
                         "200 OK",
-                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                         <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                         <Name>stub</Name><Prefix></Prefix>\
-                         <KeyCount>0</KeyCount><MaxKeys>1000</MaxKeys>\
-                         <IsTruncated>false</IsTruncated></ListBucketResult>"
-                            .to_string(),
+                        String::from_utf8(crate::runtime::test_support::empty_listing())
+                            .expect("list XML is UTF-8"),
                     )
                 };
                 let head = format!(

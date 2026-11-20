@@ -15,6 +15,9 @@ mod process;
 mod services;
 mod sync;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use backup::{RestoreOutcome, adopt_lineage, restore_if_empty};
 pub use gate::{
     bind as gate_bind, describe as gate_describe, healthcheck as gate_healthcheck,

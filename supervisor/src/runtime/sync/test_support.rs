@@ -8,14 +8,7 @@ use std::sync::{Arc, Mutex};
 use crate::config::SyncConfig;
 
 /// The request path of a logged request line, query string stripped.
-pub(super) fn req_path(line: &str) -> &str {
-    line.split_whitespace()
-        .nth(1)
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("")
-}
+pub(super) use crate::runtime::test_support::{empty_listing, req_path};
 
 /// A minimal S3 stand-in: records every request line and answers from
 /// `route`. The client signs requests; the stub ignores signatures.
@@ -160,13 +153,4 @@ pub(super) fn sync_cfg(endpoint: &str) -> SyncConfig {
         Duration::from_secs(3600),
     )
     .expect("valid test remote")
-}
-
-/// An empty ListObjectsV2 page, as a provider would answer it.
-pub(super) fn empty_listing() -> Vec<u8> {
-    b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-      <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-      <Name>vw</Name><Prefix></Prefix><KeyCount>0</KeyCount>\
-      <MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>"
-        .to_vec()
 }
