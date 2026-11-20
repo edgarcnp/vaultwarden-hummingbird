@@ -3,6 +3,7 @@
 
 #![cfg(test)]
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::{DbBackupConfig, SyncConfig};
@@ -53,4 +54,139 @@ pub(super) fn cfg() -> DbBackupConfig {
         )
         .expect("valid test remote"),
     )
+}
+
+/// A minimal stateful S3 stand-in for the backup tick: objects are stored
+/// by key, HEAD reports their size, and every request is logged. Enough to
+/// exercise dump -> manifest -> prune without a real bucket.
+pub(super) struct FakeBucket {
+    pub(super) endpoint: String,
+    pub(super) requests: Arc<Mutex<Vec<(String, String)>>>,
+    pub(super) objects: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+}
+
+impl FakeBucket {
+    pub(super) fn object(&self, key: &str) -> Option<Vec<u8>> {
+        self.objects.lock().unwrap().get(key).cloned()
+    }
+
+    pub(super) fn start(bucket: &'static str) -> Self {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let objects = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let log = Arc::clone(&requests);
+        let store = Arc::clone(&objects);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let head_end = loop {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                    let n = s.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break 0;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                };
+                if head_end == 0 {
+                    continue;
+                }
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let line = head.lines().next().unwrap_or("").to_string();
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or("").to_string();
+                let target = parts.next().unwrap_or("");
+                let path = target.split('?').next().unwrap_or("");
+                let list = target.contains("list-type=2");
+                let bucket_prefix = format!("/{bucket}");
+                let key = path
+                    .strip_prefix(&bucket_prefix)
+                    .unwrap_or(path)
+                    .trim_start_matches('/')
+                    .to_string();
+                let content_length = head
+                    .lines()
+                    .find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                let mut body = buf[head_end..].to_vec();
+                while body.len() < content_length {
+                    let n = s.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&chunk[..n]);
+                }
+                body.truncate(content_length);
+                log.lock().unwrap().push((method.clone(), key.clone()));
+
+                let mut head_length = 0usize;
+                let (status, response) = match (method.as_str(), list) {
+                    ("PUT", _) => {
+                        store.lock().unwrap().insert(key, body);
+                        (200, Vec::new())
+                    }
+                    ("GET", true) => (
+                        200,
+                        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                          <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                          <Name>vw</Name><Prefix></Prefix><KeyCount>0</KeyCount>\
+                          <MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>"
+                            .to_vec(),
+                    ),
+                    ("GET", false) => match store.lock().unwrap().get(&key).cloned() {
+                        Some(value) => (200, value),
+                        None => (404, Vec::new()),
+                    },
+                    ("HEAD", _) => match store.lock().unwrap().get(&key) {
+                        Some(value) => {
+                            head_length = value.len();
+                            (200, Vec::new())
+                        }
+                        None => (404, Vec::new()),
+                    },
+                    ("DELETE", _) => {
+                        store.lock().unwrap().remove(&key);
+                        (204, Vec::new())
+                    }
+                    _ => (405, Vec::new()),
+                };
+                let reason = match status {
+                    200 => "OK",
+                    204 => "No Content",
+                    404 => "Not Found",
+                    405 => "Method Not Allowed",
+                    _ => "Status",
+                };
+                let length = if method == "HEAD" {
+                    head_length
+                } else {
+                    response.len()
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {length}\r\n\
+                     Connection: close\r\n\r\n"
+                );
+                let _ = s.write_all(head.as_bytes());
+                if method != "HEAD" && status != 204 {
+                    let _ = s.write_all(&response);
+                }
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            objects,
+        }
+    }
 }

@@ -36,6 +36,8 @@ mod sqlite;
 mod staging;
 #[cfg(test)]
 mod support;
+#[cfg(test)]
+mod tick_tests;
 mod timestamp;
 mod tools;
 mod unchanged;
