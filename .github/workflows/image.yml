@@ -55,3 +55,23 @@ jobs:
       # fail-closed chain. The same script contributors run locally.
       - name: Smoke test the image
         run: scripts/smoke-image.sh pr-check:ci
+
+  # Native arm64 build/smoke: the same runner class the tag publish uses.
+  # No qemu; the Containerfile compiles natively on the arm64 host.
+  image-arm64:
+    name: Build and smoke (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the container image
+        run: |
+          podman build \
+            --format docker \
+            --platform linux/arm64 \
+            --tag pr-check:ci \
+            .
+
+      - name: Smoke test the image
+        run: scripts/smoke-image.sh pr-check:ci
