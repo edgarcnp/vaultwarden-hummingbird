@@ -3,6 +3,9 @@ name = "supervisor"
 version = "1.1.10"
 edition = "2024"
 rust-version = "1.100"
+description = "PID 1 supervisor for the vaultwarden-hummingbird container"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/edgarcnp/vaultwarden-hummingbird"
 
 [dependencies]
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
