@@ -1,12 +1,16 @@
 //! SQLite dump: `VACUUM INTO` a fresh consistent copy, in-process
 //! (bundled rusqlite — no external tool). The source may be in WAL use by
-//! the vault; a busy DB fails the run cleanly (bounded busy timeout,
-//! never blocks the vault).
+//! the vault; the database and its sidecars are pinned into a private
+//! directory first, then SQLite opens the pinned link, so a path swap
+//! cannot redirect the dump. A busy DB fails the run cleanly (bounded busy
+//! timeout, never blocks the vault).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::util::log;
+
+use super::private::PrivateDb;
 
 /// `VACUUM INTO` a fresh consistent copy of the sqlite DB at `path` into
 /// `staged`. `abort` is honoured through `sqlite3_interrupt`, so a shutdown
@@ -15,15 +19,18 @@ pub(crate) fn dump(path: &str, staged: &str, abort: &(impl Fn() -> bool + Sync))
     if abort() {
         return false;
     }
-    // The DB path is vault-writable: refuse a FIFO/symlink before SQLite's
-    // own open can block on it.
-    if let Err(e) = crate::util::fs::open_regular(path) {
-        log::err(&format!("db backup: cannot open sqlite db: {e}"));
-        return false;
-    }
+    // The DB path is vault-writable: pin the database and its SQLite
+    // sidecars through a private directory before SQLite opens anything.
+    let source = match PrivateDb::open(path) {
+        Ok(source) => source,
+        Err(e) => {
+            log::err(&format!("db backup: cannot open sqlite db: {e}"));
+            return false;
+        }
+    };
     let conn = match rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        source.path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -127,6 +134,43 @@ mod tests {
             &|| false
         ));
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sqlite_dump_from_a_live_wal_connection_is_consistent() {
+        let dir = std::env::temp_dir().join(format!("vw-sup-bklive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.sqlite3");
+        let conn = rusqlite::Connection::open(&src).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('live');",
+        )
+        .unwrap();
+        // Keep the writer open: the row may still be only in the WAL when
+        // the dump runs, so the private view must pin and link the sidecars.
+        let staged = dir.join("dumped.sqlite3");
+        assert!(dump(
+            src.to_str().unwrap(),
+            staged.to_str().unwrap(),
+            &|| false
+        ));
+        let copy = rusqlite::Connection::open_with_flags(
+            &staged,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let v: String = copy
+            .query_row("SELECT v FROM t LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, "live");
+        let ok: String = copy
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ok, "ok");
+        drop(copy);
+        drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

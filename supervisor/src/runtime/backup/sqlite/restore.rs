@@ -1,7 +1,9 @@
 //! SQLite restore: emptiness gate (absent, or a valid database with no
 //! user tables) and import (integrity check on the staged copy, then a
 //! no-replace link into place). In-process via bundled rusqlite — no
-//! external tool.
+//! external tool. The live database is opened through a pinned private
+//! view, so a check-then-open race cannot turn a FIFO/symlink swap into a
+//! hang or a write outside the volume.
 //!
 //! The staged dump lives on the supervisor-only state volume while the
 //! live DB is on the vault's data volume, so they are different
@@ -17,6 +19,8 @@ use std::time::Duration;
 use crate::util::log;
 use crate::util::make_private;
 
+use super::private::PrivateDb;
+
 /// The live DB is shared with the vault through the data group: the vault
 /// runs a different uid and must be able to write its own database.
 const LIVE_MODE: u32 = 0o660;
@@ -26,16 +30,17 @@ const LIVE_MODE: u32 = 0o660;
 /// or truncated file). Corrupt or unreadable files are ambiguous (Err) —
 /// never silently treated as empty, never silently kept.
 pub(crate) fn is_empty(path: &str) -> anyhow::Result<bool> {
-    // SQLite opens the path itself; prove it is a regular file first so a
-    // FIFO left by the vault cannot block the open (O_NONBLOCK).
-    match crate::util::fs::open_regular(path) {
-        Ok(_) => {}
+    // Pin the database and its sidecars before SQLite opens anything: a
+    // FIFO/symlink planted after the check cannot be followed, and the
+    // resulting fd view cannot be redirected by a parent swap.
+    let source = match PrivateDb::open(path) {
+        Ok(source) => source,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(e) => return Err(anyhow::anyhow!("cannot inspect existing db: {e}")),
-    }
+    };
     let conn = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        source.path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|e| anyhow::anyhow!("cannot open existing db: {e}"))?;
     let count: i64 = conn
