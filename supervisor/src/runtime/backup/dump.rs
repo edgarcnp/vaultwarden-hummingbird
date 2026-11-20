@@ -1,7 +1,7 @@
 //! The periodic backup cycle (sweep -> dump -> push -> manifest -> prune).
 
 use crate::config::DbBackupConfig;
-use crate::s3::MAX_DB_OBJECT_BYTES;
+use crate::s3::{Client, MAX_DB_OBJECT_BYTES};
 use crate::util::log;
 use crate::util::make_private;
 
@@ -150,20 +150,22 @@ pub fn tick(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) {
         return;
     }
     // Skip a redundant upload only while this lineage still owns the
-    // newest generation: a stale or unproven lineage must push, so a gap
-    // is never skipped over. (An externally deleted newest object is not
-    // detected while the dump stays byte-identical; the next changed dump
-    // replaces it, and restore falls back to the next older entry until
-    // then.)
+    // newest generation, the bytes are unchanged, and the manifest's
+    // newest object is still present at the listed size. A missing object
+    // (external deletion or a lifecycle rule) forces a fresh push, so the
+    // bucket cannot silently lose its newest restorable backup.
     let Some(fingerprint) = unchanged::fingerprint(&staged) else {
         log::err(
-            "db backup: cannot hash the staged dump; nothing was uploaded, the next              tick retries",
+            "db backup: cannot hash the staged dump; nothing was uploaded, the next \
+             tick retries",
         );
         let _ = std::fs::remove_file(&staged);
         return;
     };
     let repeat = unchanged::is_repeat(&cfg.state_dir, &sidecar, &fingerprint);
-    if upload_is_redundant(known, manifest.latest(), repeat) {
+    if upload_is_redundant(known, manifest.latest(), repeat)
+        && newest_backup_present(&s3, cfg, &manifest, &abort)
+    {
         let _ = std::fs::remove_file(&staged);
         log::info("db backup: dump is identical to the newest backup; upload skipped");
         return;
@@ -228,19 +230,60 @@ fn resolve_known(recorded: Option<Known>, manifest: &Manifest) -> Option<u64> {
     }
 }
 
-/// Whether the fresh dump may skip its upload: only while this lineage
-/// owns the newest generation and the bytes are unchanged. A stale
-/// lineage, an unproven one, or an externally deleted newest object all
-/// force a push, so continuity heals instead of skipping over a gap.
+/// Whether the bytes are unchanged and this lineage owns the newest
+/// generation. The caller also checks the newest object is still present;
+/// a stale or unproven lineage forces a push instead of skipping a gap.
 fn upload_is_redundant(known: Option<u64>, latest: u64, dump_unchanged: bool) -> bool {
     latest > 0 && known == Some(latest) && dump_unchanged
 }
 
+/// Whether the manifest's newest generation still names a present object
+/// of the recorded size. A missing object, a size change, or a failed
+/// check forces the push (durability over bandwidth); this runs only when
+/// the dump would otherwise be skipped.
+fn newest_backup_present(
+    client: &Client,
+    cfg: &DbBackupConfig,
+    manifest: &Manifest,
+    abort: &impl Fn() -> bool,
+) -> bool {
+    let Some(entry) = manifest.newest_first().next() else {
+        return false;
+    };
+    let key = format!("{}{}", cfg.prefix(), entry.name);
+    match client.head(&key, abort) {
+        Ok(Some(size)) if size == entry.size => true,
+        Ok(Some(size)) => {
+            log::err(&format!(
+                "db backup: newest object {} is {size} bytes, manifest says {}; re-uploading",
+                log::sanitize(&key),
+                entry.size
+            ));
+            false
+        }
+        Ok(None) => {
+            log::err(&format!(
+                "db backup: newest object {} is missing; re-uploading",
+                log::sanitize(&key)
+            ));
+            false
+        }
+        Err(e) => {
+            log::err(&format!(
+                "db backup: cannot verify newest object {} ({e}); re-uploading",
+                log::sanitize(&key)
+            ));
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::time::Duration;
 
-    use crate::config::SyncConfig;
+    use crate::config::{DbBackupConfig, SYNC_TIMEOUT, SyncConfig};
 
     use super::super::support;
     use super::*;
@@ -344,5 +387,84 @@ mod tests {
             None
         );
         assert_eq!(resolve_known(None, &manifest), None);
+    }
+
+    /// A canned HEAD endpoint: one status and an optional Content-Length.
+    fn fake_head(status: &'static str, size: Option<u64>) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let length = size
+                    .map(|size| format!("Content-Length: {size}\r\n"))
+                    .unwrap_or_default();
+                let response = format!("HTTP/1.1 {status}\r\n{length}Connection: close\r\n\r\n");
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    fn head_cfg(addr: std::net::SocketAddr) -> DbBackupConfig {
+        let sync = SyncConfig::new(
+            "r2:vw-state".into(),
+            "id".into(),
+            "secret".into(),
+            format!("http://{addr}"),
+            Duration::from_secs(60),
+        )
+        .expect("valid test remote");
+        support::cfg_with_sync(sync)
+    }
+
+    fn head_manifest(size: u64) -> Manifest {
+        let mut manifest = Manifest::default();
+        manifest.push(Entry {
+            generation: 1,
+            name: "sqlite-1.sqlite3".into(),
+            size,
+            sha256: None,
+        });
+        manifest
+    }
+
+    fn head_client(cfg: &DbBackupConfig) -> Client {
+        Client::connect(&cfg.sync.target, SYNC_TIMEOUT).expect("test client")
+    }
+
+    #[test]
+    fn newest_backup_present_accepts_a_matching_size() {
+        let cfg = head_cfg(fake_head("200 OK", Some(10)));
+        assert!(newest_backup_present(
+            &head_client(&cfg),
+            &cfg,
+            &head_manifest(10),
+            &|| false
+        ));
+    }
+
+    #[test]
+    fn newest_backup_present_refuses_a_missing_object() {
+        let cfg = head_cfg(fake_head("404 Not Found", None));
+        assert!(!newest_backup_present(
+            &head_client(&cfg),
+            &cfg,
+            &head_manifest(10),
+            &|| false
+        ));
+    }
+
+    #[test]
+    fn newest_backup_present_refuses_a_size_change() {
+        let cfg = head_cfg(fake_head("200 OK", Some(9)));
+        assert!(!newest_backup_present(
+            &head_client(&cfg),
+            &cfg,
+            &head_manifest(10),
+            &|| false
+        ));
     }
 }

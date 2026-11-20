@@ -497,6 +497,39 @@ impl Client {
         Ok(Some(text))
     }
 
+    /// Object existence and size via `HEAD`; `Ok(None)` = 404. A response
+    /// without a usable Content-Length is malformed, never a zero-byte
+    /// object.
+    pub fn head(&self, key: &str, abort: impl Fn() -> bool) -> anyhow::Result<Option<u64>> {
+        if abort() {
+            bail!("aborted");
+        }
+        let response = match retrying(|| {
+            if abort() {
+                return Err(ureq::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "aborted",
+                )));
+            }
+            let url = self
+                .bucket
+                .head_object(Some(&self.credentials), key)
+                .sign(SIGN_EXPIRE);
+            self.agent.head(url.as_str()).call()
+        }) {
+            Ok(response) => checked("head", key, response)?,
+            Err(ureq::Error::StatusCode(404)) => return Ok(None),
+            Err(e) => return Err(anyhow!("head of {key} failed: {}", http_err(&e))),
+        };
+        let size = response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| anyhow!("head of {key}: response has no usable Content-Length"))?;
+        Ok(Some(size))
+    }
+
     /// Download `key` into `path` atomically. Bytes land in a sibling temp
     /// file (same filesystem) bounded by [`Expect`], and only a transfer
     /// that meets every expectation is renamed into place: a failed,

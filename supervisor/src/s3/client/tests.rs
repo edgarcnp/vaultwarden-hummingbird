@@ -3,6 +3,7 @@
 
 use super::super::transport::*;
 mod fifo;
+mod head;
 
 use super::*;
 use std::time::Duration;
