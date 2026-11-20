@@ -17,21 +17,31 @@ const CACHE_NAME: &str = ".sync-cache";
 /// A corrupt/hostile cache must not exhaust PID 1's memory.
 const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The cache file's path under the supervisor state root.
 fn cache_path(root: &Path) -> PathBuf {
     root.join(CACHE_NAME)
 }
 
+/// One remembered file identity: its content hash plus the metadata that
+/// validates it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cached {
+    /// File length in bytes; a change invalidates the entry.
     size: u64,
+    /// Modification time in nanoseconds; 0 means the clock was unavailable.
     mtime: u64,
+    /// Inode change time in nanoseconds; 0 means the clock was unavailable.
     ctime: u64,
+    /// Lowercase-hex SHA-256 of the file content.
     sha256: String,
 }
 
+/// The hash hint loaded once per push and rewritten when an entry changed.
 #[derive(Default)]
 pub(super) struct Cache {
+    /// Remembered hashes keyed by bucket-relative path.
     entries: BTreeMap<String, Cached>,
+    /// Whether [`Cache::record`] changed an entry since the last save.
     dirty: bool,
 }
 
@@ -46,6 +56,7 @@ impl Cache {
             .unwrap_or_default()
     }
 
+    /// Parse the line-oriented cache text, skipping every malformed line.
     fn parse(text: &str) -> Self {
         let mut cache = Self::default();
         let mut lines = text.lines();
@@ -99,6 +110,7 @@ impl Cache {
             .map(|cached| cached.sha256.as_str())
     }
 
+    /// Remember a freshly computed hash; an identical entry records nothing.
     pub(super) fn record(&mut self, rel: &str, size: u64, mtime: u64, ctime: u64, sha256: String) {
         let entry = Cached {
             size,
@@ -136,6 +148,7 @@ impl Cache {
     }
 }
 
+/// Hash-cache lookup, dirty tracking, and malformed-input tolerance.
 #[cfg(test)]
 mod tests {
     use super::*;

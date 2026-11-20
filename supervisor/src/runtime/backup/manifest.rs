@@ -29,16 +29,21 @@ use anyhow::{bail, ensure};
 /// spare.
 pub(super) const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 
+/// One dump object recorded in the manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Entry {
+    /// Monotonic generation: strictly ascending, never reused, never 0.
     pub generation: u64,
+    /// Bare object name inside the backup prefix.
     pub name: String,
+    /// Object size in bytes, checked against the download.
     pub size: u64,
     /// Lowercase hex SHA-256; `None` for a v1/legacy entry whose content
     /// hash was never recorded.
     pub sha256: Option<String>,
 }
 
+/// The parsed manifest: the authoritative set and order of the dumps.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Manifest {
     /// Ascending generation order; the last entry is the current backup.
@@ -46,6 +51,8 @@ pub(super) struct Manifest {
 }
 
 impl Manifest {
+    /// Parse `v1`/`v2` text, rejecting a bad header, malformed fields, a
+    /// duplicate name, or generations that do not strictly ascend.
     pub(super) fn parse(text: &str) -> anyhow::Result<Self> {
         let mut lines = text.lines();
         let version = match lines.next() {
@@ -116,6 +123,7 @@ impl Manifest {
         Ok(Self { entries })
     }
 
+    /// Render as `v2` text; an unknown content hash prints as `-`.
     pub(super) fn render(&self) -> String {
         let mut out = String::from("v2\n");
         for entry in &self.entries {
@@ -130,6 +138,7 @@ impl Manifest {
         out
     }
 
+    /// Whether no generation is recorded.
     pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -152,6 +161,7 @@ impl Manifest {
         self.entries.iter().rev()
     }
 
+    /// Look up an entry by its bare object name.
     pub(super) fn find_name(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.name == name)
     }
@@ -203,10 +213,12 @@ pub(super) fn valid_name(name: &str) -> bool {
         && !name.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
+/// Parser, rendering, eviction, and legacy-listing rules.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build an entry for the tests below.
     fn entry(generation: u64, name: &str, size: u64, sha256: Option<&str>) -> Entry {
         Entry {
             generation,

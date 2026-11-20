@@ -24,6 +24,9 @@ fn ca_path_isolated(path: &str) -> bool {
         && !crate::util::fs::under_root(link, path)
 }
 
+/// Resolve `SUPERVISOR_S3_*` into a validated sync config. Returns `None` when
+/// the remote or credentials are missing, or any option is unusable; sync
+/// degrades disabled rather than blocking the boot.
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
     let remote = knob("SUPERVISOR_S3_REMOTE", "");
     let key_id = knob("SUPERVISOR_S3_ACCESS_KEY_ID", "");
@@ -137,12 +140,15 @@ pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncCo
 
 #[cfg(test)]
 mod tests {
+    //! Sync enablement, transport options, and CA isolation.
+
     use std::collections::BTreeMap;
     use std::time::Duration;
 
     use super::*;
 
-    /// resolve_sync over an explicit knob map (no process env touched).
+    /// Build a sync config from an explicit knob map; the process env is
+    /// never touched.
     fn resolved(vars: &[(&str, &str)]) -> Option<SyncConfig> {
         let map: BTreeMap<String, String> = vars
             .iter()
@@ -156,6 +162,7 @@ mod tests {
         })
     }
 
+    /// Minimal valid S3 configuration used by the option test cases.
     const BASE: &[(&str, &str)] = &[
         ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
         ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),

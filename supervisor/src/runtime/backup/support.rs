@@ -1,5 +1,6 @@
-//! Shared test fixtures for the backup modules (config builders and
-//! unique staging dirs; tests run concurrently on one process).
+//! Shared test fixtures for the backup modules: config builders, unique
+//! scratch and staging dirs, and the stateful fake bucket. Tests run
+//! concurrently in one process.
 
 #![cfg(test)]
 
@@ -12,6 +13,7 @@ use crate::config::{DbBackupConfig, SyncConfig};
 /// in it and the staging dir below it.
 fn next_base() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU32, Ordering};
+    /// Distinguishes each scratch base within the process.
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("vw-sup-stage-{}-{n}", std::process::id()));
@@ -83,8 +85,11 @@ fn listing_xml(objects: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<u8>
 /// by key, HEAD reports their size, and every request is logged. Enough to
 /// exercise dump -> manifest -> prune without a real bucket.
 pub(super) struct FakeBucket {
+    /// Base URL to hand a `SyncConfig`.
     pub(super) endpoint: String,
+    /// Every `(method, key)` seen, in order, for ordering assertions.
     pub(super) requests: Arc<Mutex<Vec<(String, String)>>>,
+    /// Stored object bytes by key.
     pub(super) objects: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
     /// Keys whose HEAD reports 404 while the object remains stored; used
     /// to exercise the external-deletion repair without losing the object
@@ -93,10 +98,13 @@ pub(super) struct FakeBucket {
 }
 
 impl FakeBucket {
+    /// The stored bytes for `key`, if the bucket holds it.
     pub(super) fn object(&self, key: &str) -> Option<Vec<u8>> {
         self.objects.lock().unwrap().get(key).cloned()
     }
 
+    /// Start the fake on a random loopback port; it serves until the test
+    /// process exits.
     pub(super) fn start(bucket: &'static str) -> Self {
         use std::io::{Read, Write};
         use std::net::TcpListener;

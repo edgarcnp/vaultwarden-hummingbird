@@ -1,7 +1,8 @@
-//! Child primitives: spawning and group signaling, plus the shared
-//! timing constants of the reap/watch/run loops and the [`Pid`] alias.
-//! Spawning registers the child with the reaper hub ([`super::reaper`]),
-//! which owns every `waitpid` in the process; waiters only read the
+//! Child primitives: spawning and group signaling, plus the shared timing
+//! constants of the reap/watch/run loops and the [`Pid`] alias. Every spawn
+//! puts the child in its own process group, drops capabilities, sets
+//! `no_new_privs`, and registers the child with the single-reaper hub
+//! ([`super::reaper`]), which owns every `waitpid`; waiters only read the
 //! delivered status.
 
 use std::os::unix::process::CommandExt;
@@ -49,10 +50,9 @@ pub fn spawn(cmd: &mut Command) -> Option<Handle> {
 /// the child. Userspace networking needs none.
 pub const TUN_CAPS: &[u32] = &[12, 13]; // CAP_NET_ADMIN, CAP_NET_RAW
 
-/// [`spawn`] with an explicit capability allowlist for the child. Every
-/// other capability is dropped; the allowlist survives `exec` through the
-/// ambient set. This is for `tailscaled` in TUN mode only: the vault and
-/// every bounded CLI child use [`spawn`] and get no capabilities.
+/// [`spawn`] with a capability allowlist that survives `exec` through the
+/// ambient set; every other capability is dropped. Reserved for `tailscaled`
+/// in TUN mode — the vault and bounded CLI children get none.
 pub fn spawn_with_caps(cmd: &mut Command, keep: &'static [u32]) -> Option<Handle> {
     // SAFETY: pre_exec runs between fork and exec; the closure allocates
     // nothing and only calls capset/prctl.
@@ -65,19 +65,9 @@ pub fn spawn_with_caps(cmd: &mut Command, keep: &'static [u32]) -> Option<Handle
     spawn_inner(cmd)
 }
 
-/// Spawn `cmd` as the leader of its own process group, registered with
-/// the reaper hub. Doing the grouping in the child (`process_group(0)`)
-/// closes the race where the child execs before the parent could
-/// `setpgid` it.
-///
-/// The registry lock is held across `spawn(2)` + registration: a child
-/// that exits instantly cannot be reaped-and-unmatched by the reaper
-/// thread, because every delivery takes the same lock after the insert.
-///
-/// The std `Child` handle is dropped on purpose: nobody but the reaper
-/// hub ever reaps. Failure (spawn error, or `pidfd_open` refusing on a
-/// pre-5.3 kernel) returns `None` — a child nobody can supervise is a
-/// child nobody may run.
+/// Spawn `cmd` in its own process group and register it with the reaper hub
+/// while the registry lock is held across spawn + registration, closing the
+/// reap race. `None` on spawn or pidfd failure: an unsupervisable child never runs.
 fn spawn_inner(cmd: &mut Command) -> Option<Handle> {
     cmd.process_group(0);
     if !reaper::start() {
@@ -115,7 +105,9 @@ fn spawn_inner(cmd: &mut Command) -> Option<Handle> {
 /// The identity and file-creation mask a child runs with.
 #[derive(Clone, Copy, Debug)]
 pub struct Credentials {
+    /// UID the child runs as; the vault and tailscaled each get their own.
     pub uid: u32,
+    /// Primary GID the child runs as.
     pub gid: u32,
     /// Supplementary groups the child keeps. The vault gets none; the
     /// tailscaled children keep the `tailscale` group for the state tree
@@ -126,19 +118,9 @@ pub struct Credentials {
     pub umask: u32,
 }
 
-/// Run a child a different UID. The supervisor holds CAP_SETUID/CAP_SETGID
-/// and the vault is the only child that needs this: it must not share an
-/// identity with the process holding the tailscale state, LocalAPI socket,
-/// and secrets.
-///
-/// The credential change happens in the forked child before `exec`, after
-/// `setgroups([])` (a leftover supplementary group would survive the UID
-/// change). `setresgid`/`setresuid` set all three ids; with the supervisor
-/// as the caller, no saved uid remains to regain the old identity. The
-/// capabilities that allowed that transition are then dropped explicitly
-/// (`setresuid` alone does not clear them), and `PR_SET_NO_NEW_PRIVS`
-/// makes the restriction irreversible across `exec`. The closure only
-/// makes async-signal-safe syscalls.
+/// Run a child under the given identity: supplementary groups, all three
+/// GIDs/UIDs, dropped capabilities, `no_new_privs`, and umask are applied in
+/// the forked child before `exec`. Used for the vault and userspace tailscaled.
 pub fn spawn_as(cmd: &mut Command, creds: Credentials) -> Option<Handle> {
     spawn_as_with_caps(cmd, creds, &[])
 }
@@ -204,14 +186,9 @@ pub(super) fn signal_group(pid: Pid, sig: Signal) -> bool {
     killpg(NixPid::from_raw(pid), sig).is_ok() || kill(NixPid::from_raw(pid), sig).is_ok()
 }
 
-/// Signal a still-running child through its handle. Registration in the
-/// reaper's registry is the liveness proof: the targeted `waitpid` and
-/// the entry's removal happen under the registry lock, so while the entry
-/// is present the child has not been reaped and its pid cannot have been
-/// recycled. The signal goes out under that same lock, closing the window
-/// between the reaper's waitpid and its status delivery. Returns false
-/// for a reaped child (and for the [`signal_group`] refusals), true when
-/// a signal was delivered.
+/// Signal a still-running child through its handle. Registration is the
+/// liveness proof, so a reaped child (whose pid may be recycled) is refused.
+/// Returns false for a reaped child and the [`signal_group`] refusals.
 pub fn signal_child(child: &Handle, sig: Signal) -> bool {
     let reg = reaper::registry_lock();
     if !reg.contains_key(&child.pid) {
@@ -226,19 +203,26 @@ pub fn signal_child(child: &Handle, sig: Signal) -> bool {
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct CapHeader {
+    /// Capability API version, [`CAP_VERSION_3`].
     version: u32,
+    /// Target pid; 0 means the calling process.
     pid: i32,
 }
 
+/// One 32-bit capability word: the effective, permitted, and inheritable sets.
 #[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct CapData {
+    /// Capabilities currently active.
     effective: u32,
+    /// Capabilities that may be raised into the effective set.
     permitted: u32,
+    /// Capabilities preserved across `exec` for file capabilities.
     inheritable: u32,
 }
 
+/// Linux capability API version 3 (`_LINUX_CAPABILITY_VERSION_3`).
 #[cfg(target_os = "linux")]
 const CAP_VERSION_3: u32 = 0x2008_0522;
 
@@ -272,8 +256,11 @@ pub fn caps_are_empty() -> std::io::Result<bool> {
 /// syscalls, no allocation.
 #[cfg(target_os = "linux")]
 fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
+    /// `prctl` option selecting the ambient capability set.
     const PR_CAP_AMBIENT: libc::c_int = 47;
+    /// `prctl` command raising one capability into the ambient set.
     const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
+    /// `prctl` command clearing every ambient capability.
     const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
 
     let header = CapHeader {
@@ -335,11 +322,14 @@ fn restrict_caps(keep: &[u32]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Non-Linux stub: there is no capability API to inspect, so the probe passes.
 #[cfg(not(target_os = "linux"))]
 pub fn caps_are_empty() -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Non-Linux stub: without a pidfd no child survives supervision, so caps
+/// are moot.
 #[cfg(not(target_os = "linux"))]
 fn restrict_caps(_keep: &[u32]) -> std::io::Result<()> {
     Ok(())
@@ -347,6 +337,8 @@ fn restrict_caps(_keep: &[u32]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    //! Spawn and credential tests; the cross-UID transition itself needs the
+    //! supervisor's capabilities and is covered by the image smoke test.
     use std::time::Duration;
 
     use super::super::reap::{Gone, exit_code, reap_until_gone};

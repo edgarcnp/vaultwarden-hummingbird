@@ -1,4 +1,6 @@
-//! Config resolution: process env + optional supervisor-owned dotenv file.
+//! Resolves the supervisor knobs and the vaultwarden child env from the
+//! process environment and the strict dotenv file. [`Config`] is the single
+//! resolved snapshot; `knobs` holds the parsers, `schema` the key inventory.
 
 mod knobs;
 mod merge;

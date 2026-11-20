@@ -35,28 +35,35 @@ use crate::util::log;
 /// Delivered wait status of one registered child. Written once (by the
 /// reaper), read by any holder of the [`Handle`].
 pub(crate) struct Waiter {
+    /// Delivered status; `None` until the reaper writes it exactly once.
     slot: Mutex<Option<WaitStatus>>,
+    /// Signals slot readers when a status is delivered.
     cv: Condvar,
 }
 
-/// Registered handle to a spawned child: its pid (for group signaling)
-/// and the slot its exit status is delivered into. Cloneable; the slot
-/// survives reaping, so late readers (teardown after the watch loop saw
-/// the exit) still find the status.
+/// Registered handle to a spawned child: its pid (for group signaling) and
+/// the slot its exit status is delivered into. Cloneable, and the slot
+/// survives reaping, so late readers still find the status.
 #[derive(Clone)]
 pub struct Handle {
+    /// The child's pid, which is also its process-group id.
     pub pid: Pid,
+    /// Shared delivery slot; the slot outlives the registry entry.
     waiter: Arc<Waiter>,
 }
 
 /// Registered child entry: its pidfd (for the poll) and the waiter slot
 /// its status is delivered into.
 pub(crate) struct Entry {
+    /// Polled by the reaper to detect the child's exit promptly.
     pub(crate) pidfd: Arc<PidFd>,
+    /// Weak so the registry never keeps a dropped waiter alive.
     pub(crate) waiter: Weak<Waiter>,
 }
 
+/// The process-global pid -> entry registry, created on first use.
 fn registry() -> &'static Mutex<HashMap<Pid, Entry>> {
+    /// Lazily initialized registry behind [`registry`].
     static REG: OnceLock<Mutex<HashMap<Pid, Entry>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -86,6 +93,7 @@ pub(crate) fn insert_locked(reg: &mut HashMap<Pid, Entry>, pid: Pid, pidfd: Arc<
 }
 
 impl Waiter {
+    /// Publish `status` once and wake every waiter blocked in [`Handle::wait`].
     fn deliver(&self, status: WaitStatus) {
         *crate::util::lock_ignoring_poison(&self.slot) = Some(status);
         self.cv.notify_all();
@@ -128,6 +136,7 @@ impl Handle {
 /// Returns false when the OS cannot create the thread: a child nobody can
 /// reap must not be started (fail closed).
 pub(crate) fn start() -> bool {
+    /// Cached result of the one-time reaper-thread start attempt.
     static START: OnceLock<bool> = OnceLock::new();
     *START.get_or_init(
         || match std::thread::Builder::new().name("reaper".into()).spawn(run) {
@@ -215,6 +224,8 @@ fn deliver_waiter(pid: Pid, status: WaitStatus, waiter: Option<Weak<Waiter>>) {
     }
 }
 
+/// The reaper thread body: tick forever, pausing only when no child is
+/// registered (an idle WNOHANG sweep would otherwise spin).
 fn run() {
     loop {
         set_idle(false);
@@ -240,7 +251,9 @@ fn set_idle(idle: bool) {
     }
 }
 
+/// Guarded idle flag: false during a reaper pass, true after a clean pass.
 static IDLE: Mutex<bool> = Mutex::new(true);
+/// Signals [`quiesce`] waiters when [`IDLE`] flips to true.
 static IDLE_CV: Condvar = Condvar::new();
 
 /// Wait for one full clean reaper pass (nothing ready, no strays) —

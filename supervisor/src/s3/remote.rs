@@ -12,15 +12,17 @@ pub enum BucketStyle {
     VirtualHosted,
 }
 
-/// One S3 remote. Secrets ride in the struct only: never argv, never
-/// logs.
+/// One S3 remote. Carries the access key secret, so it must never be
+/// formatted, logged, or placed on a command line.
 #[derive(Clone)]
 pub struct RemoteSpec {
-    /// S3 bucket name
+    /// Bucket name, with no path component.
     pub bucket: String,
-    /// bucket-relative key prefix: empty, or ending in `/`
+    /// Bucket-relative key prefix: empty, or ending in `/`.
     pub prefix: String,
+    /// SigV4 access key ID.
     pub key_id: String,
+    /// SigV4 secret key; never log or render it.
     pub key_secret: String,
     /// S3-compatible endpoint; required, no provider is a default. Parsed
     /// once at config resolution and reused by every request.
@@ -29,9 +31,8 @@ pub struct RemoteSpec {
     /// SigV4 credentials would otherwise cross the network in clear text.
     pub allow_http: bool,
     /// Optional PEM CA bundle replacing the built-in roots (private S3).
-    /// Config resolution and the transport both require it under the
-    /// supervisor-only state root, and the transport never follows a
-    /// symlink or opens a non-regular file.
+    /// Must sit under the supervisor-only state root; the transport refuses a
+    /// symlink or non-regular file.
     pub ca_file: Option<String>,
     /// SigV4 region; `None` derives it from an AWS endpoint (`auto`
     /// elsewhere).

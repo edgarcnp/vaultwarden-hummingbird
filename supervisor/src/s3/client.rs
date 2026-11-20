@@ -11,23 +11,20 @@
 //! `.vw-part` suffix, leaving user files that happen to end in `.part`
 //! untouched.
 
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
-use nix::fcntl::{AtFlags, OFlag, openat, renameat};
-use nix::sys::stat::{Mode, fstatat};
-use nix::unistd::{UnlinkatFlags, unlinkat};
 use rusty_s3::actions::{CreateMultipartUpload, DeleteObjectsResponse, ObjectIdentifier};
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 
 use super::remote::{BucketStyle, RemoteSpec};
 use super::transport::{
     AbortReader, BODY_TIMEOUT, SIGN_EXPIRE, ca_certs, checked, http_err, loopback,
-    normalize_endpoint, read_body_capped, region_for, retryable, retrying,
+    normalize_endpoint, read_body_capped, region_for, retrying,
 };
+
+mod download;
 
 /// Files at or above this size upload in parts: the body budget is then
 /// paid per part, so a large attachment is no longer unsyncable on a slow
@@ -49,97 +46,6 @@ const MULTIPART_XML_CAP: u64 = 64 * 1024;
 /// partial transfer resumes with a Range request instead of restarting.
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
 
-/// A download target anchored on the directory descriptor, so the temp
-/// creation, hash, rename, and cleanup cannot be redirected by a path swap
-/// in the parent after the check.
-struct Download {
-    dir: std::fs::File,
-    name: String,
-    display: String,
-}
-
-impl Download {
-    fn path(path: &str) -> std::io::Result<Self> {
-        let path = Path::new(path);
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
-        })?;
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
-            })?;
-        Ok(Self {
-            dir: crate::util::fs::open_dir(parent)?,
-            name: name.to_string(),
-            display: path.to_string_lossy().into_owned(),
-        })
-    }
-
-    fn under(root: &Path, rel: &str) -> std::io::Result<Self> {
-        let path = Path::new(rel);
-        let parent = path.parent().unwrap_or_else(|| Path::new(""));
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
-            })?;
-        Ok(Self {
-            dir: crate::util::fs::open_dir_under(root, parent)?,
-            name: name.to_string(),
-            display: root.join(path).to_string_lossy().into_owned(),
-        })
-    }
-
-    fn temp(&self) -> String {
-        format!("{}{}", self.name, crate::util::fs::PART_SUFFIX)
-    }
-
-    fn temp_len(&self, temp: &str, expected: Option<u64>) -> u64 {
-        let len = fstatat(&self.dir, temp, AtFlags::AT_SYMLINK_NOFOLLOW)
-            .ok()
-            .and_then(|stat| u64::try_from(stat.st_size).ok())
-            .unwrap_or(0);
-        if expected.is_some_and(|expected| len >= expected) {
-            0
-        } else {
-            len
-        }
-    }
-
-    fn open_temp(&self, temp: &str, start: u64, mode: u32) -> std::io::Result<std::fs::File> {
-        let mut flags = OFlag::O_WRONLY
-            | OFlag::O_CREAT
-            | OFlag::O_NOFOLLOW
-            | OFlag::O_NONBLOCK
-            | OFlag::O_CLOEXEC;
-        if start == 0 {
-            flags |= OFlag::O_TRUNC;
-        } else {
-            flags |= OFlag::O_APPEND;
-        }
-        let fd = openat(&self.dir, temp, flags, Mode::from_bits_truncate(mode))?;
-        Ok(std::fs::File::from(fd))
-    }
-
-    fn hash_temp(&self, temp: &str) -> std::io::Result<String> {
-        let fd = openat(
-            &self.dir,
-            temp,
-            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-            Mode::empty(),
-        )?;
-        let mut file = std::fs::File::from(fd);
-        crate::util::hash::sha256_reader(&mut file)
-    }
-
-    fn remove_temp(&self, temp: &str) {
-        let _ = unlinkat(&self.dir, temp, UnlinkatFlags::NoRemoveDir);
-    }
-}
-
 /// Absolute download cap for one synced object. Upstream clients cap
 /// Bitwarden attachments at 100 MB by default; 1 GiB leaves generous
 /// headroom while a rogue bucket still cannot fill the data volume.
@@ -155,9 +61,8 @@ const MAX_DELETE_BATCH: usize = 1000;
 const DELETE_RESPONSE_CAP: u64 = 1024 * 1024;
 
 /// Listing bound. The manifest caps at ~40k files; three content-addressed
-/// versions per file plus the legacy keys fit comfortably under 100k. A
-/// larger prefix is treated as failure rather than materializing an
-/// unbounded vector in PID 1.
+/// versions each plus legacy keys fit under 100k, and a larger prefix is a
+/// failure rather than an unbounded vector in PID 1.
 const MAX_LIST_KEYS: usize = 100_000;
 
 /// Page bound for one listing. At 1000 keys/page this covers the key cap
@@ -214,17 +119,18 @@ pub struct Expect<'a> {
     pub sha256: Option<&'a str>,
     /// Absolute cap regardless of the expectations above.
     pub max_bytes: u64,
-    /// Exact mode of the published file. Supervisor-owned and
-    /// group-writable (0660): the identity/cert tree is writable by
-    /// tailscaled's group, vault data by the vault's group; the owning
-    /// service reads through that group, never world access.
+    /// Exact mode of the published file: supervisor-owned and group-writable
+    /// (0660) for the owning service, which reads through that group, never
+    /// world access.
     pub mode: u32,
 }
 
 /// One listed object: its full key and size. The size feeds the state
 /// sync's unchanged-skip; backup consumers only need the key.
 pub struct Listed {
+    /// Full object key, prefix included.
     pub key: String,
+    /// Object size in bytes, as the listing reported it.
     pub size: u64,
     /// The object's last-modified stamp (ISO-8601 as the provider sent it).
     /// Used only to order multiple versions of the same file during the
@@ -235,17 +141,18 @@ pub struct Listed {
 /// One S3 client over a bucket. Cheap to build per run (an endpoint parse
 /// and an agent); every operation takes its own `abort`.
 pub struct Client {
+    /// Signed bucket handle: endpoint, style, name, and region.
     bucket: Bucket,
+    /// Long-lived SigV4 credentials.
     credentials: Credentials,
+    /// HTTP agent with per-phase timeouts and redirects disabled.
     agent: ureq::Agent,
 }
 
 impl Client {
-    /// Connect to the remote. `timeout` bounds each control phase (DNS,
-    /// connect, request, response headers); transfer bodies get
-    /// [`BODY_TIMEOUT`]. `Err` = unusable configuration (missing or bad
-    /// endpoint URL) — callers treat it as a failed operation, per each
-    /// caller's own failure semantics.
+    /// Connect to the remote. `timeout` bounds each control phase; transfer
+    /// bodies get [`BODY_TIMEOUT`]. `Err` is unusable configuration: a bad
+    /// scheme, plaintext HTTP to a remote host without opt-in, or a bad CA.
     pub fn connect(spec: &RemoteSpec, timeout: Duration) -> anyhow::Result<Self> {
         let endpoint = spec.endpoint.clone();
         if !matches!(endpoint.scheme(), "http" | "https") {
@@ -300,12 +207,9 @@ impl Client {
         })
     }
 
-    /// Upload a file as `key`. Content-Length is set explicitly: S3
-    /// rejects chunked PUT bodies. Files at or above
-    /// [`MULTIPART_THRESHOLD`] go through the multipart path, so each part
-    /// gets its own body budget. The path is opened once, without following
-    /// a final symlink; the same handle is hashed and uploaded by callers
-    /// that need content identity.
+    /// Upload `path` as `key`; the caller owns the key, so content addressing
+    /// is its choice. Sets Content-Length (S3 rejects chunked PUT bodies) and
+    /// goes multipart at [`MULTIPART_THRESHOLD`]. Never follows a final symlink.
     pub fn put(&self, key: &str, path: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");
@@ -319,9 +223,9 @@ impl Client {
         self.put_file(key, &mut file, size, abort)
     }
 
-    /// Upload an already-open file. The caller owns the handle for hashing
-    /// and for the post-upload stat check, so a path swap cannot change the
-    /// inode between the two operations.
+    /// Upload an already-open file of `size`. The caller owns the handle, so
+    /// it can hash before and stat after the upload without a path swap; the
+    /// key is the caller's, not derived here.
     pub fn put_file(
         &self,
         key: &str,
@@ -362,9 +266,8 @@ impl Client {
     }
 
     /// Multipart upload for large files: create, upload parts sequentially
-    /// (each part with the full body budget), complete — or abort, so no
-    /// half-uploaded object lingers consuming storage. The part size is a
-    /// parameter so tests can exercise the flow without moving gigabytes.
+    /// (each with the full body budget), complete — or abort so no partial
+    /// object lingers. The part size is a parameter so tests stay fast.
     fn put_multipart(
         &self,
         key: &str,
@@ -615,236 +518,9 @@ impl Client {
         Ok(Some(size))
     }
 
-    /// Download `key` into `path` atomically. Bytes land in a sibling temp
-    /// file (same filesystem) bounded by [`Expect`], and only a transfer
-    /// that meets every expectation is renamed into place: a failed,
-    /// truncated, or mismatched download leaves `path` untouched and
-    /// removes the temp. The published file takes [`Expect::mode`] (0660:
-    /// group-writable for the owning service). The parent directory is
-    /// opened once and every temp/hash/rename/cleanup operation is relative
-    /// to that descriptor; [`Self::get_under`] additionally anchors each
-    /// path component.
-    pub fn get(
-        &self,
-        key: &str,
-        path: &str,
-        expect: Expect<'_>,
-        abort: impl Fn() -> bool,
-    ) -> Result<(), GetError> {
-        let target = Download::path(path)
-            .map_err(|e| GetError::Local(format!("cannot open the parent of {path}: {e}")))?;
-        self.get_target(key, target, expect, abort)
-    }
-
-    /// [`Self::get`] for `rel` below `root`, opened with `openat` and
-    /// `O_NOFOLLOW` per component. The directory descriptors pin the
-    /// parent, so a symlink swapped in after the caller's
-    /// `create_real_dirs` cannot redirect the temp, rename, or cleanup.
-    pub fn get_under(
-        &self,
-        key: &str,
-        root: &Path,
-        rel: &str,
-        expect: Expect<'_>,
-        abort: impl Fn() -> bool,
-    ) -> Result<(), GetError> {
-        let target = Download::under(root, rel).map_err(|e| {
-            GetError::Local(format!(
-                "cannot open the parent of {}: {e}",
-                root.join(rel).display()
-            ))
-        })?;
-        self.get_target(key, target, expect, abort)
-    }
-
-    fn get_target(
-        &self,
-        key: &str,
-        target: Download,
-        expect: Expect<'_>,
-        abort: impl Fn() -> bool,
-    ) -> Result<(), GetError> {
-        if abort() {
-            return Err(GetError::Aborted);
-        }
-        // The temp lives in the anchored directory so the publish is one
-        // atomic same-filesystem rename; a crash leaves the target
-        // untouched. A partial transfer is kept and resumed with a Range
-        // request, so a slow link makes progress across bounded attempts
-        // instead of restarting from zero every time.
-        let tmp = target.temp();
-        let mut offset = target.temp_len(&tmp, expect.size);
-        let mut attempt = 0;
-        let staged: Result<u64, GetError> = loop {
-            attempt += 1;
-            if abort() {
-                break Err(GetError::Aborted);
-            }
-            // Sign per attempt: a retry must not reuse a URL that may have
-            // expired while the previous attempt consumed its body budget.
-            let url = self
-                .bucket
-                .get_object(Some(&self.credentials), key)
-                .sign(SIGN_EXPIRE);
-            let mut request = self.agent.get(url.as_str());
-            if offset > 0 {
-                request = request.header("Range", &format!("bytes={offset}-"));
-            }
-            let response = match request.call() {
-                Ok(response) => match checked("download", key, response) {
-                    Ok(response) => response,
-                    Err(e) => break Err(GetError::Transport(e.to_string())),
-                },
-                Err(ureq::Error::StatusCode(404)) => break Err(GetError::Missing),
-                Err(e) => {
-                    if retryable(&e) && attempt < MAX_DOWNLOAD_ATTEMPTS {
-                        continue;
-                    }
-                    break Err(GetError::Transport(format!(
-                        "download of {key} failed: {}",
-                        http_err(&e)
-                    )));
-                }
-            };
-            // A server that ignored the range (or an object that changed)
-            // answers 200: restart rather than append a different body.
-            if offset > 0 && response.status().as_u16() != 206 {
-                offset = 0;
-            }
-            let declared = response
-                .headers()
-                .get("content-length")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok());
-            let start = offset;
-            let mut reader = response.into_body().into_reader();
-            let streamed = (|| -> Result<u64, GetError> {
-                let mut out = target.open_temp(&tmp, start, expect.mode).map_err(|e| {
-                    GetError::Local(format!("cannot create {}: {e}", target.display))
-                })?;
-                // A pre-created FIFO opens without O_NONBLOCK only when a
-                // reader is present; never write into anything but a file.
-                if !out
-                    .metadata()
-                    .map_err(|e| {
-                        GetError::Local(format!("cannot inspect {}: {e}", target.display))
-                    })?
-                    .is_file()
-                {
-                    return Err(GetError::Local(format!(
-                        "cannot create {}: not a regular file",
-                        target.display
-                    )));
-                }
-                let mut buf = [0u8; 64 * 1024];
-                let mut total = start;
-                loop {
-                    if abort() {
-                        return Err(GetError::Aborted);
-                    }
-                    let n = reader
-                        .read(&mut buf)
-                        .map_err(|e| GetError::Transport(format!("download of {key}: {e}")))?;
-                    if n == 0 {
-                        break;
-                    }
-                    total += n as u64;
-                    if total > expect.max_bytes {
-                        return Err(GetError::Invalid(format!(
-                            "download of {key}: exceeds the {}-byte cap",
-                            expect.max_bytes
-                        )));
-                    }
-                    if let Some(expected) = expect.size
-                        && total > expected
-                    {
-                        return Err(GetError::Invalid(format!(
-                            "download of {key}: larger than the {expected} bytes listed"
-                        )));
-                    }
-                    out.write_all(&buf[..n])
-                        .map_err(|e| GetError::Local(format!("download of {key}: {e}")))?;
-                }
-                // A body that ends short of the declared length is an
-                // interrupted transfer, not proof the object is invalid:
-                // keep the partial and resume within the attempt budget. A
-                // restore then refuses the boot instead of silently
-                // downgrading to an older backup.
-                if let Some(declared) = declared
-                    && total - start != declared
-                {
-                    return Err(GetError::Transport(format!(
-                        "download of {key}: body ended after {} of {declared} bytes",
-                        total - start
-                    )));
-                }
-                // The open mode is masked by the umask; the published file
-                // must have exactly the caller's mode.
-                out.set_permissions(std::fs::Permissions::from_mode(expect.mode))
-                    .and_then(|()| out.sync_all())
-                    .map_err(|e| GetError::Local(format!("download of {key}: {e}")))?;
-                Ok(total)
-            })();
-            match streamed {
-                Ok(total) => break Ok(total),
-                Err(e) => {
-                    // Only a transport failure is worth another attempt; a
-                    // cap/size/hash/local failure is definitive.
-                    let retry = matches!(e, GetError::Transport(_));
-                    let done = target.temp_len(&tmp, None);
-                    if retry
-                        && attempt < MAX_DOWNLOAD_ATTEMPTS
-                        && !abort()
-                        && done < expect.size.unwrap_or(u64::MAX)
-                    {
-                        offset = done;
-                        continue;
-                    }
-                    break Err(e);
-                }
-            }
-        };
-        let result = staged.and_then(|total| {
-            if let Some(expected) = expect.size
-                && total != expected
-            {
-                return Err(GetError::Invalid(format!(
-                    "download of {key}: got {total} bytes, expected {expected}"
-                )));
-            }
-            if let Some(expected) = expect.sha256 {
-                let actual = target.hash_temp(&tmp).map_err(|e| {
-                    GetError::Local(format!(
-                        "download of {key}: cannot hash {}: {e}",
-                        target.display
-                    ))
-                })?;
-                if actual != expected {
-                    return Err(GetError::Invalid(format!(
-                        "download of {key}: sha256 mismatch (got {actual}, expected {expected})"
-                    )));
-                }
-            }
-            renameat(&target.dir, tmp.as_str(), &target.dir, target.name.as_str())
-                .map_err(|e| GetError::Local(format!("cannot publish {}: {e}", target.display)))?;
-            // The file is complete and published; make the name durable
-            // too, or a crash can lose a successful pull.
-            target
-                .dir
-                .sync_all()
-                .map_err(|e| GetError::Local(format!("cannot fsync {}: {e}", target.display)))?;
-            Ok(())
-        });
-        if result.is_err() {
-            target.remove_temp(&tmp);
-        }
-        result
-    }
-
-    /// All objects under `prefix`, sorted by key (name order ==
-    /// creation order for timestamped names). Truncated pages are
-    /// followed up to [`MAX_LIST_KEYS`]; beyond that the listing fails
-    /// rather than growing unbounded.
+    /// All objects under `prefix`, sorted by key (name order matches creation
+    /// order for timestamped names). Follows truncated pages up to
+    /// [`MAX_LIST_KEYS`], then fails rather than growing unbounded.
     pub fn list(&self, prefix: &str, abort: impl Fn() -> bool) -> anyhow::Result<Vec<Listed>> {
         let mut names: Vec<Listed> = Vec::new();
         let mut token: Option<String> = None;
@@ -912,10 +588,9 @@ impl Client {
         Ok(names)
     }
 
-    /// Delete `keys` in batches of at most 1,000 (S3's DeleteObjects
-    /// limit). A per-key error leaves the other deletions applied; the
-    /// returned error names the failures so the caller can report the
-    /// orphans.
+    /// Delete `keys` in batches of at most 1,000 (S3's DeleteObjects limit).
+    /// A per-key error leaves the other deletions applied; the returned error
+    /// names the failures so the caller can report the orphans.
     pub fn delete_many(&self, keys: &[String], abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");
@@ -976,6 +651,7 @@ impl Client {
         Ok(())
     }
 
+    /// Delete one key; a 404 is success, since the object is already gone.
     pub fn delete(&self, key: &str, abort: impl Fn() -> bool) -> anyhow::Result<()> {
         if abort() {
             bail!("aborted");

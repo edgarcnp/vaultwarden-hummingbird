@@ -2,9 +2,9 @@
 //! lifecycle (tombstones and bounded object GC), the local repair list a
 //! boot reconciliation fills, and the bounded wait for vaultwarden's
 //! signing key before the first push. Hash and upload share one opened
-//! descriptor; a file that changes during the transfer is never committed. [`super::state`] carries the shared
-//! module doc: the durable set, the content-addressed layout, and the
-//! failure posture both directions keep.
+//! descriptor; a file that changes during the transfer is never committed.
+//! [`super::state`] carries the shared module doc: the durable set, the
+//! content-addressed layout, and the failure posture both directions keep.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -26,13 +26,14 @@ use super::tombstone::{
     MAX_GC_DELETES, MAX_TOMBSTONES_PER_RUN, Missing, TOMBSTONES_NAME, Tombstones, now_unix,
 };
 
-/// Wait (bounded) for vaultwarden's signing key, so the first post-vault
-/// push carries it. Returns false on timeout or a stop request; the caller
-/// pushes anyway — a missing key is logged, never silently assumed.
+/// Wait (bounded) for vaultwarden's signing key so the first push carries it.
+/// Returns false on timeout or a stop request; the caller still pushes, logging
+/// the missing key rather than assuming it.
 pub fn wait_for_rsa_key(timeout: Duration, abort: impl Fn() -> bool) -> bool {
     wait_for_rsa_key_at(Path::new("/data"), timeout, abort)
 }
 
+/// [`wait_for_rsa_key`] against an explicit data root (tests).
 pub(super) fn wait_for_rsa_key_at(
     root: &Path,
     timeout: Duration,
@@ -57,13 +58,9 @@ pub(super) fn wait_for_rsa_key_at(
     .is_some()
 }
 
-/// Push synced files to the bucket. Called after `up` (fresh state),
-/// shortly after the vault starts (the RSA key only exists once
-/// vaultwarden has run), on the periodic cadence, and at shutdown.
-/// Uploads only files whose content differs from the manifest (a hash,
-/// not just a size), then rewrites the manifest. A file absent for the
-/// deletion grace becomes a tombstone instead of being kept forever; the
-/// mass guard keeps a lost volume from emptying the bucket.
+/// Push synced files to the bucket, uploading only content the manifest does not
+/// already record, then rewrite the manifest. A file absent for the deletion
+/// grace becomes a tombstone unless the mass guard reads it as volume loss.
 pub fn sync_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + SYNC_RUN_BUDGET;
     sync_state_at(&Roots::production(), cfg, || {
@@ -422,11 +419,9 @@ pub(super) fn sync_state_at(roots: &Roots, cfg: &SyncConfig, abort: impl Fn() ->
     !failed
 }
 
-/// Bounded object GC. Only objects the durable manifest supersedes, and
-/// objects belonging to a tombstone older than its grace, are deleted; an
-/// object with no manifest entry is left until a later upload supersedes
-/// it (it may be a crash's only copy). A legacy path key is removed only
-/// for a grace-old tombstone.
+/// Bounded object GC over one listing. Deletes only objects a durable manifest
+/// supersedes or a grace-old tombstone covers; anything else stays (it may be a
+/// crash's only copy). Never fails the push.
 fn gc_objects(
     client: &Client,
     cfg: &SyncConfig,

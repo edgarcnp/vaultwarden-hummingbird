@@ -76,6 +76,7 @@ pub(super) fn repair_path(root: &Path) -> std::path::PathBuf {
 /// The repair list is a sidecar, not user input: cap and no-follow it.
 const MAX_REPAIR_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Read the repair list; a missing or unreadable sidecar is empty.
 pub(super) fn read_repair(root: &Path) -> BTreeSet<String> {
     read_capped(&repair_path(root).to_string_lossy(), MAX_REPAIR_BYTES)
         .map(|text| text.lines().map(str::to_string).collect())
@@ -111,6 +112,7 @@ fn manifest_key(cfg: &SyncConfig) -> String {
     format!("{}{MANIFEST_NAME}", cfg.prefix())
 }
 
+/// The tombstone list's bucket key (inside the sync prefix).
 fn tombstones_key(cfg: &SyncConfig) -> String {
     format!("{}{TOMBSTONES_NAME}", cfg.prefix())
 }
@@ -129,6 +131,7 @@ pub(super) fn load_tombstones(
     }
 }
 
+/// Publish the tombstone list, refusing to write past the read cap.
 pub(super) fn store_tombstones(
     client: &Client,
     cfg: &SyncConfig,
@@ -164,6 +167,8 @@ pub(super) fn load_manifest(
     }
 }
 
+/// Publish the manifest, refusing to write past the read cap so the next pull
+/// can always read it back.
 pub(super) fn store_manifest(
     client: &Client,
     cfg: &SyncConfig,
@@ -180,10 +185,8 @@ pub(super) fn store_manifest(
     client.put_bytes(&manifest_key(cfg), rendered.as_bytes(), abort)
 }
 
-/// Whether a real file or directory occupies the local path. A symlink is
-/// not a local copy: the pull may replace the link itself (the atomic
-/// rename never writes through it), which keeps a vault-planted link from
-/// permanently blocking a disaster-recovery pull.
+/// Whether a real file or directory occupies the path. A symlink does not: the
+/// pull may replace the link itself, never write through it.
 fn local_present(target: &Path) -> bool {
     std::fs::symlink_metadata(target)
         .is_ok_and(|meta| meta.file_type().is_file() || meta.file_type().is_dir())
@@ -196,17 +199,15 @@ fn should_pull(target: &Path) -> bool {
     !local_present(target)
 }
 
-/// The content-addressed bucket key for one synced file's current
-/// content: `objects/<rel>/<sha256>`. Immutable by construction — a
-/// changed file gets a new key, so an interrupted push can never
-/// overwrite the copy the previous manifest references.
+/// The content-addressed key for one file's content: `objects/<rel>/<sha256>`.
+/// A change uploads a new key, so an interrupted push cannot overwrite the copy
+/// the previous manifest names.
 pub(super) fn object_key(rel: &str, sha256: &str) -> String {
     format!("objects/{rel}/{sha256}")
 }
 
-/// Split a content-addressed key (`<prefix>objects/<rel>/<sha256>`) into
-/// `(rel, sha256)`. Anything else — the manifest, legacy path keys, names
-/// that are not content-addressed — is not a reconciliation candidate.
+/// Split a content-addressed key into `(rel, sha256)`; `None` for the manifest,
+/// a legacy path key, or any malformed name.
 pub(super) fn split_object_key<'a>(key: &'a str, prefix: &str) -> Option<(&'a str, &'a str)> {
     let rest = key.strip_prefix(prefix)?;
     let rest = rest.strip_prefix("objects/")?;
@@ -219,15 +220,16 @@ pub(super) fn split_object_key<'a>(key: &'a str, prefix: &str) -> Option<(&'a st
 /// One version of a file found in the listing.
 #[derive(Clone)]
 struct Version {
+    /// Lowercase-hex SHA-256 named by the object key.
     sha256: String,
+    /// Listed object size in bytes.
     size: u64,
+    /// Provider timestamp, used only to order versions.
     last_modified: String,
 }
 
-/// Pick the newest version per file from a listing. A file with several
-/// versions is only recovered when their timestamps order it
-/// unambiguously: anything else (equal or missing timestamps) is skipped
-/// rather than guessed.
+/// Pick the newest version per file; a file with several versions is recovered
+/// only when their timestamps order it unambiguously.
 fn choose_newest(versions: impl Iterator<Item = (String, Version)>) -> BTreeMap<String, Version> {
     let mut by_rel: BTreeMap<String, Vec<Version>> = BTreeMap::new();
     for (rel, version) in versions {
@@ -296,18 +298,9 @@ pub(super) fn remote_only_files(
     Some(missing)
 }
 
-/// Recover what the manifest does not name and note referenced objects the
-/// bucket no longer holds. One best-effort listing powers both:
-///
-/// - unreferenced content-addressed objects (a crash between the object
-///   PUT and the manifest write, or a manifest that cannot be read) are
-///   pulled for files missing locally, newest version per path;
-/// - every manifest entry is checked by presence and size; a file whose
-///   object is gone or changed is written to the local repair list so the
-///   next push re-uploads it.
-///
-/// Returns how many files were recovered. A failed listing only costs this
-/// pass; it never fails the pull.
+/// Recover objects the manifest does not name and note referenced objects the
+/// bucket no longer holds, from one best-effort listing. Returns how many files
+/// were recovered; a failed listing only costs this pass.
 fn reconcile_objects(
     roots: &Roots,
     client: &Client,
@@ -429,21 +422,17 @@ fn reconcile_objects(
 /// One pull candidate: its relative path, plus the manifest's expectations
 /// when it came from the manifest.
 struct Target {
+    /// Bucket-relative path to write.
     rel: String,
+    /// Expected size, from the manifest or the listing.
     size: Option<u64>,
+    /// Expected hash, present only when the manifest named it.
     sha256: Option<String>,
 }
 
-/// Pull synced files from the bucket into their local volumes. Called at
-/// boot, before tailscaled is spawned, so a restored state file wins over
-/// nothing.
-///
-/// The pull only fills gaps: a bucket key whose local file already exists
-/// is left untouched. On an ephemeral volume nothing is there, so the whole
-/// set is restored; on a persistent volume the volume stays authoritative
-/// and the bucket acts as a fill/DR source rather than clobbering newer
-/// local files. Only keys inside the synced set are written, and every
-/// manifest entry is hash-verified before it is published.
+/// Pull synced files from the bucket into their local volumes at boot, before
+/// tailscaled starts. Fill-only, and every manifest entry is hash-verified
+/// before it is published; only keys inside the synced set are written.
 pub fn restore_state(cfg: &SyncConfig, abort: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + BOOT_RESTORE_BUDGET;
     restore_state_at(&Roots::production(), cfg, || {

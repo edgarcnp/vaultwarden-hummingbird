@@ -8,16 +8,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The gate's permit set: at most `max` handlers admitted at once.
 pub(super) struct Limiter {
+    /// Current number of held permits.
     active: Arc<AtomicUsize>,
+    /// Admission cap; the next acquire past it fails immediately.
     max: usize,
 }
 
 /// One admitted handler slot; release on drop.
 pub(super) struct Permit {
+    /// Shared counter decremented when this permit is released.
     active: Arc<AtomicUsize>,
 }
 
 impl Limiter {
+    /// A limiter that admits at most `max` simultaneous holders.
     pub(super) fn new(max: usize) -> Self {
         Self {
             active: Arc::new(AtomicUsize::new(0)),
@@ -53,6 +57,7 @@ impl Drop for Permit {
 
 #[cfg(test)]
 mod tests {
+    //! Admission-cap accounting tests.
     use super::*;
 
     #[test]

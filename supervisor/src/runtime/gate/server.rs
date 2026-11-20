@@ -25,8 +25,8 @@ use crate::util::log;
 const REQ_CAP: usize = 2048;
 /// No request may hold a gatekeeper thread for longer than this.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// Probe result when vaultwarden does not answer 2xx: health checks must
-/// see the vault, not just the container.
+/// Response pair for a down or non-2xx vault: health checks must see the
+/// vault itself, not just the container.
 const VAULT_DOWN: (&str, &str) = ("503", "Service Unavailable");
 /// Handler threads admitted at once. The container healthcheck plus a
 /// platform's redundant probes fit with room to spare; anything beyond is
@@ -37,12 +37,9 @@ const MAX_CONNS: usize = 32;
 /// it the listener stays readable and the loop spins.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
-/// Bind the exposed port. When the kernel serves IPv4 on an IPv6 wildcard
-/// socket (`net.ipv6.bindv6only=0`, the common default), prefer `[::]` so
-/// a platform probing over either family reaches `/alive`; otherwise bind
-/// IPv4 only, as before. Failure means the deployment is broken (health
-/// checks unreachable); the caller exits. `0` asks the kernel for an
-/// ephemeral port (tests only); config never resolves to it.
+/// Bind the exposed port, preferring an IPv6 dual-stack wildcard so probes
+/// over either family reach `/alive`, else IPv4. Failure aborts boot; `0`
+/// asks the kernel for an ephemeral port (tests only).
 pub fn bind(port: u16) -> std::io::Result<TcpListener> {
     if dual_stack_wildcard()
         && let Ok(listener) = TcpListener::bind(("::", port))
@@ -52,11 +49,8 @@ pub fn bind(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(("0.0.0.0", port))
 }
 
-/// Whether a wildcard IPv6 socket also serves IPv4 on this system: the
-/// kernel default for new sockets (`0` = dual-stack, `1` = IPv6 only).
-/// Without a `setsockopt` dependency this is the reliable signal; when the
-/// sysctl is unreadable (IPv6 disabled, or not Linux procfs) the caller
-/// falls back to an IPv4 bind.
+/// Whether a wildcard IPv6 socket also serves IPv4 here (`bindv6only` = 0).
+/// An unreadable sysctl (IPv6 disabled, not Linux procfs) falls back to IPv4.
 pub(super) fn dual_stack_wildcard() -> bool {
     std::fs::read_to_string("/proc/sys/net/ipv6/bindv6only")
         .map(|value| value.trim() == "0")
@@ -135,20 +129,16 @@ fn respond(stream: &mut TcpStream, code: &str, text: &str) {
     );
 }
 
-/// One request, one response, connection closed. Only the first request
-/// line is inspected; malformed, truncated, or oversized requests are just
-/// another denied request — the probe (and thus vaultwarden) is never
-/// touched by non-`/alive` traffic. A dead socket closes without a
-/// response — there is nothing to answer; a head that times out is denied
-/// like any other non-request.
+/// One request line, one canned response, connection closed. Non-`/alive`
+/// traffic never touches the probe; a dead socket closes unanswered.
+/// Malformed, oversized, or timed-out heads are denied like any non-request.
 pub(super) fn handle(stream: TcpStream, live: &Liveness) {
     handle_with(stream, live, READ_TIMEOUT)
 }
 
-/// [`handle`] with an explicit budget for the whole request head (tests
-/// shrink it). The budget covers the WHOLE head, not each read: a peer
-/// drip-feeding bytes can never hold an admission slot past it (a
-/// slowloris would otherwise occupy one for hours).
+/// [`handle`] with an explicit budget for the whole request head. The budget
+/// covers all reads, not each one, so a drip-feeding peer cannot hold a slot
+/// past it (a slowloris would otherwise occupy one for hours).
 pub(super) fn handle_with(mut stream: TcpStream, live: &Liveness, budget: Duration) {
     let deadline = Instant::now() + budget;
     let mut buf = [0u8; REQ_CAP];
@@ -212,10 +202,9 @@ fn line_of(bytes: &[u8]) -> String {
         .to_string()
 }
 
-/// Whether an accept error is per-connection (the next accept is
-/// unaffected) rather than a persistent condition that needs a backoff.
-/// EMFILE/ENFILE/ENOMEM/ENOBUFS keep the listener readable, so pausing is
-/// what stops the loop from spinning on them.
+/// Whether an accept error is per-connection (next accept unaffected) rather
+/// than persistent. EMFILE/ENFILE/ENOMEM/ENOBUFS keep the listener readable,
+/// so the caller pauses to stop the loop from spinning.
 pub(super) fn is_per_connection(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
@@ -223,10 +212,9 @@ pub(super) fn is_per_connection(e: &std::io::Error) -> bool {
     )
 }
 
-/// The request target's path per RFC 7230 §5.3: origin-form `/path?query`
-/// passes through (minus query); absolute-form
-/// `scheme://authority/path?query` contributes the part after the
-/// authority. Authority-form and asterisk-form never match `/alive`.
+/// The request target's path per RFC 7230 §5.3: origin-form passes through
+/// minus query, absolute-form contributes the part after the authority, and
+/// authority/asterisk forms never match `/alive`.
 fn target_path(target: &str) -> &str {
     let rest = match target.split_once("://") {
         Some((_, r)) => r,

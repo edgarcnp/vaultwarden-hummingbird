@@ -15,6 +15,9 @@ use super::super::sync::SyncConfig;
 use super::spec::DbBackupConfig;
 use crate::util::log;
 
+/// Resolve `SUPERVISOR_DB_BACKUP*` from the merged knob layer and the vault's
+/// DB URL. Returns `None` when dumps and restore are both off or the setup is
+/// unusable; a misconfiguration never blocks the boot.
 pub(crate) fn resolve_backup(
     knob: &dyn Fn(&str, &str) -> String,
     sync: Option<&SyncConfig>,
@@ -124,12 +127,15 @@ pub(crate) fn resolve_backup(
 
 #[cfg(test)]
 mod tests {
+    //! Backup enablement, knob degradation, and DB URL handling.
+
     use std::collections::BTreeMap;
     use std::time::Duration;
 
     use super::super::spec::DbBackupConfig;
     use super::*;
 
+    /// S3 knobs shared by the resolver test cases.
     const S3_KNOBS: &[(&str, &str)] = &[
         ("SUPERVISOR_S3_REMOTE", "r2:vw-state"),
         ("SUPERVISOR_S3_ACCESS_KEY_ID", "id"),
@@ -137,7 +143,8 @@ mod tests {
         ("SUPERVISOR_S3_ENDPOINT", "https://s3.example.invalid"),
     ];
 
-    /// resolve_backup over an explicit knob map (no process env touched).
+    /// Build a backup config from an explicit knob map; the process env is
+    /// never touched.
     fn resolved(vars: &[(&str, &str)]) -> Option<DbBackupConfig> {
         let map: BTreeMap<String, String> = vars
             .iter()
@@ -161,8 +168,7 @@ mod tests {
         )
     }
 
-    /// resolve_backup with an explicit db_url (the VAULTWARDEN_DATABASE_URL
-    /// path).
+    /// Like [`resolved`], with the vault's DB URL injected.
     fn resolved_with_url(vars: &[(&str, &str)], db_url: &str) -> Option<DbBackupConfig> {
         let map: BTreeMap<String, String> = vars
             .iter()

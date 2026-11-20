@@ -31,9 +31,8 @@ fn counting_vault() -> (SocketAddr, Arc<AtomicUsize>) {
 }
 
 /// Ephemeral listener + one request -> full response (read to EOF).
-/// `vault = None` doubles as a probe canary: if `/alive` ever reached
-/// the probe with it, the answer would be 503, not what these tests
-/// expect from the 403 paths.
+/// `vault = None` is a probe canary: `/alive` would answer 503, not the
+/// 403 these tests expect from the denial paths.
 fn roundtrip(request: &[u8], vault: Option<SocketAddr>) -> String {
     let listener = bind(0).expect("ephemeral bind");
     let addr = listener.local_addr().unwrap();

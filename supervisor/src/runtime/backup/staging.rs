@@ -51,9 +51,8 @@ pub(super) fn sweep_staging(dir: &str) -> bool {
         return false;
     }
     // Collect names first: the iterator borrows the handle mutably, and the
-    // unlink calls need to borrow its descriptor. Staging is bounded to a
-    // handful of in-flight dumps; a huge directory is refused rather than
-    // materialized.
+    // unlink calls need to borrow its descriptor.
+    /// Cap on staging entries; a larger directory is refused, not swept.
     const MAX_STAGING_ENTRIES: usize = 4096;
     let mut entries: Vec<(std::ffi::CString, Type)> = Vec::new();
     for entry in handle.iter() {
@@ -102,6 +101,7 @@ pub(super) fn sweep_staging(dir: &str) -> bool {
     true
 }
 
+/// Sweeping leftovers, the exact 0700 mode, and symlink refusal.
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};

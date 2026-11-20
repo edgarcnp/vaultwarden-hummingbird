@@ -143,6 +143,7 @@ pub(super) fn fake_bucket_capturing(
     (format!("http://{addr}"), seen)
 }
 
+/// A sync config pointing at a fake bucket endpoint.
 pub(super) fn sync_cfg(endpoint: &str) -> SyncConfig {
     use std::time::Duration;
     SyncConfig::new(

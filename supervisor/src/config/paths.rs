@@ -115,6 +115,8 @@ pub(crate) fn reserved_state_name(rel: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! State-file, socket, and reserved-name policy edges.
+
     use super::*;
 
     const ROOT: &str = "/state";

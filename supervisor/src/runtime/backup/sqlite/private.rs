@@ -22,16 +22,23 @@ use nix::unistd::{UnlinkatFlags, geteuid, linkat, unlinkat};
 
 use crate::util::log;
 
+/// Flags opening a directory descriptor without following a symlink.
 const DIR_FLAGS: i32 = nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC;
+/// Name prefix marking a supervisor-owned private directory.
 const PRIVATE_PREFIX: &str = ".vw-sqlite-";
+/// Link names created for the pinned database and its sidecars.
 const LINK_NAMES: [&str; 4] = ["db", "db-wal", "db-shm", "db-journal"];
 
 /// A database opened through a pinned private directory. Dropping it
 /// removes the links and the directory; the original database is untouched.
 pub(super) struct PrivateDb {
+    /// The database's parent directory, held to sweep and unlink by descriptor.
     parent: File,
+    /// The private directory's entry name under `parent`.
     name: String,
+    /// Descriptor of the private directory.
     dir: File,
+    /// `/proc/self/fd/<dirfd>/db`, the path handed to SQLite.
     path: String,
 }
 
@@ -100,6 +107,7 @@ fn create_private_dir(parent: &Path) -> std::io::Result<(File, File, String)> {
         .custom_flags(DIR_FLAGS)
         .open(parent)?;
     sweep_stale(&parent_dir);
+    /// Distinguishes private directories created by this process.
     static SEQ: AtomicU64 = AtomicU64::new(0);
     for _ in 0..8 {
         let name = format!(
@@ -178,6 +186,7 @@ fn sweep_stale(parent_dir: &File) {
     }
 }
 
+/// The `/proc/self/fd` path for an open descriptor.
 fn proc_path_of(dir: &File) -> String {
     format!("/proc/self/fd/{}", dir.as_raw_fd())
 }
@@ -199,12 +208,14 @@ fn link_in(dir: &File, file: &File, name: &str) -> std::io::Result<()> {
     .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
 }
 
+/// Pinning, stale-directory reclamation, and refusal of a missing source.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::DirBuilderExt;
     use std::path::PathBuf;
 
+    /// Create a fresh scratch directory for one test.
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("vw-private-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

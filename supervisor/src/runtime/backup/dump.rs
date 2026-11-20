@@ -1,4 +1,6 @@
 //! The periodic backup cycle (sweep -> dump -> push -> manifest -> prune).
+//! Every phase is bounded and non-fatal; ordering and guards live on
+//! [`tick`].
 
 use crate::config::DbBackupConfig;
 use crate::s3::{Client, MAX_DB_OBJECT_BYTES};
@@ -282,6 +284,7 @@ fn newest_backup_present(
     }
 }
 
+/// Tick flow, ordering, guards, and the skip decision.
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -412,6 +415,7 @@ mod tests {
         addr
     }
 
+    /// A config pointed at the canned endpoint.
     fn head_cfg(addr: std::net::SocketAddr) -> DbBackupConfig {
         let sync = SyncConfig::new(
             "r2:vw-state".into(),
@@ -424,6 +428,7 @@ mod tests {
         support::cfg_with_sync(sync)
     }
 
+    /// A one-entry manifest naming `sqlite-1.sqlite3` at `size` bytes.
     fn head_manifest(size: u64) -> Manifest {
         let mut manifest = Manifest::default();
         manifest.push(Entry {
@@ -435,6 +440,7 @@ mod tests {
         manifest
     }
 
+    /// A client for the canned endpoint.
     fn head_client(cfg: &DbBackupConfig) -> Client {
         Client::connect(&cfg.sync.target, SYNC_TIMEOUT).expect("test client")
     }

@@ -104,6 +104,7 @@ pub(crate) fn list_objects_with_time(
     Ok(names)
 }
 
+/// Key layout and the dump-name filter.
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

@@ -1,3 +1,6 @@
+//! Config merge order, refusals, and knob routing, with the env source
+//! injected so no test mutates the process environment.
+
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -26,6 +29,7 @@ fn mk_opt(vars: &[(&str, &str)]) -> Option<Config> {
     })
 }
 
+/// Like [`mk`], with a dotenv file layer; panics unless it resolves.
 fn mk_with_file(vars: &[(&str, &str)], file: FileConfig) -> Config {
     let map: BTreeMap<String, String> = vars
         .iter()

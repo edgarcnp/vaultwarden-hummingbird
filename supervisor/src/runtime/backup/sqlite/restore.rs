@@ -244,16 +244,19 @@ fn copy_beside(staged: &str, path: &str) -> std::io::Result<String> {
     Ok(tmp)
 }
 
+/// The emptiness predicate and the no-replace publication rules.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Scratch database path for one test.
     fn scratch(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("vw-sup-sqle-{}-{}", name, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("db.sqlite3").to_string_lossy().into_owned()
     }
 
+    /// Remove the test database without failing.
     fn cleanup(path: &str) {
         let _ = std::fs::remove_file(path);
     }

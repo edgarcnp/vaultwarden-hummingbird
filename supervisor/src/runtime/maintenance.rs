@@ -33,11 +33,14 @@ use crate::util::log;
 /// never cleared: an in-flight abort closure keeps seeing it until the
 /// process exits.
 struct Token {
+    /// Set once a shutdown drain is requested; never cleared.
     stop: AtomicBool,
+    /// Set when a stop request arrives during the drain ("hurry up").
     forced: AtomicBool,
 }
 
 impl Token {
+    /// An unset token: periodic work runs and no hurry-up is pending.
     fn new() -> Self {
         Self {
             stop: AtomicBool::new(false),
@@ -55,10 +58,12 @@ impl Token {
         self.forced.load(Ordering::SeqCst)
     }
 
+    /// Request a drain; monotonic, so every later check observes it.
     fn request_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
     }
 
+    /// Shorten the drain to the forced budget.
     fn force(&self) {
         self.forced.store(true, Ordering::SeqCst);
     }
@@ -73,10 +78,15 @@ type FinishFn = Box<dyn Fn(&(dyn Fn() -> bool + Sync)) + Send>;
 /// plus an optional final flush at drain. Constructors capture their config;
 /// both invocations stay cancellable.
 pub(crate) struct Task {
+    /// Task name used in drain-budget log lines.
     name: &'static str,
+    /// Delay from reactor start to the first periodic run.
     first_delay: Duration,
+    /// Period between runs; `None` means no periodic runs.
     cadence: Option<Duration>,
+    /// The periodic invocation.
     run: RunFn,
+    /// The optional final flush at drain.
     finish: Option<FinishFn>,
 }
 
@@ -130,34 +140,43 @@ impl Task {
     }
 }
 
+/// A command from the reactor owner to the scheduler thread.
 enum Command {
     /// Final-flush budgets as durations: the deadlines are computed when
     /// the reactor actually enters the flush, so an in-flight tick that
     /// overran cannot pre-consume the flush's window.
     Drain {
+        /// Total budget for the final flushes.
         budget: Duration,
+        /// Budget once a hurry-up is observed.
         forced_budget: Duration,
     },
 }
 
+/// What the scheduler loop's wait on the command channel produced.
 enum Wait {
+    /// A command arrived.
     Command(Command),
+    /// The timeout elapsed with no command.
     Timeout,
+    /// The sender was dropped; the loop exits.
     Closed,
 }
 
 /// The reactor handle: owns the scheduler thread until [`Self::drain`].
 pub struct Reactor {
+    /// The monotonic lifecycle token shared with tasks and the drain loop.
     token: Arc<Token>,
+    /// Sends the single drain command to the scheduler thread.
     tx: Sender<Command>,
+    /// The scheduler thread; joined during drain unless it overruns.
     handle: std::thread::JoinHandle<()>,
 }
 
 impl Reactor {
-    /// Start the reactor for the given (feature-filtered) tasks. `Ok(None)`
-    /// when there is nothing to schedule; `Err` when the thread cannot
-    /// start — a failed boot, not a degraded one: maintenance silently
-    /// ceasing to exist is worse than refusing to run.
+    /// Start the reactor for the given tasks; `Ok(None)` when there is nothing
+    /// to schedule. A thread that cannot start is a failed boot, not a degraded
+    /// one: maintenance silently ceasing to exist is worse than refusing to run.
     pub fn start(tasks: Vec<Task>) -> std::io::Result<Option<Self>> {
         if tasks.is_empty() {
             return Ok(None);
@@ -177,11 +196,9 @@ impl Reactor {
         self.token.request_stop();
     }
 
-    /// Stop, wait for the in-flight tick, run the final flushes in task
-    /// order, and join the thread. `budget` bounds the flush; a stop request
-    /// observed while draining shortens it to `forced_budget`. A thread
-    /// still draining one S3 call past the budget is left behind — the
-    /// process exits anyway, and only that upload is lost.
+    /// Stop, wait for the in-flight tick, run the final flushes in task order,
+    /// and join. `budget` bounds the flush and is shortened to `forced_budget`
+    /// by a stop request observed while draining; a stuck S3 call is left behind.
     pub fn drain(self, budget: Duration, forced_budget: Duration) {
         self.drain_with(budget, forced_budget, stopping);
     }
@@ -264,6 +281,7 @@ fn run(mut tasks: Vec<Task>, rx: Receiver<Command>, token: Arc<Token>) {
     }
 }
 
+/// Receive the next command, waiting at most `timeout`; `None` waits forever.
 fn wait_for_command(rx: &Receiver<Command>, timeout: Option<Duration>) -> Wait {
     match timeout {
         Some(t) => match rx.recv_timeout(t) {
@@ -278,9 +296,9 @@ fn wait_for_command(rx: &Receiver<Command>, timeout: Option<Duration>) -> Wait {
     }
 }
 
-/// The final flushes, in task order. Each gets a deadline-based abort so a
-/// slow bucket cannot hold the container open past the shutdown budget;
-/// once the deadline passed, later tasks are skipped rather than started.
+/// Run the final flushes in task order, sharing the remaining budget across
+/// the tasks still due so one slow flush cannot starve the next; once the
+/// deadline passes, later tasks are skipped rather than started.
 fn flush(tasks: Vec<Task>, budget: Duration, forced_budget: Duration, token: &Token) {
     // Budgets start here, when the flush actually runs: an in-flight
     // periodic tick that overran must not eat the final flush's window.
@@ -326,6 +344,8 @@ fn flush(tasks: Vec<Task>, budget: Duration, forced_budget: Duration, token: &To
 
 #[cfg(test)]
 mod tests {
+    //! Reactor scheduling and drain-budget tests.
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;

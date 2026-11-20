@@ -154,15 +154,15 @@ fn ensure_state_dir(dir: &Path, group: u32) -> std::io::Result<()> {
     set_group(dir, group)
 }
 
+/// Set `path`'s group, mapping the nix error into `std::io`.
 fn set_group(path: &Path, group: u32) -> std::io::Result<()> {
     chown(path, None, Some(Gid::from_raw(group)))
         .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
 }
 
-/// Move the identity and cert cache into `/state/tailscale`, make the
-/// subtree group-writable for tailscaled, and mark the layout done. The
-/// bucket keys stay `tailscaled.state` and `certs/**`; only local paths
-/// move.
+/// Move the identity and cert cache into `/state/tailscale`, make the subtree
+/// group-writable for tailscaled, and mark the layout done. Bucket keys stay
+/// `tailscaled.state` and `certs/**`; only local paths move.
 fn migrate_tailscale_layout(state: &Path, group: u32) -> bool {
     let dir = state.join("tailscale");
     if let Err(e) = ensure_dir_group(&dir, group) {
@@ -213,17 +213,16 @@ fn migrate_tailscale_layout(state: &Path, group: u32) -> bool {
     true
 }
 
+/// Create `dir` privately, then set mode 2770 and the tailscale group.
 fn ensure_dir_group(dir: &Path, group: u32) -> std::io::Result<()> {
     ensure_private_dir(dir)?;
     set_dir(dir, 0o2770)?;
     set_group(dir, group)
 }
 
-/// Create `/state/tailscale-state -> tailscale` (relative) if missing and
-/// prove an existing link names the same target. `tailscaled --state` is
-/// given the link path so Tailscale does not chmod the real, supervisor-owned
-/// `tailscale` tree to 0700; it cannot (the daemon is not the owner) and
-/// would fall back to an in-memory state store.
+/// Ensure `/state/tailscale-state -> tailscale` exists and names that target.
+/// tailscaled is given the link so it cannot chmod the real, supervisor-owned
+/// tree to 0700 — it would fall back to an in-memory state store.
 fn ensure_state_link(state: &Path) -> bool {
     let link = state.join("tailscale-state");
     let target = Path::new("tailscale");
@@ -275,16 +274,15 @@ fn ensure_state_link(state: &Path) -> bool {
     }
 }
 
-/// Enforce the tailscaled-writable tree's modes. Best-effort: files and
-/// directories owned by tailscaled are already 0600/0700 by its own
-/// design; the supervisor reads them through `CAP_DAC_READ_SEARCH`, so a
-/// mode it cannot change is not a boot failure. Symlinks are removed, never
-/// followed; the walk is bounded by entry and depth budgets.
+/// Enforce 2770/660 and the group on the tailscaled-writable tree, removing
+/// symlinks rather than following them. Best-effort and bounded: a mode the
+/// supervisor cannot change is not a boot failure.
 fn fix_tailscale_modes(dir: &Path, group: u32) {
     let mut budget = MAX_ENTRIES;
     fix_tailscale_modes_at(dir, group, 0, &mut budget);
 }
 
+/// Walk one directory level, enforcing modes within the entry and depth budgets.
 fn fix_tailscale_modes_at(dir: &Path, group: u32, depth: usize, budget: &mut u64) {
     if depth > MAX_TREE_DEPTH {
         log::err(&format!(
@@ -334,10 +332,9 @@ fn fix_tailscale_modes_at(dir: &Path, group: u32, depth: usize, budget: &mut u64
     }
 }
 
-/// Set mode/group on a path only when this process may do so: it owns the
-/// path or runs as root. `tailscaled` creates its state and files 0600 under
-/// its own uid; the supervisor must leave those alone (and read them via
-/// `CAP_DAC_READ_SEARCH`).
+/// Set mode and group only on a path this process owns (or as root): tailscaled
+/// creates its own files 0600 under its uid, and the supervisor must leave
+/// those alone, reading them through `CAP_DAC_READ_SEARCH`.
 fn fix_owned_path(path: &Path, mode: u32, group: u32) {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return;
@@ -360,6 +357,7 @@ fn fix_owned_path(path: &Path, mode: u32, group: u32) {
     }
 }
 
+/// Create `dir` if missing and force 0700; an existing non-directory is an error.
 fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     match fs::symlink_metadata(dir) {
         Ok(meta) if meta.file_type().is_dir() => {}
@@ -375,22 +373,21 @@ fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     set_dir(dir, 0o700)
 }
 
+/// Set `dir`'s mode exactly.
 fn set_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(mode))
 }
 
-/// Only the image's supervisor identity may migrate a file. Under that
-/// uid the vault (65533) cannot create a supervisor-owned file, so a
-/// mismatched owner after the split is a planted identity. Unit tests run
-/// as the developer's uid, where the check is not meaningful.
+/// Whether `meta` belongs to the image's supervisor identity. Under the test
+/// uid the check is not meaningful and passes; in the image a foreign owner is
+/// a planted identity that boot refuses to adopt.
 fn authentic_owner(meta: &fs::Metadata) -> bool {
     geteuid().as_raw() != SUPERVISOR_UID || meta.uid() == SUPERVISOR_UID
 }
 
-/// Move one small regular file into the state volume. A missing source is
-/// a no-op; a symlink is removed without following it; an oversized,
-/// foreign-owned, or unreadable source is left in place and fails the
-/// migration loudly.
+/// Move one small regular file into the state volume. A missing source is a
+/// no-op; a symlink is removed without following it; an oversized,
+/// foreign-owned, or unreadable source stays put and fails the migration.
 fn move_file(src: &Path, dst: &Path) -> bool {
     if src == dst {
         return true;
@@ -467,15 +464,14 @@ fn move_file(src: &Path, dst: &Path) -> bool {
     true
 }
 
-/// Recursively move a directory tree into the state volume. Files keep
-/// owner-only modes; symlinks are removed, never followed. A destination
-/// that already exists wins (it is the newer layout), and the source copy
-/// is removed. Bounded in depth: a pathological old tree fails the
-/// migration instead of risking the boot stack.
+/// Recursively move a directory tree, keeping files owner-only and removing
+/// symlinks without following them. An existing destination wins as the newer
+/// layout; depth is bounded so a pathological tree fails instead of the stack.
 fn move_tree(src: &Path, dst: &Path) -> bool {
     move_tree_at(src, dst, 0)
 }
 
+/// One level of [`move_tree`], recursing under the depth budget.
 fn move_tree_at(src: &Path, dst: &Path, depth: usize) -> bool {
     if depth > MAX_TREE_DEPTH {
         log::err(&format!(
@@ -563,6 +559,7 @@ fn move_tree_at(src: &Path, dst: &Path, depth: usize) -> bool {
     ok
 }
 
+/// Remove `path` when it is a regular file or symlink; errors are ignored.
 fn remove_file(path: &Path) {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_file() || meta.file_type().is_symlink() => {
@@ -573,11 +570,13 @@ fn remove_file(path: &Path) {
     }
 }
 
+/// Remove `dir` recursively within the entry and depth budgets.
 fn remove_tree(dir: &Path) {
     let mut budget = MAX_ENTRIES;
     remove_tree_at(dir, 0, &mut budget);
 }
 
+/// One level of [`remove_tree`], decrementing the shared entry budget.
 fn remove_tree_at(dir: &Path, depth: usize, budget: &mut u64) {
     if depth > MAX_TREE_DEPTH || *budget == 0 {
         log::err(&format!(
@@ -620,12 +619,9 @@ fn remove_tree_at(dir: &Path, depth: usize, budget: &mut u64) {
     let _ = fs::remove_dir(dir);
 }
 
-/// Give the vault's volume the shared group modes: directories 0770,
-/// files 0660. Ownership is left alone. A file the supervisor does not own
-/// (vault-created after this layout, e.g. when a `/state` volume was
-/// recreated) cannot be changed without CAP_CHOWN — that is not fatal: the
-/// vault already has the access it needs, and the sync logs anything it
-/// cannot read.
+/// Give the vault's volume shared group modes — directories 0770, files 0660 —
+/// and leave ownership alone. A file owned by another uid cannot be changed
+/// without CAP_CHOWN; that is logged, not fatal.
 fn fix_data_permissions(root: &Path) -> std::io::Result<()> {
     set_dir(root, 0o770)?;
     if let Ok(meta) = fs::symlink_metadata(root) {
@@ -685,9 +681,8 @@ fn fix_data_permissions(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Best-effort group change to the shared data group. Files already in
-/// that group (everything the vault created) need nothing; a file owned
-/// by another uid cannot be changed without CAP_CHOWN, which the
+/// Best-effort move of `path` into the shared data group. Files already there
+/// need nothing; a foreign uid cannot be changed without CAP_CHOWN, which the
 /// supervisor deliberately does not hold.
 fn share_group(path: &Path, meta: &fs::Metadata) {
     if meta.gid() == SUPERVISOR_GID {
@@ -710,10 +705,13 @@ fn share_group(path: &Path, meta: &fs::Metadata) {
 
 #[cfg(test)]
 mod tests {
+    //! Layout-migration tests over scratch state and data roots.
+
     use std::path::PathBuf;
 
     use super::*;
 
+    /// A clean `(state, data)` pair under the temp dir.
     fn scratch(name: &str) -> (PathBuf, PathBuf) {
         let base =
             std::env::temp_dir().join(format!("vw-sup-migrate-{name}-{}", std::process::id()));
@@ -725,6 +723,7 @@ mod tests {
         (state, data)
     }
 
+    /// The permission bits of `path`.
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }

@@ -7,9 +7,9 @@
 //! BACKUP*). The authkey is staged to a 0600 file (never argv) and
 //! removed after `up`.
 //!
-//! Boot runs through the explicit phase machine ([`boot`]); the shutdown
-//! model is documented where it lives ([`runtime::process::watch`]):
-//! children run in their own process groups; a stop request
+//! Boot runs through the explicit phase machine (`boot`); the shutdown
+//! model is documented at `runtime::process::watch`: children run in their
+//! own process groups; a stop request
 //! (SIGTERM/SIGINT/SIGHUP/SIGQUIT) is observed by the main thread, which
 //! drives TERM -> KILL escalation.
 
@@ -214,6 +214,7 @@ fn healthcheck() -> ! {
     std::process::exit(if healthy { 0 } else { 1 });
 }
 
+/// Runs the supervisor, or one of the one-shot probe and health-check modes.
 fn main() {
     // Everything the supervisor creates under /data is shared with the
     // vault through the data group (the vault runs a different UID). 0o007

@@ -2,7 +2,7 @@
 //! signaling ([`child`]), pidfd handles ([`pidfd`]), the single-reaper
 //! hub ([`reaper`]), wait-status decoding and the escalation wait
 //! ([`reap`]), bounded child runs ([`run`]), child-environment grants
-//! ([`env`]), stop-signal wiring ([`signals`]), and the vault watch loop
+//! ([`mod@env`]), stop-signal wiring ([`signals`]), and the vault watch loop
 //! / container teardown ([`watch`]).
 
 mod child;

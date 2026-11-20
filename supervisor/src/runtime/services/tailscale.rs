@@ -1,4 +1,8 @@
-//! tailscaled / tailscale CLI control.
+//! tailscaled and the `tailscale` CLI: the daemon runs under its own UID
+//! in its own process group with an allow-listed env, dropped capabilities,
+//! and `no_new_privs`; every CLI call is bounded. `tailscale up` joins the
+//! tailnet (or rejoins from restored state); `tailscale serve` exposes the
+//! loopback vault and is verified against `serve status` before boot proceeds.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -22,16 +26,9 @@ const TAILSCALED_CREDS: Credentials = Credentials {
     umask: 0o007,
 };
 
-/// tailscaled, with no TUN device when `userspace` (PaaS sandboxes deny
-/// /dev/net/tun). `--statedir` (derived from the state file's dir, on the
-/// supervisor-only state volume) is required for `tailscale serve` HTTPS
-/// cert caching.
-///
-/// Environment is allow-listed ([`apply_env`]) — no supervisor secrets —
-/// and the daemon runs as its own uid in the `tailscale` group. TUN mode
-/// keeps only NET_ADMIN/NET_RAW (the container must grant them);
-/// userspace mode needs no capabilities. Every other capability is
-/// dropped, and `no_new_privs` is set.
+/// Spawn tailscaled under its dedicated UID in its own process group, with
+/// an allow-listed env and (TUN mode only) NET_ADMIN/NET_RAW; userspace mode
+/// needs none. `--statedir` keeps the serve cert cache; `None` on failure.
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Handle> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
@@ -52,15 +49,9 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Ha
     }
 }
 
-/// `tailscale up` with hard timeout; a failure makes the caller refuse to
-/// boot the vault (Tailscale is the sole inbound path).
-/// The authkey, when provided, is staged to a 0600 file and passed as
-/// `--auth-key=file:` (never argv — /proc cmdline is world-readable) and
-/// removed afterwards. With restored identity state the key is omitted
-/// entirely: tailscale only attempts a login when the state is missing or
-/// stale, so a valid `tailscaled.state` rejoins the tailnet keyless.
-/// `socket` is the CLI's `--socket`: tailscaled runs on a non-default
-/// LocalAPI path.
+/// Run `tailscale up` under a hard timeout; failure means the caller must
+/// refuse to boot the vault. An authkey is staged to a 0600 file and passed
+/// as `--auth-key=file:` so the key never reaches argv; restored state needs none.
 pub fn tailscale_up(
     authkey: Option<&str>,
     hostname: &str,
@@ -100,23 +91,9 @@ pub fn tailscale_up(
     ok
 }
 
-/// `tailscale serve`: inbound tailnet path for the loopback vault
-/// (userspace mode has none without it). With `service` set
-/// (`TAILSCALE_SERVICE`), the node advertises itself as a host of `svc:<name>` — the Service-host
-/// form. An advertisement registered before the service existed in the
-/// admin console can wedge the host registration console-side ("no Service
-/// hosts" forever), so any stale `svc:<name>` config is cleared first; a
-/// fresh advertise then re-registers cleanly. The CLI implies `--bg`,
-/// requires a tagged node and admin-console Service definition (plus
-/// approval, or an `autoApprovers.services` policy).
-///
-/// A zero exit alone proves nothing (the CLI can exit 0 with the serve
-/// config not yet active), so the live `serve status` output is checked
-/// for the configured target before success is reported — the boot gate
-/// that treats serve failure as fatal is only as good as this check.
-///
-/// The whole sequence shares one `timeout` budget: a slow CLI must not
-/// multiply the phase's bound by the number of calls (up to six).
+/// Run `tailscale serve` for the loopback vault (userspace mode's only
+/// inbound path) and verify the target appears in `serve status --json`;
+/// one `timeout` bounds the sequence. With `service`, stale `svc:` is cleared.
 pub fn tailscale_serve(
     port: u16,
     service: Option<&str>,
@@ -171,14 +148,15 @@ pub fn tailscale_serve(
     false
 }
 
-/// True iff the `serve status --json` payload advertises `target` over
-/// HTTPS (pure, unit-tested — never parsed from argv or logs).
+/// True iff the `serve status --json` payload contains `target` (a substring
+/// check; the payload is never parsed from argv or logs).
 fn serve_status_has(status: &str, target: &str) -> bool {
     status.contains(target)
 }
 
 #[cfg(test)]
 mod tests {
+    //! Serve-status readiness parsing tests.
     use super::*;
 
     /// The readiness check matches the configured target anywhere in the

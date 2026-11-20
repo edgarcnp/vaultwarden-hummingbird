@@ -78,6 +78,7 @@ pub(crate) fn dump(path: &str, staged: &str, abort: &(impl Fn() -> bool + Sync))
     }
 }
 
+/// Consistency under WAL, abort handling, and failure cleanup.
 #[cfg(test)]
 mod tests {
     use super::*;

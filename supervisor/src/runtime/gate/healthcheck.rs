@@ -12,10 +12,8 @@ use crate::runtime::POLL;
 use crate::util::log;
 use crate::util::wait_until;
 
-/// Hard overall deadline: a boot-time gate that is not yet bound is retried
-/// until this expires. Worst case is budget + probe; 6 + 2 = 8s stays under
-/// the image's 10s HEALTHCHECK timeout — the probe can never be the reason
-/// a health check times out.
+/// Hard overall deadline for retrying an unbound boot-time gate. Worst case
+/// is budget + probe (6 + 2 = 8s), under the image's 10s health-check timeout.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Must be called before any boot side effect: spawns no children, touches
@@ -45,6 +43,7 @@ fn healthcheck_until(addr: SocketAddr, budget: Duration) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Healthcheck retry tests against a stand-in gate and vault.
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -54,10 +53,9 @@ mod tests {
     use super::super::server::{bind, handle};
     use super::{healthcheck, healthcheck_until};
 
-    /// A stand-in gatekeeper: serves the real `handle` on an ephemeral
-    /// listener for every connection (the healthcheck retries, so one-shot
-    /// serving would not do), probing `vault` exactly like the real gate.
-    /// Returns the exposed port.
+    /// Stand-in gatekeeper: serves the real `handle` on an ephemeral listener
+    /// for every connection (healthcheck retries), probing `vault` exactly
+    /// like the real gate. Returns the exposed port.
     fn fake_gate(vault: Option<SocketAddr>) -> u16 {
         let listener = bind(0).unwrap();
         let port = listener.local_addr().unwrap().port();

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 /// 64 KiB chunks: bounded memory, few syscalls per MiB.
 const CHUNK: usize = 64 * 1024;
 
-/// The lowercase hex SHA-256 of a reader's contents.
+/// Stream `reader` to its lowercase hex SHA-256 with one 64 KiB buffer.
 pub fn sha256_reader(reader: &mut impl Read) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
@@ -23,11 +23,10 @@ pub fn sha256_reader(reader: &mut impl Read) -> std::io::Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
-/// The lowercase hex SHA-256 of a file's contents.
+/// The lowercase hex SHA-256 of a file's contents, streamed in bounded memory.
+/// A sync source or staged dump may have been swapped for a FIFO after
+/// enumeration, so a non-regular file is refused instead of blocking.
 pub fn sha256_file(path: &str) -> std::io::Result<String> {
-    // The path may be a sync source or a staged dump that a compromised
-    // writer could have replaced with a FIFO after enumeration; refuse a
-    // non-regular file instead of blocking on it.
     let mut file = crate::util::fs::open_regular(path)?;
     sha256_reader(&mut file)
 }
@@ -39,8 +38,9 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex(&hasher.finalize())
 }
 
-/// Lowercase hex of a digest.
+/// Encode `bytes` as lowercase hex, two characters per byte.
 pub(crate) fn hex(bytes: &[u8]) -> String {
+    /// Lowercase hex digits, indexed by nibble.
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -52,8 +52,11 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! Hash-vector, encoding, and FIFO-refusal tests.
+
     use super::*;
 
+    /// A clean file path under a per-test temp directory.
     fn scratch(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("vw-sup-hash-{}-{}", name, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

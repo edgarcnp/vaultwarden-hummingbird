@@ -19,10 +19,9 @@ use crate::util::fs::{STATE_ROOT, under_root};
 /// timeout (the request is issued immediately after signing).
 pub(super) const SIGN_EXPIRE: Duration = Duration::from_secs(900);
 
-/// Total body budget for one transfer (upload or download body). A single
-/// end-to-end request timeout made large objects unsyncable whenever the
-/// bucket was slow; per-phase budgets bound every hang while still giving
-/// a body this whole window to make progress.
+/// Total body budget for one transfer (upload or download body). Per-phase
+/// budgets bound every hang while still giving a body this whole window to
+/// make progress.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// SigV4 signing region: derived from the endpoint for AWS S3 (its
@@ -30,10 +29,9 @@ pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(600);
 /// compatible providers (R2, B2, MinIO, ...) accept or ignore it.
 pub(super) const AUTO_REGION: &str = "auto";
 
-/// Whether a request failure is worth another attempt. Retrying a
-/// definitive answer (bad credentials, missing object, TLS verification,
-/// malformed URI) only delays the failure and multiplies load; retry
-/// transient transport errors and the statuses providers use for overload.
+/// Whether a request failure is worth another attempt: retry transient
+/// transport errors and overload statuses; a definitive answer (bad
+/// credentials, missing object, TLS verification, malformed URI) never changes.
 pub(super) fn retryable(e: &ureq::Error) -> bool {
     match e {
         ureq::Error::StatusCode(code) => matches!(*code, 408 | 429 | 500 | 502 | 503 | 504),
@@ -56,7 +54,9 @@ pub(super) fn retryable(e: &ureq::Error) -> bool {
 /// A reader that checks the stop flag before every chunk, so a large
 /// upload body is cancelled promptly instead of running to BODY_TIMEOUT.
 pub(super) struct AbortReader<'a, R> {
+    /// Source of body bytes.
     pub(super) inner: R,
+    /// Stop predicate, evaluated before each chunk.
     pub(super) abort: &'a dyn Fn() -> bool,
 }
 
@@ -76,6 +76,7 @@ impl<R: Read> Read for AbortReader<'_, R> {
 /// the caller rebuilds and re-signs the request per attempt, so a retry
 /// can never reuse an expired presigned URL.
 pub(super) const RETRY_ATTEMPTS: u32 = 3;
+/// Base retry delay; attempt `n` waits `base << (n-1)` plus up to 100 ms jitter.
 pub(super) const RETRY_BASE: Duration = Duration::from_millis(200);
 
 /// Run one idempotent request with bounded, jittered retries. `request`
@@ -101,16 +102,18 @@ pub fn validate_ca_file(path: &str) -> anyhow::Result<()> {
     ca_certs(path).map(|_| ())
 }
 
+/// Parse the PEM CA bundle at `path`, under the supervisor state root.
 pub(super) fn ca_certs(path: &str) -> anyhow::Result<Vec<ureq::tls::Certificate<'static>>> {
     ca_certs_in(path, Path::new(STATE_ROOT))
 }
 
+/// Parse `path` as a PEM bundle rooted at `root`. Refuses a path outside
+/// `root` or inside the tailscaled-writable subtrees, a symlink or
+/// non-regular file, and a bundle over 1 MiB with no certificate.
 fn ca_certs_in(path: &str, root: &Path) -> anyhow::Result<Vec<ureq::tls::Certificate<'static>>> {
     const MAX_CA_BYTES: u64 = 1024 * 1024;
-    // The CA decides which server is trusted; it must live on the
-    // supervisor-only state volume but outside the tailscaled-writable
-    // subtree. Config resolution checks this first; repeating it here keeps
-    // the transport safe for direct callers.
+    // The CA decides which server is trusted; config resolution checks this
+    // too, but repeating it here keeps direct callers safe.
     let tailscale = root.join("tailscale");
     let link = root.join("tailscale-state");
     if !under_root(root, path) || under_root(&tailscale, path) || under_root(&link, path) {
@@ -154,10 +157,9 @@ fn ca_certs_in(path: &str, root: &Path) -> anyhow::Result<Vec<ureq::tls::Certifi
     Ok(certs)
 }
 
-/// Read a capped response body, checking `abort` before every chunk. The
-/// body limit is enforced by reading one byte past it; a truncated read is
-/// an error, never a silently shortened manifest/list. Control-plane reads
-/// that ignored `abort` could hold a shutdown for the whole body budget.
+/// Read a capped response body, checking `abort` before every chunk. A body
+/// over `max` is an error, never a silently shortened manifest or list, and a
+/// stop request ends the read instead of holding the shutdown for the budget.
 pub(super) fn read_body_capped(
     response: ureq::http::Response<ureq::Body>,
     max: u64,
@@ -201,14 +203,9 @@ pub(super) fn backoff(attempt: u32) -> Duration {
     base + Duration::from_millis(jitter)
 }
 
-/// The signing region for an endpoint: the region embedded in AWS S3's
-/// hostnames, `auto` for every other S3-compatible provider. Handles the
-/// regional, dualstack, FIPS, and China spellings AWS serves
-/// (`s3.<region>.amazonaws.com`, `s3-<region>.amazonaws.com`,
-/// `s3.dualstack.<region>.amazonaws.com`, `s3-fips.<region>.amazonaws.com`,
-/// `s3-fips.dualstack.<region>.amazonaws.com`, and their
-/// `.amazonaws.com.cn` variants); acceleration hosts always sign in
-/// us-east-1.
+/// Signing region: the region in an AWS S3 hostname (regional, dualstack,
+/// FIPS, China, virtual-hosted) or [`AUTO_REGION`] for any other provider.
+/// Acceleration hosts always sign in us-east-1.
 pub(super) fn region_for(endpoint: &Url) -> String {
     let Some(raw_host) = endpoint.host_str() else {
         return AUTO_REGION.to_string();
@@ -264,10 +261,8 @@ pub(super) fn region_for(endpoint: &Url) -> String {
     }
 }
 
-/// A path-prefixed endpoint must keep its prefix when rusty-s3 joins the
-/// bucket: `Url::join` replaces the last segment unless the path ends with
-/// a separator, which would silently drop `https://host/s3` to
-/// `https://host/<bucket>`. Normalize once, at connect.
+/// Append `/` to a path-prefixed endpoint so the bucket join keeps the
+/// prefix; `Url::join` replaces the last segment otherwise.
 pub(super) fn normalize_endpoint(mut endpoint: Url) -> Url {
     if !endpoint.path().ends_with('/') {
         let mut path = endpoint.path().to_string();
@@ -277,10 +272,8 @@ pub(super) fn normalize_endpoint(mut endpoint: Url) -> Url {
     endpoint
 }
 
-/// Reject a non-2xx response that ureq did not already turn into an error.
-/// With redirects disabled a 3xx arrives as a "successful" response;
-/// treating it as one would make uploads silent no-ops and downloads
-/// foreign bodies.
+/// Reject a non-2xx response that ureq did not turn into an error: with
+/// redirects disabled a 3xx arrives as a "success" and must not be obeyed.
 pub(super) fn checked(
     action: &str,
     subject: &str,
@@ -307,6 +300,8 @@ pub(super) fn http_err(e: &ureq::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! CA-bundle policy: containment, symlinks, non-PEM content, and FIFOs.
+
     use super::*;
 
     #[test]

@@ -14,16 +14,9 @@ use super::env::EnvGrant;
 use super::reap::exit_code;
 use crate::util::{StagedFile, log};
 
-/// Env keys external children may inherit: secret-free plumbing only.
-/// Everything else (auth keys, S3 credentials, database URLs, SMTP/admin
-/// secrets) stays inside the supervisor — a helper binary that is
-/// compromised or merely chatty must not become a secrets broadcast.
-/// The set is deliberately tiny:
-/// - `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`: egress-controlled deployments
-///   route Tailscale traffic through a proxy;
-/// - `SSL_CERT_FILE`/`SSL_CERT_DIR`: Go (tailscaled) trusts custom roots
-///   this way;
-/// - `TZ`: cosmetic timestamps in child logs.
+/// Env keys external children may inherit: secret-free plumbing only —
+/// proxy variables, Go's `SSL_CERT_*` roots, and `TZ`. Auth keys, S3
+/// credentials, database URLs and SMTP/admin secrets stay in the supervisor.
 const BASELINE_ENV: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -46,11 +39,8 @@ pub(crate) fn allowlisted(vars: impl Iterator<Item = (String, String)>) -> Vec<(
 }
 
 /// [`allowlisted`] over the supervisor's own environment, applied as an
-/// [`EnvGrant`]: clear, allow-listed plumbing, then `extra_env`
-/// (connection config rides there — e.g. pg_env). Non-UTF-8 keys are
-/// dropped, like the vaultwarden child env: a mangled key must not reach
-/// a child. Never place secrets here. Shared by the bounded runs and the
-/// long-running tailscaled spawn.
+/// [`EnvGrant`]: clear, allow-listed plumbing, then `extra_env`. Non-UTF-8
+/// keys are dropped. Shared by bounded runs and the tailscaled spawn.
 pub fn apply_env(cmd: &mut Command, extra_env: &[(String, String)]) {
     EnvGrant::new()
         .layer(
@@ -70,13 +60,9 @@ pub fn apply_env(cmd: &mut Command, extra_env: &[(String, String)]) {
 /// this path (object names), so megabytes are already extraordinary.
 const CAPTURE_MAX: u64 = 16 * 1024 * 1024;
 
-/// Core of both bounded runs: spawn (registered with the reaper hub),
-/// poll (verdict / abort / timeout / capture cap), then group-kill on
-/// failure and consume the reaped status. `capture` redirects stdout to a
-/// temp file and enforces the capture cap while the child runs; the file
-/// comes back so the capture wrapper can do its own capped final read.
-/// Returns `(success, captured stdout file)`; the file is `None` when not
-/// capturing or when the run never got far enough to matter.
+/// Core of both bounded runs: spawn (registered with the reaper hub), poll
+/// for verdict, abort, timeout, or the capture cap, then group-kill on
+/// failure and consume the reaped status. Returns `(success, stdout file)`.
 fn run_bounded_core(
     timeout: Duration,
     prog: &str,
@@ -157,9 +143,8 @@ pub fn run_bounded(timeout: Duration, prog: &str, args: &[&str], abort: impl Fn(
 }
 
 /// [`run_bounded`] with extra child env vars (e.g. connection plumbing).
-/// The child runs as its own process-group leader, so the expiry/abort kill
-/// reaches anything it spawned, not just the direct child. Its environment
-/// is allow-listed ([`apply_env`]) — the supervisor's env never leaks.
+/// The child leads its own process group, so expiry/abort kills reach its
+/// descendants, and its env is allow-listed ([`apply_env`]).
 fn run_bounded_env(
     timeout: Duration,
     prog: &str,
@@ -170,12 +155,9 @@ fn run_bounded_env(
     run_bounded_core(timeout, prog, args, extra_env, abort, false).0
 }
 
-/// [`run_bounded_env`] capturing the child's stdout; stderr stays
-/// inherited so failures remain visible in container logs. `None` = spawn
-/// failure, stop request, timeout, non-zero exit, or oversized output.
-/// Stdout lands in a temp file, not a pipe, so the poll loop stays in
-/// charge (why: the stdout-holding-descendant test below); output is
-/// capped twice — in-loop and at the final read.
+/// [`run_bounded_env`] capturing stdout; stderr stays inherited. `None` on
+/// spawn failure, stop request, timeout, non-zero exit, or oversized output.
+/// Stdout lands in a temp file capped both in-loop and at the final read.
 pub fn run_bounded_capture(
     timeout: Duration,
     prog: &str,
@@ -211,6 +193,7 @@ pub fn run_bounded_capture(
 
 #[cfg(test)]
 mod tests {
+    //! Bounded-run tests: verdicts, capture, timeout, size cap, env allow-list.
     use super::*;
 
     /// A child that exits almost instantly still yields its true verdict:

@@ -65,6 +65,7 @@ pub fn reap_until_gone(child: &Handle, grace: Duration) -> Gone {
 
 #[cfg(test)]
 mod tests {
+    //! Status-decoding, signaling-refusal, and TERM-to-KILL escalation tests.
     use std::process::Command;
     use std::time::Duration;
 

@@ -1,5 +1,6 @@
-//! Config resolution: process env + optional supervisor-owned dotenv file.
-//! Feature modules follow a `spec`/`resolve` folder split, re-exported here.
+//! Boot-time configuration: process env plus an optional supervisor-owned
+//! dotenv file, resolved once and re-exported here. Every feature follows a
+//! `spec`/`resolve` split; anything unresolved or conflicting refuses the boot.
 
 mod backup;
 mod consts;

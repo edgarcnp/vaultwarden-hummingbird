@@ -5,7 +5,8 @@
 //! state volume), so this layer only parses the validated file.
 //!
 //! Siblings: `client` (put/get/list/delete over one bucket), `remote`
-//! (the resolved remote as pure data).
+//! (the resolved remote as pure data), `transport` (the shared request
+//! policy: timeouts, retries, caps, TLS roots).
 
 mod client;
 mod remote;

@@ -16,18 +16,25 @@ pub(super) const MANIFEST_NAME: &str = "manifest";
 /// Text cap: ~40k entries fit with room to spare.
 pub(super) const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 
+/// One manifest row: a synced file's size and content hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Entry {
+    /// Content length in bytes, as uploaded.
     pub size: u64,
+    /// Lowercase-hex SHA-256 of the uploaded bytes.
     pub sha256: String,
 }
 
+/// The bucket-side record of the durable set, keyed by bucket-relative path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Manifest {
+    /// One entry per synced file, in path order.
     entries: BTreeMap<String, Entry>,
 }
 
 impl Manifest {
+    /// Parse the versioned text, rejecting the whole manifest on any
+    /// malformed line.
     pub(super) fn parse(text: &str) -> anyhow::Result<Self> {
         let mut lines = text.lines();
         ensure!(lines.next() == Some("v1"), "missing v1 header");
@@ -69,6 +76,7 @@ impl Manifest {
         Ok(Self { entries })
     }
 
+    /// Render the versioned text the bucket stores, sorted by path.
     pub(super) fn render(&self) -> String {
         let mut out = String::from("v1\n");
         for (rel, entry) in &self.entries {
@@ -83,6 +91,7 @@ impl Manifest {
         self.entries.is_empty()
     }
 
+    /// The entry for a synced path, when the manifest names it.
     pub(super) fn get(&self, rel: &str) -> Option<&Entry> {
         self.entries.get(rel)
     }
@@ -96,6 +105,7 @@ impl Manifest {
         before - self.entries.len()
     }
 
+    /// Record a path's uploaded content, replacing any previous entry.
     pub(super) fn insert(&mut self, rel: String, entry: Entry) {
         self.entries.insert(rel, entry);
     }
@@ -105,15 +115,18 @@ impl Manifest {
         self.entries.remove(rel)
     }
 
+    /// How many files the manifest names.
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Iterate the entries in path order.
     pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &Entry)> {
         self.entries.iter()
     }
 }
 
+/// Manifest round-trip and malformed-input rejection.
 #[cfg(test)]
 mod tests {
     use super::*;

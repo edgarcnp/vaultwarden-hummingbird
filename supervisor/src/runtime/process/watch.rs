@@ -2,7 +2,8 @@
 //! brings every child down before exiting, and the maintenance reactor that
 //! drives periodic state sync and DB backup. Reaping itself lives in the
 //! reaper hub ([`super::reaper`]); this loop only reads the long-running
-//! children's delivered statuses.
+//! children's delivered statuses. tailscaled is the sole inbound path, so
+//! its unexpected exit tears down the vault and exits 1.
 
 use std::process::exit;
 use std::time::Duration;
@@ -16,14 +17,9 @@ use crate::runtime::{
 };
 use crate::util::log;
 
-/// Hand off to vaultwarden and supervise it: bind the exposed-port
-/// gatekeeper (the only `0.0.0.0` listener), start the loopback-only vault,
-/// then watch — observing vaultwarden's exit or a stop request while the
-/// maintenance reactor drives periodic state sync and DB backup — then
-/// tearing down tailscaled and exiting with vaultwarden's code. Tailscale
-/// is the sole inbound path: if tailscaled dies mid-run the vault is torn
-/// down too (exit 1) so the orchestrator restarts the whole container — a
-/// vault nobody can reach is worse than a short outage.
+/// Bind the exposed-port gate (the only public listener), start the
+/// loopback-only vault, then watch both children and the maintenance reactor
+/// until an exit or stop, and always exit through [`shutdown`].
 pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
     // fail closed on a missing internal port: co-binding would expose the vault
     let Some(vault_port) = cfg.vault_port else {
@@ -130,15 +126,9 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
     shutdown(Some(tsd), Some(vw), code, reactor)
 }
 
-/// Bring every child down and exit the container: TERM each child group,
-/// escalate to KILL after `TERM_GRACE`, wait for one clean reaper pass,
-/// then let the reactor run the final DB dump and state push — children are
-/// gone first, and the reactor is the only writer. The persist budget
-/// bounds the finish; a stop request observed while draining shortens it.
-/// Children that are already dead are fine: the escalation finds a
-/// delivered status and the bounded wait returns immediately. The TERM is
-/// idempotent with a caller's earlier signal; this function also handles
-/// the boot-phase teardown where no caller sent one.
+/// Tear down every child (TERM each group, KILL after `TERM_GRACE`), wait for
+/// one clean reaper pass, run the reactor's final DB dump and state push, then
+/// exit `code`. Already-dead children and repeated TERMs are harmless.
 pub fn shutdown(tsd: Option<Handle>, vw: Option<Handle>, code: i32, reactor: Option<Reactor>) -> ! {
     log::info("shutting down");
     if let Some(t) = &tsd {

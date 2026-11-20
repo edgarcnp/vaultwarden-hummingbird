@@ -33,7 +33,9 @@ use crate::util::{log, net};
 
 /// What one boot phase decided: continue, or tear down and exit.
 enum Outcome {
+    /// Run the next phase.
     Next,
+    /// Tear down what exists and exit with this code.
     Exit(i32),
 }
 
@@ -41,20 +43,25 @@ enum Outcome {
 /// loop's tail and never returns.
 #[derive(Clone, Copy)]
 enum Phase {
+    /// Adopt the bucket's newest generation when the DB is non-empty.
     AdoptLineage,
+    /// Restore the DB when it is empty.
     RestoreDb,
+    /// Fill missing local state files from the bucket.
     RestoreState,
+    /// Spawn tailscaled.
     Tailscaled,
+    /// Wait for the tailscaled LocalAPI socket.
     DaemonWait,
+    /// Authenticate the node, then push state.
     TailscaleUp,
+    /// Advertise the vault through `tailscale serve`.
     Serve,
 }
 
-// AdoptLineage deliberately precedes RestoreDb: a restore records the
-// generation it actually imported, and adoption (which stamps the bucket's
-// newest) must never overwrite that. Adoption only acts on a non-empty DB
-// and restore only on an empty one, so at most one of the two does
-// anything in a given boot.
+/// Boot phases in execution order. Adoption precedes restore: a restore records
+/// the generation it imported, adoption stamps the bucket's newest, and each
+/// acts only on a non-empty/empty DB, so at most one does anything per boot.
 const PHASES: [Phase; 7] = [
     Phase::AdoptLineage,
     Phase::RestoreDb,
@@ -68,7 +75,9 @@ const PHASES: [Phase; 7] = [
 /// The boot context: resolved configuration plus the tailscaled handle
 /// once the daemon phase has produced it.
 struct Boot {
+    /// Resolved configuration.
     cfg: Config,
+    /// The tailscaled handle, set by the `Tailscaled` phase.
     tsd: Option<Handle>,
 }
 
@@ -79,6 +88,7 @@ impl Boot {
         shutdown(self.tsd.clone(), None, code, None)
     }
 
+    /// Apply `phase`'s stop/failure policy from the module table.
     fn run(&mut self, phase: Phase) -> Outcome {
         match phase {
             Phase::RestoreDb => {

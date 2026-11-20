@@ -120,6 +120,8 @@ pub(super) fn resolve_service(v: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    //! Namespace predicates, port validation, and service references.
+
     use super::*;
 
     #[test]

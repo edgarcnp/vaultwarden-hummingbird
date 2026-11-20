@@ -29,6 +29,7 @@ use super::synced::is_deletable;
 
 /// The bucket object holding the tombstone list (inside the sync prefix).
 pub(super) const TOMBSTONES_NAME: &str = "tombstones";
+/// Cap for the bucket-side tombstone list, enforced on read and write.
 pub(super) const MAX_TOMBSTONES_BYTES: u64 = 4 * 1024 * 1024;
 
 /// A file missing from the local volumes becomes a tombstone after this
@@ -46,6 +47,7 @@ pub(super) const MAX_TOMBSTONES_PER_RUN: usize = 32;
 /// Bounded object deletions per GC pass; the next pass continues.
 pub(super) const MAX_GC_DELETES: usize = 1000;
 
+/// Seconds since the Unix epoch, 0 when the clock is unavailable.
 pub(super) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -53,12 +55,16 @@ pub(super) fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Paths deleted by user intent, each with the time it was recorded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Tombstones {
+    /// Deleted path → deletion time, in seconds since the epoch.
     entries: BTreeMap<String, u64>,
 }
 
 impl Tombstones {
+    /// Parse the versioned text, dropping entries outside the deletable
+    /// user data.
     pub(super) fn parse(text: &str) -> anyhow::Result<Self> {
         let mut lines = text.lines();
         anyhow::ensure!(lines.next() == Some("v1"), "missing v1 header");
@@ -89,6 +95,7 @@ impl Tombstones {
         Ok(Self { entries })
     }
 
+    /// Render the versioned text the bucket stores, sorted by path.
     pub(super) fn render(&self) -> String {
         let mut out = String::from("v1\n");
         for (rel, stamp) in &self.entries {
@@ -97,20 +104,25 @@ impl Tombstones {
         out
     }
 
+    /// Whether the path is tombstoned.
     pub(super) fn contains(&self, rel: &str) -> bool {
         self.entries.contains_key(rel)
     }
 
+    /// Tombstone a path now; paths outside the deletable user data are
+    /// ignored.
     pub(super) fn insert(&mut self, rel: String) {
         if is_deletable(&rel) {
             self.entries.insert(rel, now_unix());
         }
     }
 
+    /// Clear a path's tombstone, returning whether it was present.
     pub(super) fn remove(&mut self, rel: &str) -> bool {
         self.entries.remove(rel).is_some()
     }
 
+    /// How many paths are tombstoned (test-only helper).
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries.len()
@@ -142,14 +154,18 @@ impl Tombstones {
 /// current scan. A file that reappears is removed immediately.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Missing {
+    /// Absent path → first-seen time, in seconds since the epoch.
     entries: BTreeMap<String, u64>,
 }
 
 impl Missing {
+    /// The sidecar's path under the supervisor state directory.
     fn path(state_dir: &str) -> PathBuf {
         Path::new(state_dir).join(".sync-missing")
     }
 
+    /// Load the sidecar; an unreadable file is empty and malformed lines are
+    /// skipped.
     pub(super) fn load(state_dir: &str) -> Self {
         let text = read_capped(&Self::path(state_dir).to_string_lossy(), 16 * 1024 * 1024)
             .unwrap_or_default();
@@ -169,6 +185,7 @@ impl Missing {
         Self { entries }
     }
 
+    /// Persist the sidecar at 0600, removing it when nothing is pending.
     pub(super) fn save(&self, state_dir: &str) {
         let path = Self::path(state_dir);
         if self.entries.is_empty() {
@@ -204,16 +221,19 @@ impl Missing {
             .collect()
     }
 
+    /// Stop tracking a path as absent.
     pub(super) fn remove(&mut self, rel: &str) {
         self.entries.remove(rel);
     }
 
+    /// Whether nothing is pending (test-only helper).
     #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }
 
+/// Tombstone serialization, deletion policy, and GC windows.
 #[cfg(test)]
 mod tests {
     use super::*;

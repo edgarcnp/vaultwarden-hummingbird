@@ -21,12 +21,16 @@ use super::lineage;
 use super::staging::sweep_staging;
 use super::tools::{Client, client, list_objects, load_manifest};
 
-/// One restore candidate: object key, its listed size, and (when it came
-/// from the manifest) the generation to record as lineage on success.
+/// One restore candidate: object key, listed size, and the manifest data
+/// that proves its content.
 struct Candidate {
+    /// Full bucket key to fetch.
     key: String,
+    /// Listed size; a download of any other size is refused.
     size: u64,
+    /// Manifest generation to record as lineage; `None` for a listing entry.
     generation: Option<u64>,
+    /// Manifest hash to verify; `None` when the entry predates v2.
     sha256: Option<String>,
 }
 
@@ -57,6 +61,8 @@ pub fn restore_if_empty(cfg: &DbBackupConfig, abort: impl Fn() -> bool + Sync) -
     restore_if_empty_with_budget(cfg, abort, DB_RESTORE_BUDGET)
 }
 
+/// [`restore_if_empty`] with an explicit deadline, so tests can bound the
+/// whole fallback instead of waiting on the production budget.
 fn restore_if_empty_with_budget(
     cfg: &DbBackupConfig,
     abort: impl Fn() -> bool + Sync,
@@ -354,6 +360,7 @@ fn restore_object(
     }
 }
 
+/// Restore gating, candidate fallback, budget, and adoption.
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};

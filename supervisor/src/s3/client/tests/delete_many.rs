@@ -59,6 +59,7 @@ fn serve(status: &'static str, response: &'static str) -> (SocketAddr, Arc<Mutex
     (addr, captured)
 }
 
+/// A DeleteResult naming both deleted keys.
 const OK: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
 <Deleted><Key>a</Key></Deleted><Deleted><Key>b</Key></Deleted></DeleteResult>"#;

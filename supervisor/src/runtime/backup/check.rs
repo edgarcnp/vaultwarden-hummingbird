@@ -9,6 +9,7 @@ pub(super) fn is_empty(cfg: &DbBackupConfig) -> anyhow::Result<bool> {
     super::sqlite::is_empty(&cfg.db_path)
 }
 
+/// The absent-file case of the emptiness gate.
 #[cfg(test)]
 mod tests {
     use super::super::support;

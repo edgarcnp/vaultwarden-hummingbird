@@ -46,6 +46,9 @@ pub(super) enum Known {
 }
 
 /// The recorded lineage, if any.
+///
+/// Only a missing keyed file falls back to the legacy record; a symlink,
+/// directory, or unreadable file at the keyed name yields `None`.
 pub(super) fn read(state_dir: &str, key: &str) -> Option<Known> {
     // The sidecar is a generation or a legacy object name; 1 KiB is ample.
     // A symlink, directory, or oversized/corrupt file is "no usable
@@ -83,6 +86,7 @@ pub(super) fn write_name(state_dir: &str, key: &str, name: &str) {
     write_text(state_dir, key, &format!("{name}\n"));
 }
 
+/// Atomically replace the sidecar; a failure is logged, never returned.
 fn write_text(state_dir: &str, key: &str, text: &str) {
     let path = sidecar_path(state_dir, key);
     // Atomic replace: a symlink at the sidecar path is replaced, never
@@ -119,10 +123,12 @@ pub(super) fn verdict(known: Option<u64>, bucket_latest: u64) -> Verdict {
     }
 }
 
+/// Verdict matrix and sidecar round trips, including the legacy fallback.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Create a fresh scratch directory for one test.
     fn scratch(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("vw-sup-lin-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

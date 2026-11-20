@@ -4,29 +4,28 @@ use std::time::Duration;
 
 use super::super::sync::SyncConfig;
 
-/// S3-backed sqlite dumps (opt-in): periodic snapshots pushed to
-/// `<state remote>/db`, pruned to keep-N, plus an opt-in boot-time restore
-/// into an empty DB. Cloned onto the maintenance thread that runs the
-/// periodic dumps.
+/// S3-backed sqlite dumps (opt-in): periodic snapshots under `<remote>/db`,
+/// pruned to keep-N, plus an optional boot-time restore into an empty DB.
+/// Cloned onto the maintenance thread that runs the periodic dumps.
 #[derive(Clone)]
 pub struct DbBackupConfig {
-    /// S3 credentials + backend env, shared with the state sync (cloned)
+    /// S3 credentials and backend settings, shared with state sync.
     pub sync: SyncConfig,
-    /// the vault's sqlite database file (dump/restore target)
+    /// Path of the vault's sqlite database file (dump/restore target).
     pub db_path: String,
-    /// periodic dumps enabled (SUPERVISOR_DB_BACKUP)
+    /// Run periodic dumps (`SUPERVISOR_DB_BACKUP`).
     pub periodic: bool,
-    /// periodic dump cadence
+    /// Periodic dump cadence.
     pub interval: Duration,
-    /// dumps kept in the bucket (oldest pruned after each push)
+    /// Dumps kept in the bucket; older ones are pruned after each push.
     pub keep: usize,
-    /// boot-time restore into an empty DB (SUPERVISOR_DB_BACKUP_RESTORE)
+    /// Restore the newest dump into an empty DB at boot
+    /// (`SUPERVISOR_DB_BACKUP_RESTORE`).
     pub restore: bool,
-    /// local staging dir on the supervisor state volume for in-flight
-    /// dumps/pulls
+    /// Local staging directory for in-flight dumps and pulls.
     pub staging: String,
-    /// supervisor-only directory for the lineage and hash sidecars; never
-    /// on the vault-writable data volume
+    /// Supervisor-only directory for the lineage and hash sidecars; never
+    /// on the vault-writable data volume.
     pub state_dir: String,
 }
 
@@ -60,8 +59,11 @@ impl DbBackupConfig {
 
 #[cfg(test)]
 mod tests {
+    //! Sidecar identity isolation across database, remote, and endpoint.
+
     use super::*;
 
+    /// Build a valid config for one database, remote, and endpoint triplet.
     fn cfg(db: &str, remote: &str, endpoint: &str) -> DbBackupConfig {
         DbBackupConfig {
             sync: SyncConfig::new(

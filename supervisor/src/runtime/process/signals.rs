@@ -22,6 +22,8 @@ use signal_hook::flag;
 
 use crate::util::log;
 
+/// Process-global stop flag; set by the async-signal-safe handler, consumed
+/// by [`take_stop`] on the main thread.
 static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 /// The process-global stop flag, created on first use.
@@ -29,11 +31,9 @@ fn flag() -> &'static Arc<AtomicBool> {
     STOP.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
 
-/// Arm the stop handlers. Call once, first thing in `main`. Returns false
-/// if any required signal could not be registered: as PID 1 the container
-/// orchestrator's stop signals ARE the shutdown mechanism — a supervisor
-/// that cannot catch them degrades to SIGKILL-only teardown (no graceful
-/// child termination, no final state sync), so the boot must fail instead.
+/// Arm the stop handlers once at startup. Returns false if any signal could
+/// not be registered: as PID 1, losing them leaves only SIGKILL teardown, so
+/// boot must fail closed.
 pub fn install_signal_handlers() -> bool {
     let mut ok = true;
     for sig in [SIGTERM, SIGINT, SIGHUP, SIGQUIT] {
@@ -64,6 +64,7 @@ pub fn stopping() -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Stop-flag consumption tests.
     use super::*;
 
     #[test]

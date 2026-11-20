@@ -12,11 +12,9 @@ use std::time::{Duration, Instant};
 /// a health check times out.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Connect, send one request, read only the status line, report whether it
-/// is 2xx. Any failure — unreachable, hung, non-HTTP, non-2xx — is a plain
-/// `false`. One absolute budget covers the whole probe: the per-read
-/// deadline is always the time remaining, so a peer that drips bytes can
-/// never extend the probe past `timeout`.
+/// Probe `GET /alive`: connect, read only the status line, report whether it
+/// is 2xx. Any failure is `false`; one absolute budget covers the whole
+/// probe, so a peer that drips bytes cannot extend it.
 pub fn get_alive(addr: std::net::SocketAddr, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let remaining = || deadline.saturating_duration_since(Instant::now());
@@ -82,6 +80,7 @@ pub fn fake_vault(status: &'static str) -> std::net::SocketAddr {
 
 #[cfg(test)]
 mod tests {
+    //! Probe-budget test: a byte-dripping vault cannot outlive the timeout.
     use super::*;
 
     /// A vault that drips its status line one byte per read cannot extend

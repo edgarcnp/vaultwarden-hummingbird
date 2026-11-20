@@ -1,7 +1,6 @@
-//! S3 connection settings shared by the state sync and the DB backup.
-//! The `remote` knob keeps its `name:bucket[/prefix]` shape, but it is
-//! parsed here into a [`RemoteSpec`] — the parts the in-crate S3 client
-//! needs — no external tool consumes it anymore.
+//! S3 connection settings shared by state sync and DB backup. `remote` keeps
+//! its `name:bucket[/prefix]` shape but is parsed here into a [`RemoteSpec`],
+//! the parts the in-crate S3 client needs; no external tool consumes it.
 
 use std::time::Duration;
 
@@ -20,20 +19,15 @@ pub struct SyncConfig {
     pub target: RemoteSpec,
     /// periodic push cadence (0 disables periodic pushes)
     pub interval: Duration,
-    /// The resolved tailscaled state file as a name directly under the
-    /// supervisor state root, so the sync can carry the identity and the
-    /// daemon's derived cert cache (`<root>/certs`) is the synced tree.
-    /// `None` = the identity file cannot be part of the durable set (a
-    /// `mem:` state, or a path outside the root); the default
-    /// `tailscaled.state` name is still accepted by the predicate.
+    /// State file name directly under the state root, so sync carries the
+    /// identity and the daemon's derived cert cache (`<root>/certs`). `None` =
+    /// `mem:` or outside the root; the default `tailscaled.state` name still passes.
     pub state_file: Option<String>,
 }
 
 impl SyncConfig {
-    /// Build from raw knob values. The endpoint is required: every
-    /// provider — AWS included — is spelled out, none is a default.
-    /// `Err` names the problem: callers degrade (state sync disabled /
-    /// backup skipped) rather than guess.
+    /// Build from raw knob values; the endpoint is required, with no provider
+    /// default. `Err` names the problem so callers can degrade, not guess.
     pub fn new(
         remote: String,
         key_id: String,
@@ -78,10 +72,8 @@ impl SyncConfig {
         })
     }
 
-    /// Point the sync at a state file name directly under the state root.
-    /// The config resolver has already proved the absolute path is a direct
-    /// child of the root; this keeps the bucket-relative name safe as well:
-    /// no empty name, no separator, no traversal, no control character.
+    /// Point sync at `rel`, a file name directly under the state root. Unsafe
+    /// names (empty, separator, traversal, control character) leave it `None`.
     pub fn set_state_file_rel(&mut self, rel: &str) {
         let safe = !rel.is_empty()
             && rel.trim() == rel
@@ -119,13 +111,9 @@ impl SyncConfig {
     }
 }
 
-/// Parse `name:bucket[/prefix]` into a [`RemoteSpec`]. The name before
-/// the colon is rclone legacy and is accepted but ignored. Bucket
-/// sanity: non-empty, no `/`, `:`, URL delimiters (`?`, `#`, `%`), control
-/// characters, whitespace, or `.`/`..` path segments — provider-specific
-/// naming rules are the operator's business, but a name that can change the
-/// request URL is not. The prefix is normalized to end with `/` (or be
-/// empty).
+/// Parse `name:bucket[/prefix]` into a [`RemoteSpec`]; the legacy name before
+/// the colon is accepted and ignored. Reject buckets that could change the
+/// request URL, and normalize a non-empty prefix to end with `/`.
 fn parse_remote(
     remote: &str,
     key_id: String,
@@ -174,10 +162,13 @@ fn parse_remote(
 
 #[cfg(test)]
 mod tests {
+    //! Remote parsing, endpoint validation, and identity-name safety.
+
     use std::time::Duration;
 
     use super::*;
 
+    /// Parse `remote` and return its bucket and prefix.
     fn ok(remote: &str) -> (String, String) {
         let cfg = SyncConfig::new(
             remote.into(),

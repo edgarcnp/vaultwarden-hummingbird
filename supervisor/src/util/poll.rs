@@ -7,12 +7,9 @@
 
 use std::time::{Duration, Instant};
 
-/// Poll `check` until it returns `Some` (the wait succeeds), `abort`
-/// fires, or `timeout` passes (`None` = timeout or abort; callers that
-/// must distinguish the two consult their own stop flag). `check` runs
-/// before every exit condition, so a readiness that lands in the same
-/// tick as a stop request still wins. The sleep slice is the caller's
-/// `tick` capped at the remaining budget.
+/// Poll `check` until it answers, `abort` fires, or `timeout` passes; `None`
+/// means one of the latter, told apart by the caller's own flag. `check` runs
+/// first, so a same-tick readiness wins; sleeps are capped by the budget.
 pub fn wait_until<T>(
     mut check: impl FnMut() -> Option<T>,
     timeout: Duration,
@@ -33,6 +30,8 @@ pub fn wait_until<T>(
 
 #[cfg(test)]
 mod tests {
+    //! Loop-shape tests: check-first, bounded sleep, zero timeout, abort.
+
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;

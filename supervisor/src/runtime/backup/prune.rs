@@ -23,6 +23,8 @@ const ORPHAN_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Bounded orphan deletions per tick; the next tick continues.
 const MAX_ORPHAN_DELETES: usize = 1000;
 
+/// Delete the evicted objects; call only after the manifest that dropped
+/// them is published, so a crash never leaves a reference to a deleted one.
 pub(super) fn prune(
     client: &Client,
     cfg: &DbBackupConfig,
@@ -122,6 +124,7 @@ fn old_enough(name: &str, label: &str, now: i64) -> bool {
     now.saturating_sub(zoned.timestamp().as_second()) >= ORPHAN_GRACE.as_secs() as i64
 }
 
+/// Prune with no evictions: no deletes, no panic.
 #[cfg(test)]
 mod tests {
     use super::super::support;

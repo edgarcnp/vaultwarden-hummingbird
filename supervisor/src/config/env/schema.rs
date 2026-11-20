@@ -20,12 +20,17 @@ pub(crate) enum FilePolicy {
 /// A declared default for the scalar knobs `merge` assembles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Default {
+    /// A textual default for a string-valued knob.
     Str(&'static str),
+    /// A boolean default for a flag knob.
     Bool(bool),
 }
 
+/// One supervisor key with its dotenv policy and declared default.
 struct Knob {
+    /// The environment and dotenv key name, e.g. `TAILSCALE_SERVE`.
     pub name: &'static str,
+    /// How the dotenv file may (or may not) carry the key.
     pub policy: FilePolicy,
     /// `None` = the resolver owning the knob handles its default.
     pub default: Option<Default>,
@@ -156,6 +161,7 @@ static KNOBS: &[Knob] = &[
     },
 ];
 
+/// Look up a declared knob by its exact key name.
 fn find(name: &str) -> Option<&'static Knob> {
     KNOBS.iter().find(|knob| knob.name == name)
 }
@@ -175,6 +181,7 @@ pub(crate) fn consumed_child_key(name: &str) -> bool {
 }
 
 /// The declared string default of a scalar knob assembled by `merge`.
+/// Panics when the knob is undeclared or has a non-string default.
 pub(crate) fn string_default(name: &str) -> &'static str {
     match find(name).and_then(|knob| knob.default) {
         Some(Default::Str(value)) => value,
@@ -183,6 +190,7 @@ pub(crate) fn string_default(name: &str) -> &'static str {
 }
 
 /// The declared boolean default of a flag knob assembled by `merge`.
+/// Panics when the knob is undeclared or has a non-boolean default.
 pub(crate) fn bool_default(name: &str) -> bool {
     match find(name).and_then(|knob| knob.default) {
         Some(Default::Bool(value)) => value,
@@ -192,6 +200,8 @@ pub(crate) fn bool_default(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Knob-table invariants and the `.env.example` contract.
+
     use super::*;
 
     #[test]

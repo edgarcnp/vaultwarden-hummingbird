@@ -85,12 +85,14 @@ pub(super) fn retain(staged: &str, state_dir: &str, key: &str, fingerprint: &str
     let _ = std::fs::remove_file(legacy_path(state_dir));
 }
 
+/// The hash sidecar: repeat detection, per-identity isolation, cleanup.
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
 
+    /// Create a fresh scratch directory for one test.
     fn scratch(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("vw-sup-unch-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

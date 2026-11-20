@@ -17,15 +17,16 @@ pub fn err(msg: &str) {
 }
 
 /// Escape untrusted values before logging via std's [`str::escape_debug`]:
-/// newlines, tabs, control characters, quotes, and backslashes are turned
-/// into their escaped form, so user input can never forge additional log
-/// lines.
+/// newlines, tabs, control characters, quotes, and backslashes become their
+/// escaped form, so user input cannot forge additional log lines.
 pub fn sanitize(s: &str) -> String {
     s.escape_debug().collect()
 }
 
 #[cfg(test)]
 mod tests {
+    //! Escaping tests for untrusted log values.
+
     use super::*;
 
     #[test]

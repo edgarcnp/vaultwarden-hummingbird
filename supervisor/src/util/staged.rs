@@ -14,17 +14,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// One staged file; the on-disk name dies with this handle.
 pub struct StagedFile {
+    /// The open handle to the staged file.
     file: File,
+    /// The on-disk path, removed when the handle drops.
     path: String,
 }
 
 impl StagedFile {
-    /// Create `/tmp/<prefix>-<pid>-<seq>` (create_new: a pre-existing
-    /// file or symlink is never followed), owner-only (mode 0600, masked
-    /// by the umask — never wider). A leftover from an interrupted run
-    /// sits at the same deterministic name (pid 1 restarts at sequence
-    /// 0), so it is reclaimed instead of returned: a stale secret must not
-    /// linger and a crash must not jam the next boot.
+    /// Create `/tmp/<prefix>-<pid>-<seq>` exclusively, never following a
+    /// pre-existing path, at owner-only 0600 or narrower by umask. A leftover at
+    /// that deterministic name is reclaimed, so no stale secret blocks boot.
     pub fn create(prefix: &str) -> std::io::Result<Self> {
         Self::create_in("/tmp", prefix)
     }
@@ -32,6 +31,7 @@ impl StagedFile {
     /// [`Self::create`] in an explicit directory. Secrets that the vault
     /// must not interfere with use the supervisor-only state root.
     pub fn create_in(dir: &str, prefix: &str) -> std::io::Result<Self> {
+        /// Distinguishes staged names within this process.
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let path = format!(
             "{dir}/{prefix}-{}-{}",
@@ -73,11 +73,9 @@ impl Drop for StagedFile {
     }
 }
 
-/// Open a staged path with `create_new` semantics, reclaiming a leftover
-/// from an ungraceful exit: the deterministic name repeats across restarts,
-/// so a stale file — possibly a secret, possibly a symlink — is unlinked
-/// and the name reused. `create_new` never follows a link; `remove_file`
-/// removes the link itself, never its target.
+/// Open `path` exclusively, reclaiming a leftover from an ungraceful exit: a
+/// stale file (possibly a secret or a symlink) is unlinked and the name reused.
+/// `create_new` never follows it, and unlinking removes the link, not a target.
 fn open_staged(path: &str) -> std::io::Result<File> {
     let options = || {
         let mut options = OpenOptions::new();
@@ -104,6 +102,8 @@ impl StagedFile {
 
 #[cfg(test)]
 mod tests {
+    //! Staged-file lifecycle tests: mode, reclamation, cleanup.
+
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;

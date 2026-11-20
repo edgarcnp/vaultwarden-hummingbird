@@ -40,11 +40,14 @@ const STATE_TREES: [&str; 1] = ["certs"];
 /// writable data volume; the other is the supervisor-only state volume.
 #[derive(Clone, Debug)]
 pub(super) struct Roots {
+    /// The vault data volume (`/data` in production).
     pub(super) data: PathBuf,
+    /// The supervisor-only state volume (`/state` in production).
     pub(super) state: PathBuf,
 }
 
 impl Roots {
+    /// The production volumes.
     pub(super) fn production() -> Self {
         Self {
             data: PathBuf::from("/data"),
@@ -61,7 +64,8 @@ impl Roots {
         }
     }
 
-    /// Which volume owns a bucket-relative path.
+    /// Which volume owns a bucket-relative path: the identity file and the
+    /// cert tree live on the state volume, everything else on data.
     fn owns_state(&self, rel: &str, state_file: Option<&str>) -> bool {
         state_file == Some(rel) || rel == "tailscaled.state" || rel.starts_with("certs/")
     }
@@ -76,34 +80,25 @@ impl Roots {
         }
     }
 
+    /// The local path a synced file is read from or written to.
     pub(super) fn local(&self, rel: &str, state_file: Option<&str>) -> PathBuf {
         self.local_root(rel, state_file).join(rel)
     }
 }
 
-/// Exact mode for a downloaded file. Supervisor-owned and group-writable:
-/// the identity/cert tree is writable by tailscaled's group, vault data by
-/// the vault's group. The owning service reads through that group; it never
-/// needs world access.
+/// Exact mode for a downloaded file: supervisor-owned and group-writable, so the
+/// owning service reads through its group, never through world access.
 pub(super) const DOWNLOAD_MODE: u32 = 0o660;
 
-/// Whether a synced path may be removed by the tombstone lifecycle. The
-/// node identity and its certificates are never tombstoned: a transient
-/// volume loss must not erase the machine's identity from the bucket, and
-/// a user cannot delete them through the vault UI. Only user data and the
-/// admin config can be intentionally deleted.
+/// Whether the tombstone lifecycle may remove a path. Identity and certs never
+/// are: a transient volume loss must not erase the machine's identity.
 pub(super) fn is_deletable(rel: &str) -> bool {
     rel == "config.json" || rel.starts_with("attachments/") || rel.starts_with("sends/")
 }
 
-/// Whether a bucket-relative path is inside the durable set. Traversal
-/// and absolute paths never pass, in any position; neither does a
-/// supervisor `.vw-part` staging file left by an interrupted download. A
-/// user file ending `.part` is ordinary user data and is synced. The
-/// configured state file (a direct child of the `tailscale-state` link) is
-/// always inside the set; the default `tailscaled.state` spelling stays
-/// accepted even when a custom path is configured, so an identity synced by
-/// an earlier deployment remains restorable.
+/// Whether a bucket-relative path is inside the durable set. Traversal,
+/// absolute paths, control characters, and `.vw-part` staging names never pass;
+/// a user `.part` file does, and a custom state file only as a direct child.
 pub(super) fn is_synced_file(rel: &str, state_file: Option<&str>) -> bool {
     if rel.is_empty()
         || rel.trim() != rel
@@ -148,21 +143,28 @@ const MAX_SCAN_ENTRIES: usize = 50_000;
 /// large is already pathological and keeps recursion/FD use bounded.
 const MAX_SCAN_DEPTH: usize = 32;
 
-/// The deepest bucket path the scan can reach: the tree name, up to
-/// [`MAX_SCAN_DEPTH`] directories, and the file. `is_synced_file` rejects
-/// deeper keys so a pull cannot create a tree the next push would refuse.
+/// Bound on bucket-path components: the tree name, up to [`MAX_SCAN_DEPTH`]
+/// directories, and the file. Deeper keys are rejected so a pull cannot create
+/// a tree the next push would refuse.
 const MAX_SYNC_COMPONENTS: usize = MAX_SCAN_DEPTH + 2;
 
 /// Why a scan could not prove the complete durable set. A push must refuse
 /// rather than treat a partial scan as "these files were deleted".
 #[derive(Debug)]
 pub(super) enum ScanError {
+    /// A stop request interrupted the walk.
     Aborted,
+    /// A configured root is missing or not a real directory.
     MissingRoot(String),
+    /// A directory is nested deeper than [`MAX_SCAN_DEPTH`].
     TooDeep(String),
+    /// The walk materialized more than [`MAX_SCAN_ENTRIES`] entries.
     TooManyEntries,
+    /// A directory could not be read.
     Io {
+        /// The path being scanned when the error occurred.
         path: String,
+        /// The underlying I/O failure.
         source: std::io::Error,
     },
 }
@@ -181,6 +183,7 @@ impl std::fmt::Display for ScanError {
     }
 }
 
+/// Wrap an errno from the anchored walk as a scan failure.
 fn scan_io(path: &Path, error: nix::errno::Errno) -> ScanError {
     ScanError::Io {
         path: path.to_string_lossy().into_owned(),
@@ -188,6 +191,7 @@ fn scan_io(path: &Path, error: nix::errno::Errno) -> ScanError {
     }
 }
 
+/// Wrap a standard I/O error as a scan failure for the given path.
 fn std_io(path: &Path, source: std::io::Error) -> ScanError {
     ScanError::Io {
         path: path.to_string_lossy().into_owned(),
@@ -195,6 +199,7 @@ fn std_io(path: &Path, source: std::io::Error) -> ScanError {
     }
 }
 
+/// Directory-open flags for the walk: read-only, no symlink follow, close-on-exec.
 const DIR_FLAGS: OFlag = OFlag::O_RDONLY
     .union(OFlag::O_DIRECTORY)
     .union(OFlag::O_NOFOLLOW)
@@ -302,6 +307,7 @@ fn scan_tree(
     Ok(())
 }
 
+/// Scan one tree root; a missing root is an empty tree, not a failure.
 fn scan_root(
     path: &Path,
     rel: &str,
@@ -316,12 +322,9 @@ fn scan_root(
     scan_tree(&mut dir, rel, state_file, abort, 0, entries, files)
 }
 
-/// The files in the durable set, as bucket-relative paths, across both
-/// local volumes (production) or a single scratch directory (tests).
-///
-/// A failure is returned, not logged and skipped: the push must be able to
-/// tell "the tree is empty" from "the scan could not finish", because only
-/// the former may feed the deletion lifecycle.
+/// The durable set's files as bucket-relative paths, across both local volumes
+/// (production) or one scratch directory (tests). A scan that cannot prove the
+/// complete set is an error, never an empty set: only the latter feeds deletions.
 pub(super) fn local_synced_files(
     roots: &Roots,
     state_file: Option<&str>,
@@ -410,13 +413,9 @@ pub(super) fn local_synced_files(
     Ok(files)
 }
 
-/// Remove supervisor `.vw-part` staging leftovers at both roots and inside
-/// the synced trees (recursively); returns how many were removed. A transfer
-/// that died mid-pull leaves one, and it must never be resumed against
-/// different content, so each boot starts clean. User files ending `.part`
-/// are not touched. Staging directories outside the synced trees (backup
-/// dumps) are not touched. The walk is bounded in depth and entries: a
-/// hostile tree must not make boot unbounded.
+/// Remove supervisor `.vw-part` staging leftovers at both roots and inside the
+/// synced trees, returning how many were removed. User `.part` files and
+/// staging directories outside the trees are never touched.
 pub(super) fn clear_partials(roots: &Roots, _state_file: Option<&str>) -> usize {
     let mut removed = 0;
     let mut budget = MAX_SCAN_ENTRIES;
@@ -438,6 +437,8 @@ pub(super) fn clear_partials(roots: &Roots, _state_file: Option<&str>) -> usize 
     removed
 }
 
+/// Open a directory for the partial sweep; a missing or symlinked root is
+/// skipped, never followed.
 fn open_cleanup_dir(path: &Path) -> Option<Dir> {
     match Dir::open(path, DIR_FLAGS, Mode::empty()) {
         Ok(dir) => Some(dir),
@@ -446,6 +447,8 @@ fn open_cleanup_dir(path: &Path) -> Option<Dir> {
     }
 }
 
+/// Unlink `.vw-part` entries in one directory, optionally descending into
+/// subdirectories, within the shared depth and entry budget.
 fn clear_entries(
     dir: &mut Dir,
     removed: &mut usize,
@@ -497,18 +500,21 @@ fn clear_entries(
     }
 }
 
+/// Sweep one flat directory for `.vw-part` leftovers.
 fn clear_flat(path: &Path, removed: &mut usize, budget: &mut usize) {
     if let Some(mut dir) = open_cleanup_dir(path) {
         clear_entries(&mut dir, removed, 0, budget, false);
     }
 }
 
+/// Sweep one directory tree for `.vw-part` leftovers.
 fn clear_recursive(path: &Path, removed: &mut usize, budget: &mut usize) {
     if let Some(mut dir) = open_cleanup_dir(path) {
         clear_entries(&mut dir, removed, 0, budget, true);
     }
 }
 
+/// The durable-set predicate, the anchored scan, and the partial sweep.
 #[cfg(test)]
 mod tests {
     use super::*;

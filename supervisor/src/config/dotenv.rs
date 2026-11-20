@@ -19,6 +19,8 @@ use crate::util::log;
 /// Env var holding the dotenv file path (absent/empty = env-only mode).
 const ENV_NAME: &str = "SUPERVISOR_ENV_FILE";
 
+/// One parsed dotenv file, split by destination. A non-empty [`Self::invalid`]
+/// or [`Self::fatal`] makes the caller refuse the boot.
 #[derive(Default)]
 pub struct FileConfig {
     /// supervisor-consumed keys (TAILSCALE_*/SUPERVISOR_*/port knob)
@@ -44,7 +46,7 @@ impl FileConfig {
         }
     }
 
-    /// path=None = no config file (tests).
+    /// Load from an explicit path; `None` means env-only mode (tests).
     pub(crate) fn load_from(path: Option<&str>) -> Self {
         let Some(path) = path else {
             return Self::default();
@@ -142,11 +144,9 @@ impl FileConfig {
     }
 }
 
-/// The dotenv file holds the auth key and S3 credentials. `tailscaled` can
-/// traverse `/state` through the tailscale group; a world-readable file, or
-/// one readable by that group, exposes the secrets to it. The mount and its
-/// mode are the operator's choice, so warn rather than refuse (rootless
-/// bind mounts often cannot be chowned to the container uid).
+/// Warn when the dotenv file's mode or group lets tailscaled read it. It holds
+/// the auth key and S3 credentials; the mount is the operator's choice, so
+/// this warns rather than refusing (rootless bind mounts may not be chownable).
 fn warn_if_tailscaled_readable(path: &str, meta: &std::fs::Metadata) {
     if !meta.is_file() {
         return;
@@ -171,8 +171,11 @@ fn env_mode_exposes_secrets(mode: u32, gid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Dotenv parsing, namespace routing, and refusal conditions.
+
     use super::*;
 
+    /// Write `content` to a unique temp file and return its path.
     fn write_tmp(content: &str) -> String {
         use std::sync::atomic::{AtomicU32, Ordering};
         static SEQ: AtomicU32 = AtomicU32::new(0);

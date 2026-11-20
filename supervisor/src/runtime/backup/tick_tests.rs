@@ -10,6 +10,7 @@ use super::manifest::Manifest;
 use super::support::{self, FakeBucket};
 use super::tick;
 
+/// Every dump key currently stored under `db/`.
 fn dump_keys(bucket: &FakeBucket) -> Vec<String> {
     bucket
         .objects
@@ -21,6 +22,7 @@ fn dump_keys(bucket: &FakeBucket) -> Vec<String> {
         .collect()
 }
 
+/// Parse the manifest the tick published.
 fn bucket_manifest(bucket: &FakeBucket) -> Manifest {
     let body = bucket.object("db/manifest").expect("manifest written");
     Manifest::parse(std::str::from_utf8(&body).expect("utf-8 manifest")).expect("v2 parses")

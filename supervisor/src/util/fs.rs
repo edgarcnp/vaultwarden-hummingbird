@@ -1,6 +1,6 @@
 //! File-permission and safe-local-I/O policy: the owner-only mode the
 //! supervisor applies everywhere it writes secrets or vault data, plus the
-//! no-follow primitives used by the sync/backup sidecars.
+//! no-follow, descriptor-anchored helpers used by the sync/backup sidecars.
 //!
 //! The vaultwarden child can write `/data`. Local files and sidecars are
 //! therefore treated as untrusted path entries: a symlink is never followed
@@ -19,10 +19,9 @@ use nix::sys::stat::Mode;
 /// The supervisor-only state volume root.
 pub const STATE_ROOT: &str = "/state";
 
-/// Open `path` read-only, never following a symlink, and prove it is a
-/// regular file. `O_NONBLOCK` keeps a pre-created FIFO from blocking the
-/// open; a consumer that opens the path again (SQLite) can still race a
-/// writer, but the crafted-artifact hang is refused here first.
+/// Open `path` read-only without following a symlink and prove it is a regular
+/// file. `O_NONBLOCK` refuses a crafted FIFO instead of blocking the open;
+/// a consumer that reopens the path (SQLite) can still race a writer.
 pub(crate) fn open_regular(path: &str) -> std::io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -61,7 +60,7 @@ pub fn is_partial_name(name: &str) -> bool {
     name.ends_with(PART_SUFFIX)
 }
 
-/// Restrict `path` to owner-only (0600).
+/// Set `path` to owner-only mode 0600, exactly, regardless of the umask.
 pub fn make_private(path: &str) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
@@ -80,9 +79,9 @@ pub(crate) fn is_real_dir(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether `path` is on a tmpfs mount (a PaaS ephemeral `/data` is often
-/// one). The mountinfo line format is `id parent major:minor root mount
-/// point options - fstype source super-options`; exact mount point.
+/// Whether the mountinfo `text` records `path` itself as a tmpfs mount (a PaaS
+/// ephemeral `/data` is often one). The mount point must match exactly; the
+/// fields after `-` carry the filesystem type.
 fn mountinfo_is_tmpfs(text: &str, path: &str) -> bool {
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -142,13 +141,11 @@ pub fn create_real_dirs(root: &Path, rel_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Open `root/rel` without following a symlink in any component. `root` is
-/// opened as a real directory (no final-link follow); each path component is
-/// then opened relative to the previous descriptor with `O_NOFOLLOW`. This is
-/// the upload-side counterpart of [`create_real_dirs`]: the vault can swap a
-/// directory for a symlink after enumeration, but the openat chain cannot be
-/// redirected.
+/// Open `root/rel` with every component anchored to its parent descriptor and
+/// `O_NOFOLLOW`: the upload-side counterpart of [`create_real_dirs`]. A vault
+/// directory swapped for a symlink after enumeration cannot redirect the open.
 pub fn open_under(root: &Path, rel: &str) -> io::Result<File> {
+    /// The root must itself be a real directory with no final-link follow.
     const ROOT_FLAGS: i32 = nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC;
     let mut current = OpenOptions::new()
         .read(true)
@@ -242,14 +239,9 @@ pub fn read_capped_bytes(path: &str, max: u64) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Write `bytes` to `path` atomically:
-/// - a per-write temp in the same real directory, created `create_new`;
-/// - mode set exactly (not just masked by the umask);
-/// - data fsynced, then `rename` over `path` (replaces a symlink, never
-///   follows it);
-/// - the directory fsynced so the rename is durable.
-///
-/// `path` must have a real parent directory; a symlinked parent is refused.
+/// Write `bytes` to `path` atomically: a `create_new` temp in the real parent,
+/// exact `mode`, fsynced file and directory, then `rename` over `path`, which
+/// replaces a symlink. A symlinked parent is refused.
 pub fn write_atomic(path: &str, bytes: &[u8], mode: u32) -> io::Result<()> {
     let path = Path::new(path);
     let parent = path
@@ -268,6 +260,7 @@ pub fn write_atomic(path: &str, bytes: &[u8], mode: u32) -> io::Result<()> {
         ));
     }
 
+    /// Distinguishes per-write temp names within this process.
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let mut last_exists = None;
     for _ in 0..8 {
@@ -327,10 +320,14 @@ pub fn write_atomic(path: &str, bytes: &[u8], mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    //! Policy tests: owner-only modes, symlink refusal, read caps, and the
+    //! component-anchored open.
+
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     use super::*;
 
+    /// A clean per-test directory under the temp dir.
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("vw-sup-fs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

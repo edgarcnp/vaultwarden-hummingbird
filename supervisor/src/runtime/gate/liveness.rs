@@ -15,13 +15,18 @@ use super::probe::{PROBE_TIMEOUT, get_alive};
 /// verdict age stays in the same order as an uncached probe).
 const PROBE_TTL: Duration = PROBE_TIMEOUT;
 
+/// TTL-cached `/alive` verdict shared by every gate handler.
 pub(super) struct Liveness {
+    /// Loopback vault address to probe, or `None` to report down unprobed.
     vault: Option<SocketAddr>,
+    /// How long a completed probe's verdict may be reused.
     ttl: Duration,
+    /// Last verdict and when it was taken; `None` until the first probe.
     verdict: Mutex<Option<(Instant, bool)>>,
 }
 
 impl Liveness {
+    /// A cache with the production TTL ([`PROBE_TTL`]).
     pub(super) fn new(vault: Option<SocketAddr>) -> Self {
         Self {
             vault,
@@ -47,6 +52,7 @@ impl Liveness {
         ok
     }
 
+    /// A cache with an explicit window (tests shrink it).
     #[cfg(test)]
     pub(super) fn with_ttl(vault: Option<SocketAddr>, ttl: Duration) -> Self {
         Self {

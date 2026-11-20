@@ -15,11 +15,8 @@ use super::knobs::{non_empty, parse_flag, resolve_service, valid_port};
 use super::schema;
 
 /// Whether a dotenv path is inside the supervisor-only state volume and
-/// outside the tailscaled-writable subtree. A `..` component must be
-/// refused even when the textual prefix matches: `/state/../data/.env`
-/// would otherwise read a vault-writable file. `/state/tailscale` is
-/// refused because tailscaled can replace a file there regardless of its
-/// mode.
+/// outside the tailscaled-writable subtree. Textual prefixes are not enough:
+/// `..` and the daemon's replaceable tree could expose a vault-writable file.
 fn env_file_isolated(path: &str) -> bool {
     let root = Path::new(SUPERVISOR_STATE);
     let tailscale = Path::new(crate::config::TAILSCALE_DIR);
@@ -29,11 +26,9 @@ fn env_file_isolated(path: &str) -> bool {
         && !crate::util::fs::under_root(link, path)
 }
 
-/// A Tailscale state file is an identity source only if it holds a
-/// machine key. `tailscaled` creates `{}` before login; size alone would
-/// treat that placeholder as a usable identity and boot without an auth
-/// key only to fail later. The read is capped and the file may be 0600
-/// (the supervisor holds CAP_DAC_READ_SEARCH).
+/// Whether the state file holds a real machine key: `tailscaled` writes `{}`
+/// before login, so a placeholder must not satisfy the authkey gate. The read
+/// is capped; the file may be 0600 (the supervisor holds CAP_DAC_READ_SEARCH).
 fn state_has_identity(path: &str) -> bool {
     use base64::Engine as _;
 
@@ -74,21 +69,18 @@ pub struct Config {
     pub state: String,
     /// LocalAPI unix socket (under the supervisor-only state root)
     pub socket: String,
-    /// exposed (gatekeeper) port: `VAULTWARDEN_PORT`, process env before
-    /// dotenv file, then 8080. The legacy `VAULTWARDEN_ROCKET_PORT` (env
-    /// or file) and a bare `ROCKET_PORT` in the dotenv file refuse the
-    /// boot — see [`Self::from_env`]; an ambient bare `ROCKET_PORT` is
-    /// filtered, not fatal.
+    /// Exposed (gatekeeper) port: `VAULTWARDEN_PORT`, env before dotenv file,
+    /// then 8080. Legacy `VAULTWARDEN_ROCKET_PORT` and a bare `ROCKET_PORT` in
+    /// the dotenv file refuse the boot; an ambient bare `ROCKET_PORT` is filtered.
     pub port: u16,
     /// vaultwarden's port (`port + 1`, loopback-only). None = exposed port
     /// is 65535: boot must fail closed.
     pub vault_port: Option<u16>,
     /// node name announced to the tailnet (`TAILSCALE_HOSTNAME`)
     pub hostname: String,
-    /// Tailscale auth key or OAuth client secret (`TAILSCALE_AUTHKEY`;
-    /// optional when a valid local state file exists or S3 state sync can
-    /// restore one; required otherwise: boot fails closed without an
-    /// identity source)
+    /// Tailscale auth key or OAuth client secret (`TAILSCALE_AUTHKEY`). Optional
+    /// when a valid local state file exists or S3 state sync can restore one;
+    /// otherwise required, and boot fails closed without an identity source.
     pub authkey: Option<String>,
     /// configure `tailscale serve` after a successful up
     pub serve: bool,
@@ -107,20 +99,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// Merge order, everywhere: env > file > default. The dotenv file is
-    /// strict (see [`FileConfig`]): only the three namespaces are
-    /// accepted and any unrecognized key refuses the boot. The
-    /// gatekeeper port has ONE spelling, `VAULTWARDEN_PORT` — the legacy
-    /// `VAULTWARDEN_ROCKET_PORT` alias and a bare `ROCKET_PORT` in the
-    /// dotenv file refuse the boot with a message naming the valid
-    /// spelling (ambient values are filtered, not rejected). vaultwarden
-    /// keys (incl. the DB URL) resolve env first, so the supervisor
-    /// always sees the same values the child gets
-    /// ([`crate::runtime::services::vaultwarden`] applies file, then
-    /// ambient, then the pins). Empty = unset; bad booleans warn and
-    /// take the default. Returns None when a required knob is missing
-    /// (TAILSCALE_AUTHKEY) or anything refuses: the vault is unreachable
-    /// without Tailscale, so boot must fail closed.
+    /// Resolve the full config with merge order env > dotenv file > schema
+    /// default. Empty means unset, bad flags warn and take the default, and
+    /// any refusal (strict file, legacy port spelling, no identity) is `None`.
     pub fn from_env() -> Option<Self> {
         // The dotenv file holds the tailscale auth key and the S3
         // credentials. It must live on the supervisor-only /state volume: a file
@@ -153,9 +134,8 @@ impl Config {
         Self::build_at(Path::new(SUPERVISOR_STATE), file, lookup)
     }
 
-    /// [`Self::build`] with an explicit state root. Production always uses
-    /// `/state`; tests use a scratch root so they can create a real identity
-    /// file without writing to the image's supervisor volume.
+    /// Resolve with an explicit state root and injected env source; production
+    /// passes `/state`, tests a scratch root with a real identity file.
     fn build_at(
         root: &Path,
         file: FileConfig,

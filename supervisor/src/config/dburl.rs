@@ -62,6 +62,7 @@ fn sqlite_uri_path(rest: &str) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+/// Decode one ASCII hex digit; `None` when `b` is not hex.
 fn hex_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -82,6 +83,8 @@ pub fn scheme_for_log(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! Path parity with diesel and SQLite URI decoding, plus log safety.
+
     use super::*;
 
     #[test]

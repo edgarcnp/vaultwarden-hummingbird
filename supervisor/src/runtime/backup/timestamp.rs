@@ -29,6 +29,7 @@ pub(super) fn timestamp() -> String {
     )
 }
 
+/// Fixed-width UTC stamp plus a random suffix keeps names sortable and unique.
 #[cfg(test)]
 mod tests {
     use super::*;

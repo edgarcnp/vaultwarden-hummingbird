@@ -16,9 +16,12 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::process::Command;
 
+/// An explicit child environment: ordered layers, pins last. Applying it
+/// clears the command's inherited env and installs exactly these entries.
 pub struct EnvGrant(BTreeMap<String, OsString>);
 
 impl EnvGrant {
+    /// An empty grant: the child would receive no environment at all.
     pub fn new() -> Self {
         Self(BTreeMap::new())
     }
@@ -56,6 +59,7 @@ impl EnvGrant {
 
 #[cfg(test)]
 mod tests {
+    //! Grant layering, clearing, and raw-value preservation tests.
     use super::*;
 
     #[test]

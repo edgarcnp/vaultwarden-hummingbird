@@ -3,12 +3,15 @@
 
 use std::time::Duration;
 
+/// Absolute path of the tailscaled daemon binary in the image.
 pub const TAILSCALED: &str = "/usr/local/bin/tailscaled";
+/// Absolute path of the tailscale CLI in the image.
 pub const TAILSCALE: &str = "/usr/local/bin/tailscale";
+/// Absolute path of the vaultwarden binary in the image.
 pub const VAULTWARDEN: &str = "/vaultwarden";
 
-// Path policy: the supervisor-only state volume root (shared with the
-// transport and path checks).
+/// Root of the supervisor-only state volume; shared with the transport and
+/// the path checks.
 pub use crate::util::fs::STATE_ROOT as SUPERVISOR_STATE;
 
 // Process identities. tailscaled has a dedicated uid and the tailscale
@@ -16,11 +19,17 @@ pub use crate::util::fs::STATE_ROOT as SUPERVISOR_STATE;
 // socket and read the daemon's files. The vault runs as a different uid in
 // the shared data group, so it cannot traverse the supervisor's state
 // volume, read the LocalAPI socket, or see PID 1's environment.
+/// UID the supervisor (PID 1) runs as.
 pub const SUPERVISOR_UID: u32 = 65532;
+/// GID the supervisor runs as; the vault's shared data group.
 pub const SUPERVISOR_GID: u32 = 65532;
+/// UID the tailscaled daemon runs as.
 pub const TAILSCALED_UID: u32 = 65531;
+/// GID of the tailscale group; it owns the LocalAPI socket and state tree.
 pub const TAILSCALE_GID: u32 = 65531;
+/// UID the vaultwarden child runs as, outside the tailscale group.
 pub const VAULT_UID: u32 = 65533;
+/// GID the vaultwarden child runs as, in the shared data group.
 pub const VAULT_GID: u32 = 65532;
 
 /// The supplementary groups every tailscaled spawn (and the isolation
@@ -41,9 +50,13 @@ pub const TAILSCALE_DIR: &str = "/state/tailscale";
 pub const TAILSCALE_STATE_DIR: &str = "/state/tailscale-state";
 
 // Hard timeouts: a hung child must never block the vault.
+/// Bound on one `tailscale up` login attempt.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bound on one `tailscale serve` configuration run.
 pub const SERVE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on the wait for the tailscaled LocalAPI socket to appear.
 pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
+/// Per-phase timeout for each S3 control request.
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 /// Overall budget for the final shutdown persists (DB dump, then state
 /// push). Child teardown ahead of it is bounded by the grace constants, so
@@ -91,8 +104,11 @@ pub const SYNC_RUN_BUDGET: Duration = Duration::from_secs(60 * 60);
 pub const BACKUP_RUN_BUDGET: Duration = Duration::from_secs(60 * 60);
 
 // Default cadences/counts; seconds where applicable.
+/// Default state-sync cadence when `SUPERVISOR_S3_SYNC_INTERVAL` is unset.
 pub(crate) const SYNC_INTERVAL_DEFAULT: u64 = 3600;
+/// Default DB-backup cadence when `SUPERVISOR_DB_BACKUP_INTERVAL` is unset.
 pub(crate) const BACKUP_INTERVAL_DEFAULT: u64 = 21600;
+/// Default dump count when `SUPERVISOR_DB_BACKUP_KEEP` is unset.
 pub(crate) const BACKUP_KEEP_DEFAULT: u64 = 3;
 
 /// Upper bound for every interval knob: `Instant + Duration` panics on

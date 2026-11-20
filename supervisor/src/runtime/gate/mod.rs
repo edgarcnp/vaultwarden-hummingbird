@@ -1,10 +1,10 @@
 //! Exposed-port gatekeeper: the only listener on the container's public
-//! port. The Bitwarden API lives on a loopback-only port that only
-//! `tailscale serve` can reach; this listener reports vault liveness and
-//! refuses everything else (see `server`). Siblings: `probe` (loopback
-//! vault probe, shared with `healthcheck`), `healthcheck` (one-shot image
-//! HEALTHCHECK mode), `limiter` (handler admission cap), `liveness`
-//! (TTL-cached `/alive` verdicts).
+//! port, and it answers only `GET /alive` with the vault's verdict (see
+//! `server`); every other request is refused. The Bitwarden API lives on a
+//! loopback-only port that only `tailscale serve` can reach. Siblings:
+//! `probe` (loopback vault probe, shared with `healthcheck`), `healthcheck`
+//! (one-shot image HEALTHCHECK mode), `limiter` (handler admission cap),
+//! `liveness` (TTL-cached `/alive` verdicts).
 
 mod healthcheck;
 mod limiter;

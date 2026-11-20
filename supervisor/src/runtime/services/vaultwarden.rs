@@ -1,4 +1,8 @@
-//! vaultwarden child process control.
+//! vaultwarden child process control: one child under the dedicated vault
+//! UID (never the supervisor's), in its own process group, bound to loopback
+//! on the internal port one above the gate, with dropped capabilities,
+//! `no_new_privs`, and a default-deny granted environment. The gate is the
+//! only public listener; `tailscale serve` reaches this child.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -42,12 +46,9 @@ fn web_vault_flag(index: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Image defaults declared by the Containerfile's plain-name ENV block.
-/// They are re-applied here as the grant's weakest layer: the child env
-/// is cleared and default-deny, so without this the bare image values
-/// would never reach vaultwarden. User config (dotenv file, then ambient
-/// `VAULTWARDEN_*`) overrides every one of them. Keep in sync with the
-/// Containerfile's RUNTIME DEFAULTS block.
+/// Image defaults from the Containerfile's `ENV` block, re-applied as the
+/// grant's weakest layer because the child env is default-deny. Keep in sync
+/// with the Containerfile's RUNTIME DEFAULTS block.
 const IMAGE_DEFAULTS: &[(&str, &str)] = &[
     // uploads off by default; 0 is vaultwarden's "disabled" spelling
     ("ORG_ATTACHMENT_LIMIT", "0"),
@@ -64,23 +65,9 @@ const IMAGE_DEFAULTS: &[(&str, &str)] = &[
     ("ENABLE_DB_WAL", "true"),
 ];
 
-/// The vaultwarden child's granted environment, in precedence order: the
-/// image defaults ([`IMAGE_DEFAULTS`]; the Containerfile's bare ENV names
-/// cannot reach the default-deny child on their own), then the dotenv-file
-/// child map (pre-routed at load: only stripped `VAULTWARDEN_*` keys are
-/// in it — the file refused everything else), then the ambient container
-/// env (default-deny: ONLY `VAULTWARDEN_*` keys, stripped to the plain
-/// upstream name) — so a direct container value wins over the file,
-/// matching the supervisor's own env > file resolution (backup/restore
-/// must reach the same DB the vault uses). An empty value counts as unset
-/// on every layer: it never shadows a lower layer. Finally the hard pins:
-/// ROCKET_PORT (internal vault port), ROCKET_ADDRESS (loopback-only: the
-/// API is reachable solely via `tailscale serve`), DATA_FOLDER,
-/// WEB_VAULT_FOLDER (the re-derived WEB_VAULT_ENABLED checks this same
-/// path, so a child override would desync the pair), and WEB_VAULT_ENABLED
-/// re-derived from what the image actually baked (an API-only build must
-/// not boot with vaultwarden's compiled default). Non-UTF-8 keys are
-/// dropped.
+/// The vault child's env grant, weakest layer first: image defaults, the
+/// pre-routed dotenv map, then ambient `VAULTWARDEN_*` (direct value wins;
+/// empty = unset). Hard pins close it: port, loopback, folders, web-vault.
 fn granted_env(
     ambient: impl Iterator<Item = (OsString, OsString)>,
     file: &[(String, String)],
@@ -117,12 +104,9 @@ fn granted_env(
         .pin("WEB_VAULT_FOLDER", "/web-vault")
 }
 
-/// Map an *ambient* container-env key for the child (default deny): only
-/// `VAULTWARDEN_*` keys are forwarded, under the stripped plain upstream
-/// name. Supervisor-consumed keys are dropped — including after stripping
-/// (a mangled `VAULTWARDEN_TAILSCALE_*` key must not land in the child
-/// as `TAILSCALE_*`) — and bare upstream keys are NOT forwarded: the
-/// dotenv file is the explicit grant surface for those.
+/// Map an ambient key for the child, default-deny: only `VAULTWARDEN_*` is
+/// forwarded, under its stripped name; supervisor-consumed keys are dropped
+/// and bare upstream keys are refused (the dotenv file grants those).
 fn ambient_key(key: &OsStr) -> Option<String> {
     let k = key.to_str()?;
     if is_supervisor_consumed(k) {
@@ -137,13 +121,14 @@ fn ambient_key(key: &OsStr) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    //! Env-grant precedence, Containerfile-default sync, and key routing tests.
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
-    /// Parse the runtime `ENV` block of the Containerfile (the block after
-    /// the final `FROM`). Values are literal; no interpolation is resolved.
+    /// Parse the runtime `ENV` block of the Containerfile (after the final
+    /// `FROM`). Values are literal; no interpolation is resolved.
     fn containerfile_env() -> BTreeMap<String, String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../Containerfile");
         let text =

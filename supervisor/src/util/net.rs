@@ -1,4 +1,5 @@
-//! Unix-socket readiness probing for the tailscaled LocalAPI.
+//! Unix-socket readiness probing for the tailscaled LocalAPI. A probe is a
+//! `connect`, not a CLI call, so a fresh logged-out daemon still counts as up.
 
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -19,15 +20,9 @@ fn unix_socket_alive(path: &str) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
-/// Poll the LocalAPI socket until tailscaled is listening, or until
-/// timeout/abort (`None` covers both; the caller distinguishes the two
-/// outcomes via its own stop flag).
-///
-/// The blocking connect runs on a detached worker, and the caller waits on
-/// its verdict: a full listen backlog makes `connect()` block, and without
-/// the separation that single call could outlive the timeout. The worker
-/// checks the stop flag between attempts, so it exits (at the latest after
-/// one blocked connect returns) once the caller has given up.
+/// Poll until tailscaled listens, the timeout passes, or `abort` fires,
+/// returning false for the last two; the caller's stop flag distinguishes them.
+/// The connect runs detached so a full listen backlog cannot outlive the wait.
 pub fn wait_daemon(socket: &str, timeout: Duration, abort: impl Fn() -> bool) -> bool {
     let (tx, rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -57,10 +52,13 @@ pub fn wait_daemon(socket: &str, timeout: Duration, abort: impl Fn() -> bool) ->
 
 #[cfg(test)]
 mod tests {
+    //! Readiness tests over real Unix sockets.
+
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::time::Instant;
 
+    /// A unique per-test socket path under the temp dir.
     fn sock_path(name: &str) -> String {
         std::env::temp_dir()
             .join(format!("vw-sup-{name}-{}.sock", std::process::id()))

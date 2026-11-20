@@ -24,11 +24,9 @@ impl AsFd for PidFd {
 }
 
 impl PidFd {
-    /// `pidfd_open(2)`. Fails on kernels < 5.3 (ENOSYS) or an unknown
-    /// pid; callers treat failure as a failed spawn (fail-closed boot).
-    /// Non-Linux builds compile but can never supervise: fail closed with
-    /// ENOSYS at runtime (the supervisor only ever runs as a Linux
-    /// container's PID 1).
+    /// `pidfd_open(2)`. Fails on kernels < 5.3 (ENOSYS) or an unknown pid;
+    /// callers treat failure as a failed spawn (fail-closed boot).
+    /// Non-Linux builds compile but return ENOSYS at runtime.
     #[cfg(target_os = "linux")]
     pub fn open(pid: Pid) -> std::io::Result<Self> {
         let fd = open_syscall(pid);
@@ -40,15 +38,14 @@ impl PidFd {
         Ok(Self(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
     }
 
+    /// Non-Linux stub: no pidfd, so no child can ever be supervised.
     #[cfg(not(target_os = "linux"))]
     pub fn open(_pid: Pid) -> std::io::Result<Self> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
-    /// Indices into `fds` with a pending event within `timeout`. Any
-    /// event (not just POLLIN) counts as ready: the caller's targeted
-    /// waitpid is the authority, and ECHILD there simply means the sweep
-    /// already reaped and delivered this child.
+    /// Indices into `fds` with a pending event within `timeout`. Any event
+    /// counts as ready; the caller's targeted waitpid remains the authority.
     pub fn ready_indices(fds: &[&PidFd], timeout: Duration) -> Vec<usize> {
         let mut pollfds: Vec<PollFd> = fds
             .iter()
@@ -72,6 +69,7 @@ impl PidFd {
     }
 }
 
+/// Raw `pidfd_open(2)`; returns the fd or a negative errno.
 #[cfg(target_os = "linux")]
 fn open_syscall(pid: Pid) -> libc::c_long {
     // SAFETY: pidfd_open takes a pid and flags; it allocates a descriptor
@@ -81,6 +79,7 @@ fn open_syscall(pid: Pid) -> libc::c_long {
 
 #[cfg(test)]
 mod tests {
+    //! Pidfd readiness tests (live handles stay quiet, exits turn ready).
     use std::process::Command;
     use std::time::{Duration, Instant};
 
