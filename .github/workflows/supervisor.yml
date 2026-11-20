@@ -20,7 +20,7 @@ permissions:
 # by the lint job; test and build use the same compiler so a passing run
 # proves the minimum, not whatever stable happened to ship on the runner.
 env:
-  RUST_VERSION: "1.95.0"
+  RUST_VERSION: "1.100.0"
 
 defaults:
   run:

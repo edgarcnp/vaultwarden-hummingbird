@@ -35,8 +35,9 @@ fn env_file_isolated(path: &str) -> bool {
 /// key only to fail later. The read is capped and the file may be 0600
 /// (the supervisor holds CAP_DAC_READ_SEARCH).
 fn state_has_identity(path: &str) -> bool {
+    use base64::Engine as _;
+
     const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
-    const MACHINE_KEY: &[u8] = b"\"_machinekey\"";
     let bytes = match crate::util::fs::read_capped_bytes(path, MAX_STATE_BYTES) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
@@ -49,9 +50,20 @@ fn state_has_identity(path: &str) -> bool {
             return false;
         }
     };
-    bytes
-        .windows(MACHINE_KEY.len())
-        .any(|window| window == MACHINE_KEY)
+    // The FileStore JSON marshals `_machinekey` as a base64 string of the
+    // 32-byte machine key. `{}` (written before login) and a corrupt key are
+    // not identities; a local state that is not usable must not skip the
+    // authkey gate.
+    let Some(encoded) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("_machinekey").cloned())
+        .and_then(|value| value.as_str().map(str::to_string))
+    else {
+        return false;
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .is_ok_and(|key| !key.is_empty())
 }
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).

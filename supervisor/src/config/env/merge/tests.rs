@@ -151,7 +151,16 @@ fn an_empty_tailscale_state_is_not_an_identity_source() {
         Config::build_at(&root, FileConfig::default(), lookup.clone()).is_none(),
         "an empty state must still require an auth key"
     );
-    std::fs::write(&state, b"{\"_machinekey\":\"k\"}").unwrap();
+    std::fs::write(&state, b"{\"_machinekey\":\"not-base64\"}").unwrap();
+    assert!(
+        Config::build_at(&root, FileConfig::default(), lookup.clone()).is_none(),
+        "a state with an invalid machine key must require an auth key"
+    );
+    std::fs::write(
+        &state,
+        b"{\"_machinekey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}",
+    )
+    .unwrap();
     let cfg = Config::build_at(&root, FileConfig::default(), lookup)
         .expect("a state with a machine key is an identity");
     assert_eq!(cfg.authkey, None);
@@ -166,7 +175,11 @@ fn authkey_gate_considers_the_local_state_and_sync_coverage() {
     std::fs::create_dir_all(root.join("tailscale")).unwrap();
     std::os::unix::fs::symlink("tailscale", root.join("tailscale-state")).unwrap();
     let state = root.join("tailscale/tailscaled.state");
-    std::fs::write(&state, b"{\"_machinekey\":\"k\"}").unwrap();
+    std::fs::write(
+        &state,
+        b"{\"_machinekey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}",
+    )
+    .unwrap();
     let socket = root.join("tailscale/tailscaled.sock");
 
     let map: BTreeMap<String, String> = [
