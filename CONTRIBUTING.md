@@ -45,14 +45,14 @@ podman compose up -d    # or docker compose
 curl -i http://127.0.0.1:8080/alive
 ```
 
-`.env` is gitignored, so it won't leak. It is mounted at `/state/.env`; the supervisor refuses a dotenv file outside `/state`, because the vault's separate uid could read it there.
+`.env` is gitignored, so it won't leak. It is mounted at `/state/.env`; the supervisor refuses a dotenv file outside `/state` (or inside the tailscaled-writable subtree), because the vault's separate uid or tailscaled could read it there.
 
 ### Build-time options
 
 `--build-arg` changes what gets baked into the image. Everything is documented in the Containerfile:
 
 - `VAULTWARDEN_WEB_VAULT=false` builds an API-only image, no web UI.
-- The database is SQLite on the data volume. There's no DB backend knob. The vault runs as `65533:65532`, so its files are group-accessible (`0660`/`0770`) to the supervisor; `/state` stays `0700` and supervisor-owned.
+- The database is SQLite on the data volume. There's no DB backend knob. The vault runs as `65533:65532`, so its files are group-accessible (`0660`/`0770`) to the supervisor; `/state` is `2710` owner `65532` group `tailscale`, and `/state/tailscale` is `2770` so only the supervisor and tailscaled can reach the identity.
 - Renovate bumps the version ARGs and runs `scripts/update-pins.sh` to refresh the checksum digests. Never hand-edit a digest: if you bump a version yourself, run the script. CI recomputes the pins on every Containerfile change (and weekly), so a missing or stale digest is a red build.
 - The syft pin in `publish.yml` is manual (no Renovate datasource carries its digest); the Pins workflow re-downloads it, so a stale or replaced artifact is a red build. Bump the URL and its checksum together.
 - The Hummingbird base images are digest-pinned too; Renovate's Dockerfile manager owns those ARGs and opens digest-update PRs when Red Hat moves the floating tags. Don't hand-edit them either.
@@ -85,7 +85,7 @@ supervisor/src/
 ├── main.rs        startup and the --healthcheck mode
 ├── boot.rs        the boot phase machine
 ├── config/        reading .env and environment into a Config
-├── s3/            transport policy + the put/get/list/delete client
+├── s3/            transport policy + the put/get/head/list/delete client
 ├── util/          shared helpers (logging, bounded waits, staged files)
 └── runtime/
     ├── process/   starting and stopping child programs, env grants
@@ -114,6 +114,7 @@ podman run --rm -it -p 127.0.0.1:8080:8080 \
   -e SUPERVISOR_ENV_FILE=/state/.env \
   -v "$PWD/.env:/state/.env:ro,z" \
   --cap-drop=all --cap-add=SETUID --cap-add=SETGID --cap-add=KILL \
+  --cap-add=DAC_READ_SEARCH \
   -v vw-data:/data -v vw-state:/state \
   vaultwarden-hummingbird:local
 
@@ -126,7 +127,7 @@ The fail-closed paths need no credentials, and they're worth exercising whenever
 scripts/smoke-image.sh                    # defaults to vaultwarden-hummingbird:local
 ```
 
-It runs the image networkless and asserts: non-root user with an exec healthcheck, the one-shot `--healthcheck` refusal, the missing-authkey refusal, a bare upstream key in the dotenv file, an unknown supervisor key, a relative `TAILSCALE_STATE_FILE`, and the Tailscale fail-closed chain (tailscaled starts, the CLI fails, no vault runs). The Image workflow runs the same script on main pushes that change the build context; releases are built and smoke-tested again by publish at tag time.
+It runs the image networkless and asserts: non-root user with an exec healthcheck, the one-shot `--healthcheck` refusal, the missing-authkey refusal, a bare upstream key in the dotenv file, an unknown supervisor key, a relative `TAILSCALE_STATE_FILE`, the Tailscale fail-closed chain (tailscaled starts, the CLI fails, no vault runs), the TUN capability path on a rootful host, and that a restart still boots when tailscaled has left a daemon-owned 0600 file in `/state/tailscale`. The Image workflow runs the same script on main pushes and pull requests that touch the build context; releases are built and smoke-tested again by publish at tag time.
 
 ## Releases
 
@@ -137,7 +138,7 @@ Retention is part of a release: ghcr.io has no retention setting, and a tag cann
 ## Opening a pull request
 
 1. Fork and make a branch.
-2. Run the checks from the sections above. If you touched the Containerfile, build and smoke-test it locally before merging: the Image workflow validates it on main after merge, not on the PR.
+2. Run the checks from the sections above. If you touched the Containerfile or the image wiring, build and smoke-test it locally before merging: the Image workflow also validates build-context changes on the pull request.
 3. If you edited the version pins in the Containerfile, keep those `ARG` lines byte-for-byte as they were (Renovate finds them with regexes) and run `scripts/update-pins.sh` so the digests match.
 4. If user-visible behavior changed, update README.md in the same PR.
 5. Open the PR with a short note on what changed and why.

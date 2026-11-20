@@ -35,6 +35,10 @@ const MAX_MIGRATED_BYTES: u64 = 16 * 1024 * 1024;
 /// A recursive chmod is one-time; refuse a pathological tree rather than
 /// spend an unbounded boot on it.
 const MAX_ENTRIES: u64 = 2_000_000;
+/// Bound on the recursive mode walks. The vault and tailscaled control the
+/// trees; a depth this large is pathological and must not overflow the boot
+/// stack.
+const MAX_TREE_DEPTH: usize = 32;
 
 /// Production entry: migrate `/data` into `/state`.
 pub fn migrate_layout() -> bool {
@@ -180,8 +184,12 @@ fn migrate_tailscale_layout(state: &Path, group: u32) -> bool {
     let marker = state.join(TAILSCALE_MARKER);
     if is_real_file(&marker.to_string_lossy()) {
         // A completed move still needs its modes enforced after an image
-        // or volume mode change.
-        return fix_tailscale_modes(&dir, group).is_ok();
+        // or volume mode change. The walk is best-effort: tailscaled owns
+        // some files and creates them 0600, and the supervisor must not
+        // fail the boot over a mode it cannot change (it reads them through
+        // CAP_DAC_READ_SEARCH).
+        fix_tailscale_modes(&dir, group);
+        return true;
     }
     let mut ok = true;
     ok &= move_file(
@@ -193,10 +201,7 @@ fn migrate_tailscale_layout(state: &Path, group: u32) -> bool {
         log::err("layout: tailscaled state move incomplete; refusing to mark it done");
         return false;
     }
-    if let Err(e) = fix_tailscale_modes(&dir, group) {
-        log::err(&format!("layout: cannot set tailscaled modes: {e}"));
-        return false;
-    }
+    fix_tailscale_modes(&dir, group);
     if let Err(e) = write_atomic(&marker.to_string_lossy(), b"3\n", 0o600) {
         log::err(&format!("layout: cannot write the tailscale marker: {e}"));
         return false;
@@ -211,23 +216,89 @@ fn ensure_dir_group(dir: &Path, group: u32) -> std::io::Result<()> {
     set_group(dir, group)
 }
 
-fn fix_tailscale_modes(dir: &Path, group: u32) -> std::io::Result<()> {
-    set_dir(dir, 0o2770)?;
-    set_group(dir, group)?;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+/// Enforce the tailscaled-writable tree's modes. Best-effort: files and
+/// directories owned by tailscaled are already 0600/0700 by its own
+/// design; the supervisor reads them through `CAP_DAC_READ_SEARCH`, so a
+/// mode it cannot change is not a boot failure. Symlinks are removed, never
+/// followed; the walk is bounded by entry and depth budgets.
+fn fix_tailscale_modes(dir: &Path, group: u32) {
+    let mut budget = MAX_ENTRIES;
+    fix_tailscale_modes_at(dir, group, 0, &mut budget);
+}
+
+fn fix_tailscale_modes_at(dir: &Path, group: u32, depth: usize, budget: &mut u64) {
+    if depth > MAX_TREE_DEPTH {
+        log::err(&format!(
+            "layout: {} is deeper than {MAX_TREE_DEPTH} levels; leaving its modes alone",
+            log::sanitize(&dir.to_string_lossy())
+        ));
+        return;
+    }
+    fix_owned_path(dir, 0o2770, group);
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::err(&format!(
+                "layout: cannot read {}: {e}",
+                log::sanitize(&dir.to_string_lossy())
+            ));
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            log::err(&format!(
+                "layout: more than {MAX_ENTRIES} entries under {}; leaving the rest alone",
+                log::sanitize(&dir.to_string_lossy())
+            ));
+            return;
+        }
+        *budget -= 1;
         let path = entry.path();
-        let kind = entry.file_type()?;
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) => {
+                log::err(&format!(
+                    "layout: cannot classify {}: {e}",
+                    log::sanitize(&path.to_string_lossy())
+                ));
+                continue;
+            }
+        };
         if kind.is_symlink() {
             let _ = fs::remove_file(&path);
         } else if kind.is_dir() {
-            fix_tailscale_modes(&path, group)?;
+            fix_tailscale_modes_at(&path, group, depth + 1, budget);
         } else if kind.is_file() {
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o660))?;
-            set_group(&path, group)?;
+            fix_owned_path(&path, 0o660, group);
         }
     }
-    Ok(())
+}
+
+/// Set mode/group on a path only when this process may do so: it owns the
+/// path or runs as root. `tailscaled` creates its state and files 0600 under
+/// its own uid; the supervisor must leave those alone (and read them via
+/// `CAP_DAC_READ_SEARCH`).
+fn fix_owned_path(path: &Path, mode: u32, group: u32) {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    let euid = geteuid();
+    if !euid.is_root() && meta.uid() != euid.as_raw() {
+        return;
+    }
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
+        log::err(&format!(
+            "layout: cannot set the mode of {}: {e}",
+            log::sanitize(&path.to_string_lossy())
+        ));
+    }
+    if let Err(e) = set_group(path, group) {
+        log::err(&format!(
+            "layout: cannot set the group of {}: {e}",
+            log::sanitize(&path.to_string_lossy())
+        ));
+    }
 }
 
 fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -340,8 +411,20 @@ fn move_file(src: &Path, dst: &Path) -> bool {
 /// Recursively move a directory tree into the state volume. Files keep
 /// owner-only modes; symlinks are removed, never followed. A destination
 /// that already exists wins (it is the newer layout), and the source copy
-/// is removed.
+/// is removed. Bounded in depth: a pathological old tree fails the
+/// migration instead of risking the boot stack.
 fn move_tree(src: &Path, dst: &Path) -> bool {
+    move_tree_at(src, dst, 0)
+}
+
+fn move_tree_at(src: &Path, dst: &Path, depth: usize) -> bool {
+    if depth > MAX_TREE_DEPTH {
+        log::err(&format!(
+            "layout: {} is deeper than {MAX_TREE_DEPTH} levels; refusing to migrate it",
+            log::sanitize(&src.to_string_lossy())
+        ));
+        return false;
+    }
     if src == dst {
         return true;
     }
@@ -410,7 +493,7 @@ fn move_tree(src: &Path, dst: &Path) -> bool {
         if file_type.is_symlink() {
             let _ = fs::remove_file(&child_src);
         } else if file_type.is_dir() {
-            ok &= move_tree(&child_src, &child_dst);
+            ok &= move_tree_at(&child_src, &child_dst, depth + 1);
         } else if file_type.is_file() {
             ok &= move_file(&child_src, &child_dst);
         }
@@ -432,6 +515,18 @@ fn remove_file(path: &Path) {
 }
 
 fn remove_tree(dir: &Path) {
+    let mut budget = MAX_ENTRIES;
+    remove_tree_at(dir, 0, &mut budget);
+}
+
+fn remove_tree_at(dir: &Path, depth: usize, budget: &mut u64) {
+    if depth > MAX_TREE_DEPTH || *budget == 0 {
+        log::err(&format!(
+            "layout: {} is too large or deep to remove; leaving the rest",
+            log::sanitize(&dir.to_string_lossy())
+        ));
+        return;
+    }
     let Ok(meta) = fs::symlink_metadata(dir) else {
         return;
     };
@@ -444,12 +539,20 @@ fn remove_tree(dir: &Path) {
     }
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
+            if *budget == 0 {
+                log::err(&format!(
+                    "layout: more than {MAX_ENTRIES} entries under {}; leaving the rest",
+                    log::sanitize(&dir.to_string_lossy())
+                ));
+                return;
+            }
+            *budget -= 1;
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
             let path = entry.path();
             if file_type.is_dir() {
-                remove_tree(&path);
+                remove_tree_at(&path, depth + 1, budget);
             } else {
                 let _ = fs::remove_file(&path);
             }

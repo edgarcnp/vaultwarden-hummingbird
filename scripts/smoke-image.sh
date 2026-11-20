@@ -10,7 +10,9 @@
 set -u
 IMAGE=${1:-vaultwarden-hummingbird:local}
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+VOL=
+DVOL=
+trap 'rm -rf "$WORK"; [ -n "$VOL" ] && podman volume rm -f "$VOL" >/dev/null 2>&1; [ -n "$DVOL" ] && podman volume rm -f "$DVOL" >/dev/null 2>&1' EXIT
 PASS=0
 FAIL=0
 
@@ -94,8 +96,9 @@ printf 'TAILSCALE_AUTHKEY=tskey-invalid-smoke\nVAULTWARDEN_DOMAIN=https://smoke.
 run healthcheck-no-config 1 "refusing" -- --entrypoint /entrypoint "$IMAGE" --healthcheck
 
 # Boot cases need the deployment capabilities: PID 1 joins the tailscale
-# group and spawns children under separate uids.
-CAPS=(--cap-add=SETUID --cap-add=SETGID --cap-add=KILL)
+# group, spawns children under separate uids, and reads tailscaled's 0600
+# identity/cert files (Tailscale writes them 0600 by design).
+CAPS=(--cap-add=SETUID --cap-add=SETGID --cap-add=KILL --cap-add=DAC_READ_SEARCH)
 
 # 2. No config at all: fail closed naming the missing key.
 run no-config 1 "no identity source" -- "${CAPS[@]}" "$IMAGE"
@@ -137,8 +140,8 @@ run vault-writes-data 101 "Private key '/data/rsa_key.pem' created correctly" --
   -e DATA_FOLDER=/data -e WEB_VAULT_FOLDER=/web-vault \
   -e I_REALLY_WANT_VOLATILE_STORAGE=true -e ROCKET_TLS='{certs,key}.pem' "$IMAGE"
 
-# 9. The same uid must not be able to traverse /state (0700, owner 65532),
-#    even when it is told to use it as its data folder.
+# 9. The same uid must not be able to traverse /state (2710, owner 65532,
+#    group tailscale), even when it is told to use it as its data folder.
 run vault-cannot-reach-state 1 "Permission denied" -- \
   --user 65533:65532 --entrypoint /vaultwarden \
   -e DATA_FOLDER=/state -e WEB_VAULT_FOLDER=/web-vault \
@@ -158,7 +161,34 @@ else
   echo "SKIP  tailscale-tun-fails-closed (rootless=$ROOTLESS or no /dev/net/tun)"
 fi
 
-# 11. The supervisor-spawned children must not retain the container
+# 11. A restart must survive files tailscaled created under its own uid.
+#     The daemon owns the state/cert tree and cannot be told to widen its
+#     modes; the supervisor must skip those files instead of failing the boot
+#     (it reads them for sync through DAC_READ_SEARCH). The runtime has no
+#     shell, so the vault binary itself creates a daemon-owned file as uid
+#     65531; its exit 101 on the deliberately broken TLS config is expected.
+VOL="vw-smoke-state-$$"
+DVOL="vw-smoke-data-$$"
+podman volume create "$VOL" >/dev/null
+podman volume create "$DVOL" >/dev/null
+timeout 30 podman run --rm --network none --tmpfs /tmp --user 65531:65531 \
+  -e DATA_FOLDER=/state/tailscale -e WEB_VAULT_FOLDER=/web-vault \
+  -e I_REALLY_WANT_VOLATILE_STORAGE=true -e ROCKET_TLS='{certs,key}.pem' \
+  -v "$VOL:/state:z" --entrypoint /vaultwarden "$IMAGE" \
+  >"$WORK/daemon-owned-file.log" 2>&1 || true
+if grep -qF "Private key '/state/tailscale/rsa_key.pem' created correctly" \
+  "$WORK/daemon-owned-file.log"; then
+  run restart-with-daemon-file 1 "authenticating tailscale node" -- \
+    "${CAPS[@]}" -e SUPERVISOR_ENV_FILE=/state/.env \
+    -v "$WORK/fake-auth.env:/state/.env:ro,z" \
+    -v "$VOL:/state:z" -v "$DVOL:/data:z" "$IMAGE"
+else
+  echo "FAIL  restart-with-daemon-file (the helper did not create the 0600 file)"
+  sed -n '1,12p' "$WORK/daemon-owned-file.log" | sed 's/^/      | /'
+  FAIL=$((FAIL + 1))
+fi
+
+# 12. The supervisor-spawned children must not retain the container
 #     capabilities. This is the regression test for the vault's capability
 #     drop: without it the vault can setuid back to 65532 and read /state.
 run security-isolation 0 "isolation probe: ok" -- \

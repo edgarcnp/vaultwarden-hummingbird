@@ -23,6 +23,7 @@ You need a [Tailscale](https://tailscale.com) account, with MagicDNS and HTTPS c
      -e SUPERVISOR_ENV_FILE=/state/.env \
      -v "$PWD/.env:/state/.env:ro,z" \
      --cap-drop=all --cap-add=SETUID --cap-add=SETGID --cap-add=KILL \
+     --cap-add=DAC_READ_SEARCH \
      --security-opt no-new-privileges \
      -v vw-data:/data -v vw-state:/state \
      ghcr.io/edgarcnp/vaultwarden-hummingbird:latest
@@ -30,10 +31,12 @@ You need a [Tailscale](https://tailscale.com) account, with MagicDNS and HTTPS c
 
    The file is mounted under `/state`, which the vault's uid cannot
    traverse; prefer this over `--env-file`, which leaves the secrets in the
-   container environment. It must be readable by container uid `65532` but
-   not by the tailscaled group: use `0600` owned by `65532`, or `0640`
-   with group `65532` (never `0644`, which the tailscaled group could read
-   through its `/state` traverse). The two named volumes
+   container environment. It must live outside `/state/tailscale` (the
+   tailscaled-writable subtree can replace a file there regardless of its
+   mode) and must be readable by container uid `65532` but not by the
+   tailscaled group: use `0600` owned by `65532`, or `0640` with group
+   `65532` (never `0644`, which the tailscaled group could read through its
+   `/state` traverse; the supervisor warns when the file is world-readable). The two named volumes
    persist the vault and the supervisor's identity/state; without the
    capabilities the supervisor cannot start the vault under its separate
    uid.
@@ -54,7 +57,7 @@ Tailscale is the only way in. The vault listens on loopback and never leaves the
 
 No Tailscale, no vault. The container refuses to start without an auth key, a valid local `TAILSCALE_STATE_FILE`, or S3 state sync that can supply the node identity, and if Tailscale dies later it shuts down instead of running a vault nobody can reach. Your orchestrator restarts it; a short outage beats a silent one.
 
-The container keeps two volumes and three identities. `/data` (0770, group `65532`) holds the vault: its database, signing key, `config.json`, attachments, and Sends. `/state` (2710, owner `65532`, group `tailscale` `65531`) is supervisor-only: group members can traverse it but not list it, and its 0600 files stay owner-only. `/state/tailscale` (2770) holds the tailscaled identity, certificate cache, and LocalAPI socket. The supervisor runs as `65532:65532` and joins the `tailscale` group; tailscaled runs as `65531:65531`; the vault runs as `65533:65532` and is not in the tailscale group. The supervisor starts every child with its capabilities dropped: the vault has none, the tailscale CLI has none, and tailscaled keeps only `NET_ADMIN`/`NET_RAW` in TUN mode (the container must grant them and expose `/dev/net/tun`; rootless podman cannot create a TUN in its user namespace); userspace mode needs none. A compromised vault cannot traverse `/state` or read the socket; a compromised tailscaled can reach only its own subtree, not the dotenv, sync sidecars, or `/data`. The supervisor itself keeps `SETUID`/`SETGID` (to start the vault and tailscaled) and `KILL` (to stop them); in TUN mode the container also grants `NET_ADMIN`/`NET_RAW`, and only the tailscaled child keeps them.
+The container keeps two volumes and three identities. `/data` (0770, group `65532`) holds the vault: its database, signing key, `config.json`, attachments, and Sends. `/state` (2710, owner `65532`, group `tailscale` `65531`) is supervisor-only: group members can traverse it but not list it, and its 0600 files stay owner-only. `/state/tailscale` (2770) holds the tailscaled identity, certificate cache, and LocalAPI socket. The supervisor runs as `65532:65532` and joins the `tailscale` group; tailscaled runs as `65531:65531`; the vault runs as `65533:65532` and is not in the tailscale group. The supervisor starts every child with its capabilities dropped: the vault has none, the tailscale CLI has none, and tailscaled keeps only `NET_ADMIN`/`NET_RAW` in TUN mode (the container must grant them and expose `/dev/net/tun`; rootless podman cannot create a TUN in its user namespace); userspace mode needs none. A compromised vault cannot traverse `/state` or read the socket; a compromised tailscaled can reach only its own subtree, not the dotenv, sync sidecars, or `/data`. The supervisor itself keeps `SETUID`/`SETGID` (to start the vault and tailscaled), `KILL` (to stop them), and `DAC_READ_SEARCH` (Tailscale writes its identity and cert files 0600; the supervisor reads them for state sync, and no child keeps this capability). In TUN mode the container also grants `NET_ADMIN`/`NET_RAW`; only the tailscaled child keeps them.
 
 ## Configuration
 
@@ -71,12 +74,12 @@ The file is strict on purpose: a key outside those three prefixes stops the boot
 Three rules that save confusion:
 
 - The container's environment wins over the file, and an empty value means unset.
-- An unquoted `$VAR` is substituted from the environment; single-quote a value to keep a literal `$`.
+- An unquoted `$VAR` is substituted from the container environment; single-quote a value to keep a literal `$`. Substitution reads the whole environment, so never reference a supervisor secret (`TAILSCALE_AUTHKEY`, `SUPERVISOR_S3_*`) from a `VAULTWARDEN_*` value: it would copy that secret into the vault.
 - On the container environment, only `VAULTWARDEN_*` keys reach the vault.
 
 Coming from an older image? Prefix every bare key with `VAULTWARDEN_`, and rename `ROCKET_PORT`/`VAULTWARDEN_ROCKET_PORT` to `VAULTWARDEN_PORT`.
 
-Coming from the single-volume layout? Update the mounts and capabilities in your run command or compose file: `.env` moves to `/state/.env` (a dotenv file elsewhere now refuses the boot), add a `vw-state:/state` volume, and add `SETUID`/`SETGID`/`KILL` after `cap_drop: ALL`. A custom `TAILSCALE_STATE_FILE` or `TAILSCALE_SOCKET` outside `/state/tailscale` must be moved first; a custom state file must be a direct child of `/state/tailscale`. On the first boot the supervisor moves the old `tailscaled.state`, `certs/` cache, and backup lineage from `/data` to `/state`, then moves the identity and certs into `/state/tailscale` (layout v3), and makes the vault's existing files group-accessible; a failed copy leaves the source in place and refuses the boot. Old-layout identity and cert files must be owned by uid `65532` — a foreign-owned file is refused rather than adopted. Bucket key names are unchanged, so an existing state-sync bucket restores into either layout. Rolling back to an image before the uid split needs the identity back at the old paths: move `/state/tailscale/tailscaled.state` and `/state/tailscale/certs/` to `/state/` first; that image does not understand the v3 layout.
+Coming from the single-volume layout? Update the mounts and capabilities in your run command or compose file: `.env` moves to `/state/.env` (a dotenv file elsewhere now refuses the boot), add a `vw-state:/state` volume, and add `SETUID`/`SETGID`/`KILL`/`DAC_READ_SEARCH` after `cap_drop: ALL`. A custom `TAILSCALE_STATE_FILE` or `TAILSCALE_SOCKET` outside `/state/tailscale` must be moved first; a custom state file must be a direct child of `/state/tailscale`. On the first boot the supervisor moves the old `tailscaled.state`, `certs/` cache, and backup lineage from `/data` to `/state`, then moves the identity and certs into `/state/tailscale` (layout v3), and makes the vault's existing files group-accessible; a failed copy leaves the source in place and refuses the boot. Old-layout identity and cert files must be owned by uid `65532` — a foreign-owned file is refused rather than adopted. Bucket key names are unchanged, so an existing state-sync bucket restores into either layout. Rolling back to an image before the uid split needs the identity back at the old paths: move `/state/tailscale/tailscaled.state` and `/state/tailscale/certs/` to `/state/` first; that image does not understand the v3 layout.
 
 ### Tailscale options
 
@@ -91,7 +94,7 @@ If `/data` and `/state` are real volumes, you're done. Keep them together: `/sta
 
 Named volumes inherit the image's ownership and modes. If you bind-mount host directories instead, they must be owned by uid/gid `65532` (and labeled `:Z` on an SELinux host); otherwise the supervisor refuses to boot rather than run with a state directory the vault could write.
 
-If your platform wipes them on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default. The key needs object read/write/**delete** and bucket list (`ListObjectsV2`) for first-run, restore, reconciliation, deletion GC, and backup pruning; bucket create/head are never called. Plaintext HTTP is refused for a remote endpoint; set `SUPERVISOR_S3_ALLOW_HTTP=true` only on a trusted private network.
+If your platform wipes them on every redeploy, point the container at an S3-compatible bucket — Cloudflare R2, Backblaze B2, MinIO, AWS S3, anything that speaks the S3 API. Every provider is configured by its endpoint; none is a default. The key needs object read/write/**delete** and bucket list (`ListObjectsV2`) for first-run, restore, reconciliation, deletion GC, and backup pruning; bucket create/head (`CreateBucket`/`HeadBucket`) are never called, and the one object `HEAD` only verifies that the newest backup still exists. Plaintext HTTP is refused for a remote endpoint; set `SUPERVISOR_S3_ALLOW_HTTP=true` only on a trusted private network.
 
 ```sh
 SUPERVISOR_S3_REMOTE=r2:vw-state
@@ -156,6 +159,7 @@ The container checks that a downloaded backup is a parseable database, but it ca
 - **The container exits immediately.** Almost always Tailscale: check the auth key and look for `refusing to run the vault without Tailscale`. With `TAILSCALE_SERVE=true` (default), a failed serve exits the same way — enable MagicDNS and HTTPS certificates, or set `TAILSCALE_SERVE=false`.
 - **`/alive` returns 503.** The vault isn't answering, usually the database; its error is in the container logs.
 - **`db backup: … skipped/failed`.** That cycle didn't run and nothing was lost; the next one retries. The message names what to check: S3 settings, free space on `/state` (dump staging), or `refusing to shadow it` (the bucket holds a newer backup — the message says how to adopt it).
+- **State sync cannot read the Tailscale identity.** The daemon writes `tailscaled.state` and its cert files `0600`; the container must grant `DAC_READ_SEARCH` to the supervisor (compose and the documented run command do). Without it, state sync logs a permission error; add the capability and restart.
 
 ## Building it yourself
 

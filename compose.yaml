@@ -31,10 +31,12 @@ services:
       timeout: 10s
       start_period: 30s
       retries: 3
-    # Least privilege: all capabilities dropped, then only the three the
+    # Least privilege: all capabilities dropped, then only the four the
     # supervisor needs. SETUID/SETGID let it start the vault as 65533:65532
-    # and tailscaled as 65531:65531; KILL lets it signal them. The children
-    # get no capabilities across the uid change (tailscaled keeps only
+    # and tailscaled as 65531:65531; KILL lets it signal them;
+    # DAC_READ_SEARCH lets it read tailscaled's 0600 identity/cert files for
+    # state sync (the daemon writes them 0600 by design). The children get
+    # none of these across the uid change (tailscaled keeps only
     # NET_ADMIN/NET_RAW in TUN mode), and no-new-privileges keeps the
     # restriction across exec. Writable paths: /data (vault volume), /state
     # (supervisor volume), /tmp (tmpfs).
@@ -44,6 +46,7 @@ services:
       - SETUID
       - SETGID
       - KILL
+      - DAC_READ_SEARCH
     security_opt:
       - no-new-privileges:true
     read_only: true
