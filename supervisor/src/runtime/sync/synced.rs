@@ -100,10 +100,10 @@ pub(super) fn is_deletable(rel: &str) -> bool {
 /// and absolute paths never pass, in any position; neither does a
 /// supervisor `.vw-part` staging file left by an interrupted download. A
 /// user file ending `.part` is ordinary user data and is synced. The
-/// configured state file (a direct child of `/state/tailscale`) is always inside the
-/// set; the default `tailscaled.state` spelling stays accepted even when a
-/// custom path is configured, so an identity synced by an earlier
-/// deployment remains restorable.
+/// configured state file (a direct child of the `tailscale-state` link) is
+/// always inside the set; the default `tailscaled.state` spelling stays
+/// accepted even when a custom path is configured, so an identity synced by
+/// an earlier deployment remains restorable.
 pub(super) fn is_synced_file(rel: &str, state_file: Option<&str>) -> bool {
     if rel.is_empty()
         || rel.trim() != rel

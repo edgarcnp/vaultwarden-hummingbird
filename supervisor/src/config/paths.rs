@@ -12,16 +12,47 @@ pub(crate) fn tailscale_dir(root: &Path) -> PathBuf {
     root.join("tailscale")
 }
 
+/// The link tailscaled is told to use for `--state`: a supervisor-created
+/// symlink to [`tailscale_dir`]. The differently named parent keeps
+/// Tailscale from chmod'ing the real group-writable tree to 0700 (the daemon
+/// uid cannot do that, and would fall back to an in-memory store).
+pub(crate) fn tailscale_state_dir(root: &Path) -> PathBuf {
+    root.join("tailscale-state")
+}
+
+/// Map a legacy direct child of the real tree (`/state/tailscale/<name>`)
+/// onto the link directory, so existing custom identities keep working.
+/// Only a direct child is mapped; deeper paths are left for validation to
+/// reject.
+pub(crate) fn normalize_state_path(root: &Path, value: &str) -> String {
+    if value == "mem:" {
+        return value.to_string();
+    }
+    let actual = tailscale_dir(root);
+    let path = Path::new(value);
+    if under_root(&actual, value)
+        && path.parent() == Some(actual.as_path())
+        && let Some(name) = path.file_name().and_then(|name| name.to_str())
+    {
+        return tailscale_state_dir(root)
+            .join(name)
+            .to_string_lossy()
+            .into_owned();
+    }
+    value.to_string()
+}
+
 /// The identity file: `mem:` (Tailscale's in-memory state) or a direct
-/// child of `/state/tailscale`. The daemon derives its `--statedir` (and
-/// thus the cert cache) from the file's parent; the group-writable
-/// subtree is the only place tailscaled may write.
+/// child of the link directory. The daemon derives the state store's
+/// parent from this path; the differently named link is what keeps it from
+/// chmod'ing the real tree.
 pub(crate) fn state_file(root: &Path, value: &str) -> bool {
     if value == "mem:" {
         return true;
     }
-    let dir = tailscale_dir(root);
+    let dir = tailscale_state_dir(root);
     value.trim() == value
+        && !value.ends_with('/')
         && under_root(&dir, value)
         && Path::new(value).parent() == Some(dir.as_path())
 }
@@ -40,7 +71,7 @@ pub(crate) fn state_rel<'a>(root: &Path, value: &'a str) -> Option<&'a str> {
     if !state_file(root, value) || value == "mem:" {
         return None;
     }
-    let dir = tailscale_dir(root);
+    let dir = tailscale_state_dir(root);
     let rel = Path::new(value).strip_prefix(&dir).ok()?;
     let mut parts = rel.components();
     let Component::Normal(name) = parts.next()? else {
@@ -89,28 +120,44 @@ mod tests {
     const ROOT: &str = "/state";
 
     #[test]
-    fn state_files_are_direct_children_of_the_root() {
+    fn state_files_are_direct_children_of_the_link_dir() {
         assert!(state_file(Path::new(ROOT), "mem:"));
         assert!(state_file(
             Path::new(ROOT),
-            "/state/tailscale/tailscaled.state"
+            "/state/tailscale-state/tailscaled.state"
         ));
-        assert!(state_file(Path::new(ROOT), "/state/tailscale/node.state"));
+        assert!(state_file(
+            Path::new(ROOT),
+            "/state/tailscale-state/node.state"
+        ));
         for path in [
             "/state",
             "/state/",
             "/state/tailscaled.state",
+            "/state/tailscale/tailscaled.state",
             "/state/sub/node.state",
-            "/state/tailscale/sub/node.state",
-            "/state/tailscale/../data/node.state",
+            "/state/tailscale-state/sub/node.state",
+            "/state/tailscale-state/../data/node.state",
+            "/state/tailscale-state/",
             "/data/node.state",
             "/custom/node.state",
             "node.state",
-            "/state/tailscale/node\n.state",
-            "/state/tailscale/node.state ",
+            "/state/tailscale-state/node\n.state",
+            "/state/tailscale-state/node.state ",
         ] {
             assert!(!state_file(Path::new(ROOT), path), "{path}");
         }
+        // Legacy custom identities under the real tree are normalized onto
+        // the link directory; deeper paths are not.
+        assert_eq!(
+            normalize_state_path(Path::new(ROOT), "/state/tailscale/node.state"),
+            "/state/tailscale-state/node.state"
+        );
+        assert_eq!(
+            normalize_state_path(Path::new(ROOT), "/state/tailscale/sub/node.state"),
+            "/state/tailscale/sub/node.state"
+        );
+        assert_eq!(normalize_state_path(Path::new(ROOT), "mem:"), "mem:");
     }
 
     #[test]
@@ -136,12 +183,16 @@ mod tests {
     #[test]
     fn state_rel_is_a_single_normal_component() {
         assert_eq!(
-            state_rel(Path::new(ROOT), "/state/tailscale/node.state"),
+            state_rel(Path::new(ROOT), "/state/tailscale-state/node.state"),
             Some("node.state")
         );
         assert_eq!(state_rel(Path::new(ROOT), "mem:"), None);
         assert_eq!(
-            state_rel(Path::new(ROOT), "/state/tailscale/sub/node.state"),
+            state_rel(Path::new(ROOT), "/state/tailscale-state/sub/node.state"),
+            None
+        );
+        assert_eq!(
+            state_rel(Path::new(ROOT), "/state/tailscale/node.state"),
             None
         );
         assert_eq!(state_rel(Path::new(ROOT), "/state/node.state"), None);

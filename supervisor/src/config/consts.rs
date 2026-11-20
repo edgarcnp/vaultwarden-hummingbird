@@ -28,10 +28,17 @@ pub const VAULT_GID: u32 = 65532;
 /// probe and the real spawn cannot diverge.
 pub const TAILSCALED_GROUPS: [nix::unistd::Gid; 1] = [nix::unistd::Gid::from_raw(TAILSCALE_GID)];
 
-/// The group-writable subtree for tailscaled's state, certs, and LocalAPI
-/// socket: the supervisor and tailscaled share the `tailscale` group; the
-/// vault is not a member.
+/// The current tailscaled data tree: certs, the LocalAPI socket, and the
+/// actual state file. It is group-writable for tailscaled.
 pub const TAILSCALE_DIR: &str = "/state/tailscale";
+
+/// The path handed to `tailscaled --state`: a supervisor-created symlink to
+/// [`TAILSCALE_DIR`]. Tailscale chmods a state directory whose basename is
+/// exactly `tailscale` to 0700; the daemon uid cannot chmod the
+/// supervisor-owned group tree, so it would fall back to an in-memory store.
+/// The differently named link keeps the real tree supervisor-owned and
+/// group-writable while Tailscale sees a directory it will not chmod.
+pub const TAILSCALE_STATE_DIR: &str = "/state/tailscale-state";
 
 // Hard timeouts: a hung child must never block the vault.
 pub const AUTH_TIMEOUT: Duration = Duration::from_secs(90);

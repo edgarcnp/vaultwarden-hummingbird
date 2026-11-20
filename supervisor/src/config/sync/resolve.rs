@@ -18,7 +18,10 @@ use crate::util::log;
 fn ca_path_isolated(path: &str) -> bool {
     let root = std::path::Path::new(SUPERVISOR_STATE);
     let tailscale = std::path::Path::new(crate::config::TAILSCALE_DIR);
-    crate::util::fs::under_root(root, path) && !crate::util::fs::under_root(tailscale, path)
+    let link = std::path::Path::new(crate::config::TAILSCALE_STATE_DIR);
+    crate::util::fs::under_root(root, path)
+        && !crate::util::fs::under_root(tailscale, path)
+        && !crate::util::fs::under_root(link, path)
 }
 
 pub(crate) fn resolve_sync(knob: &dyn Fn(&str, &str) -> String) -> Option<SyncConfig> {
@@ -165,6 +168,7 @@ mod tests {
         assert!(ca_path_isolated("/state/s3-ca.pem"));
         assert!(ca_path_isolated("/state/ca/s3-ca.pem"));
         assert!(!ca_path_isolated("/state/tailscale/s3-ca.pem"));
+        assert!(!ca_path_isolated("/state/tailscale-state/s3-ca.pem"));
         assert!(!ca_path_isolated("/data/s3-ca.pem"));
     }
 

@@ -112,9 +112,11 @@ fn ca_certs_in(path: &str, root: &Path) -> anyhow::Result<Vec<ureq::tls::Certifi
     // subtree. Config resolution checks this first; repeating it here keeps
     // the transport safe for direct callers.
     let tailscale = root.join("tailscale");
-    if !under_root(root, path) || under_root(&tailscale, path) {
+    let link = root.join("tailscale-state");
+    if !under_root(root, path) || under_root(&tailscale, path) || under_root(&link, path) {
         bail!(
-            "SUPERVISOR_S3_CA_FILE {path} must live under {} and outside {}/tailscale",
+            "SUPERVISOR_S3_CA_FILE {path} must live under {} and outside {}/tailscale \
+             and its tailscale-state link",
             root.display(),
             root.display()
         );
@@ -312,11 +314,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vw-ca-ts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("tailscale")).unwrap();
-        let path = dir.join("tailscale/ca.pem");
-        std::fs::write(&path, b"not a certificate").unwrap();
-        let err = ca_certs_in(path.to_str().unwrap(), &dir)
-            .expect_err("the tailscaled-writable subtree is refused");
-        assert!(err.to_string().contains("outside"), "{err}");
+        for sub in ["tailscale", "tailscale-state"] {
+            let path = dir.join(sub).join("ca.pem");
+            let err = ca_certs_in(path.to_str().unwrap(), &dir)
+                .expect_err("the tailscaled-writable subtree is refused");
+            assert!(err.to_string().contains("outside"), "{err}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

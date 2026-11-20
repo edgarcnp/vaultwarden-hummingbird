@@ -17,9 +17,12 @@ fn the_dotenv_must_live_on_the_state_volume() {
     assert!(!env_file_isolated("/state-evil/.env"));
     // A textual prefix is not enough: this resolves onto the vault volume.
     assert!(!env_file_isolated("/state/../data/.env"));
-    // The tailscaled-writable subtree can replace a file regardless of mode.
+    // The tailscaled-writable subtree can replace a file regardless of mode;
+    // the state link resolves into the same tree.
     assert!(!env_file_isolated("/state/tailscale/.env"));
     assert!(!env_file_isolated("/state/tailscale/run/.env"));
+    assert!(!env_file_isolated("/state/tailscale-state/.env"));
+    assert!(!env_file_isolated("/state/tailscale-state/run/.env"));
     // A `.` component is normalized away and stays under the state root.
     assert!(env_file_isolated("/state/./.env"));
 }
@@ -43,12 +46,22 @@ fn state_file_must_live_directly_under_the_state_root() {
     rejects("TAILSCALE_STATE_FILE=/state/../data/tailscaled.state\n");
     rejects("TAILSCALE_STATE_FILE=/state/tailscaled.state\n");
     rejects("TAILSCALE_STATE_FILE=/state/tailscale/sub/node.state\n");
+    rejects("TAILSCALE_STATE_FILE=/state/tailscale-state/sub/node.state\n");
 
+    let file = FileConfig::load_from(Some(&env_dotenv(
+        "TAILSCALE_STATE_FILE=/state/tailscale-state/node.state\n",
+    )));
+    let cfg = Config::build(file, lookup).expect("a direct link child resolves");
+    assert_eq!(cfg.state, "/state/tailscale-state/node.state");
+
+    // A legacy custom identity under the real tree is mapped onto the link:
+    // the file stays where it is, but tailscaled sees a parent it will not
+    // chmod.
     let file = FileConfig::load_from(Some(&env_dotenv(
         "TAILSCALE_STATE_FILE=/state/tailscale/node.state\n",
     )));
-    let cfg = Config::build(file, lookup).expect("a direct subtree child resolves");
-    assert_eq!(cfg.state, "/state/tailscale/node.state");
+    let cfg = Config::build(file, lookup).expect("a legacy direct child is normalized");
+    assert_eq!(cfg.state, "/state/tailscale-state/node.state");
 
     // A direct environment value keeps its whitespace; a trailing space is
     // a different (and unsafe) identity name.
@@ -109,14 +122,14 @@ fn reserved_state_names_refuse_the_boot() {
         "certs",
         "rsa_key.pem",
     ] {
-        let path = format!("/state/tailscale/{name}");
+        let path = format!("/state/tailscale-state/{name}");
         assert!(
             mk_opt(&[("TAILSCALE_STATE_FILE", path.as_str())]).is_none(),
             "{name} must be reserved"
         );
     }
     for name in ["node.state", "tailscaled.state", "identity"] {
-        let path = format!("/state/tailscale/{name}");
+        let path = format!("/state/tailscale-state/{name}");
         assert!(
             mk_opt(&[("TAILSCALE_STATE_FILE", path.as_str())]).is_some(),
             "{name} must be a usable identity name"
@@ -137,9 +150,24 @@ fn custom_state_files_are_wired_into_sync() {
     ];
 
     let mut vars = SYNC.to_vec();
+    vars.push(("TAILSCALE_STATE_FILE", "/state/tailscale-state/node.state"));
+    let cfg = mk(&vars);
+    assert_eq!(cfg.state, "/state/tailscale-state/node.state");
+    assert_eq!(
+        cfg.sync
+            .as_ref()
+            .expect("sync configured")
+            .state_file
+            .as_deref(),
+        Some("node.state")
+    );
+
+    // The legacy custom path under the real tree is normalized and still
+    // covers the identity.
+    let mut vars = SYNC.to_vec();
     vars.push(("TAILSCALE_STATE_FILE", "/state/tailscale/node.state"));
     let cfg = mk(&vars);
-    assert_eq!(cfg.state, "/state/tailscale/node.state");
+    assert_eq!(cfg.state, "/state/tailscale-state/node.state");
     assert_eq!(
         cfg.sync
             .as_ref()
@@ -152,7 +180,7 @@ fn custom_state_files_are_wired_into_sync() {
     // A state file that collides with a vault data key would shadow it in
     // the bucket: refuse the boot rather than merge two different files.
     let mut vars = SYNC.to_vec();
-    vars.push(("TAILSCALE_STATE_FILE", "/state/tailscale/config.json"));
+    vars.push(("TAILSCALE_STATE_FILE", "/state/tailscale-state/config.json"));
     assert!(
         mk_opt(&vars).is_none(),
         "a colliding state name must refuse"

@@ -188,6 +188,20 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# The link fix must leave tailscaled with a real file store, not the silent
+# in-memory fallback it uses when it cannot chmod the state directory. The
+# state file is 0600 under the daemon uid, inside the real /state/tailscale
+# tree (the --state path goes through /state/tailscale-state).
+mp=$(podman unshare podman volume inspect "$VOL" --format '{{.Mountpoint}}' 2>/dev/null || true)
+state_mode=$(podman unshare stat -c '%a %u' "$mp/tailscale/tailscaled.state" 2>/dev/null || true)
+if [ "$state_mode" = "600 65531" ]; then
+  echo "PASS  state-file-persisted (tailscaled wrote its own 0600 state, not memory)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL  state-file-persisted (expected '600 65531', got '$state_mode')"
+  FAIL=$((FAIL + 1))
+fi
+
 # 12. The supervisor-spawned children must not retain the container
 #     capabilities. This is the regression test for the vault's capability
 #     drop: without it the vault can setuid back to 65532 and read /state.

@@ -23,7 +23,26 @@ use super::schema;
 fn env_file_isolated(path: &str) -> bool {
     let root = Path::new(SUPERVISOR_STATE);
     let tailscale = Path::new(crate::config::TAILSCALE_DIR);
-    crate::util::fs::under_root(root, path) && !crate::util::fs::under_root(tailscale, path)
+    let link = Path::new(crate::config::TAILSCALE_STATE_DIR);
+    crate::util::fs::under_root(root, path)
+        && !crate::util::fs::under_root(tailscale, path)
+        && !crate::util::fs::under_root(link, path)
+}
+
+/// A Tailscale state file is an identity source only if it holds a
+/// machine key. `tailscaled` creates `{}` before login; size alone would
+/// treat that placeholder as a usable identity and boot without an auth
+/// key only to fail later. The read is capped and the file may be 0600
+/// (the supervisor holds CAP_DAC_READ_SEARCH).
+fn state_has_identity(path: &str) -> bool {
+    const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
+    const MACHINE_KEY: &[u8] = b"\"_machinekey\"";
+    let Ok(bytes) = crate::util::fs::read_capped_bytes(path, MAX_STATE_BYTES) else {
+        return false;
+    };
+    bytes
+        .windows(MACHINE_KEY.len())
+        .any(|window| window == MACHINE_KEY)
 }
 
 /// Resolved supervisor configuration (all env/file lookups done once at boot).
@@ -203,24 +222,26 @@ impl Config {
                 .unwrap_or_default()
         };
 
-        // The state file anchors the node identity and the `--statedir`
-        // derived from it. It must stay on the supervisor-only volume and
-        // directly under its root so the derived cert cache is the synced
-        // `/state/certs` tree. `mem:` is Tailscale's in-memory state.
+        // The state file anchors the node identity and the state store's
+        // parent. It must stay on the supervisor-only volume and directly
+        // under the link directory (Tailscale chmods a directory named
+        // exactly `tailscale`, which the daemon uid cannot do on the
+        // supervisor-owned tree). A legacy direct child of the real tree is
+        // mapped onto the link. `mem:` is Tailscale's in-memory state.
         let state = value("TAILSCALE_STATE_FILE");
+        let state = paths::normalize_state_path(root, &state);
         if !paths::state_file(root, &state) {
             log::err(&format!(
                 "config: TAILSCALE_STATE_FILE '{}' must be 'mem:' or a direct child of \
-                 {}/tailscale; refusing to start",
+                 {}/tailscale-state (the real tree's legacy spelling is accepted); \
+                 refusing to start",
                 log::sanitize(&state),
                 root.display()
             ));
             return None;
         }
         let state_rel = paths::state_rel(root, &state);
-        let state_present = state != "mem:"
-            && crate::util::fs::is_real_file(&state)
-            && std::fs::metadata(&state).is_ok_and(|meta| meta.len() > 0);
+        let state_present = state != "mem:" && state_has_identity(&state);
         // The socket controls the LocalAPI: a socket on the vault volume
         // could be deleted or impersonated by the vault uid.
         let socket = value("TAILSCALE_SOCKET");
@@ -241,7 +262,7 @@ impl Config {
         {
             log::err(&format!(
                 "config: TAILSCALE_STATE_FILE '{}' collides with a supervisor or vault \
-                 key; choose another name directly under {}/tailscale",
+                 key; choose another name directly under {}/tailscale-state",
                 log::sanitize(&state),
                 root.display()
             ));

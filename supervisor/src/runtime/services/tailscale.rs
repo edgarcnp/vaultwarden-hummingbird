@@ -3,7 +3,9 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::config::{TAILSCALE, TAILSCALE_GID, TAILSCALED, TAILSCALED_GROUPS, TAILSCALED_UID};
+use crate::config::{
+    TAILSCALE, TAILSCALE_DIR, TAILSCALE_GID, TAILSCALED, TAILSCALED_GROUPS, TAILSCALED_UID,
+};
 use crate::runtime::{
     Credentials, Handle, TUN_CAPS, apply_env, run_bounded, run_bounded_capture, spawn_as,
     spawn_as_with_caps,
@@ -33,18 +35,12 @@ const TAILSCALED_CREDS: Credentials = Credentials {
 pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Handle> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
-    if state == "mem:" {
-        // `mem:` has no parent to derive a cert cache from. Keep the cache
-        // on the supervisor volume so `serve` can still issue and store
-        // certificates; the identity itself stays in memory.
-        cmd.arg("--statedir").arg(crate::config::TAILSCALE_DIR);
-    } else if let Some(dir) = std::path::Path::new(state)
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .and_then(|d| d.to_str())
-    {
-        cmd.arg("--statedir").arg(dir);
-    }
+    // Cert cache, Taildrop staging, and log policy live on the real
+    // group-writable tree. The state file itself goes through the
+    // differently named link: Tailscale chmods a parent basename of
+    // `tailscale` to 0700, which the daemon uid cannot do on the
+    // supervisor-owned tree (and would silently fall back to `mem:`).
+    cmd.arg("--statedir").arg(TAILSCALE_DIR);
     if userspace {
         cmd.arg("--tun=userspace-networking");
     }

@@ -181,6 +181,9 @@ fn migrate_tailscale_layout(state: &Path, group: u32) -> bool {
         ));
         return false;
     }
+    if !ensure_state_link(state) {
+        return false;
+    }
     let marker = state.join(TAILSCALE_MARKER);
     if is_real_file(&marker.to_string_lossy()) {
         // A completed move still needs its modes enforced after an image
@@ -214,6 +217,62 @@ fn ensure_dir_group(dir: &Path, group: u32) -> std::io::Result<()> {
     ensure_private_dir(dir)?;
     set_dir(dir, 0o2770)?;
     set_group(dir, group)
+}
+
+/// Create `/state/tailscale-state -> tailscale` (relative) if missing and
+/// prove an existing link names the same target. `tailscaled --state` is
+/// given the link path so Tailscale does not chmod the real, supervisor-owned
+/// `tailscale` tree to 0700; it cannot (the daemon is not the owner) and
+/// would fall back to an in-memory state store.
+fn ensure_state_link(state: &Path) -> bool {
+    let link = state.join("tailscale-state");
+    let target = Path::new("tailscale");
+    match fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => match fs::read_link(&link) {
+            Ok(dest) if dest == target => true,
+            Ok(dest) => {
+                log::err(&format!(
+                    "layout: {} points at {}, expected tailscale; refusing to use it",
+                    log::sanitize(&link.to_string_lossy()),
+                    log::sanitize(&dest.to_string_lossy())
+                ));
+                false
+            }
+            Err(e) => {
+                log::err(&format!(
+                    "layout: cannot read the state link {}: {e}",
+                    log::sanitize(&link.to_string_lossy())
+                ));
+                false
+            }
+        },
+        Ok(_) => {
+            log::err(&format!(
+                "layout: {} exists but is not a symlink; refusing to use it",
+                log::sanitize(&link.to_string_lossy())
+            ));
+            false
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match std::os::unix::fs::symlink(target, &link) {
+                Ok(()) => true,
+                Err(e) => {
+                    log::err(&format!(
+                        "layout: cannot create the state link {}: {e}",
+                        log::sanitize(&link.to_string_lossy())
+                    ));
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            log::err(&format!(
+                "layout: cannot inspect the state link {}: {e}",
+                log::sanitize(&link.to_string_lossy())
+            ));
+            false
+        }
+    }
 }
 
 /// Enforce the tailscaled-writable tree's modes. Best-effort: files and
@@ -714,6 +773,10 @@ mod tests {
         assert_eq!(mode(&data.join("attachments/u")), 0o770);
         assert!(state.join(MARKER).is_file());
         assert!(state.join(TAILSCALE_MARKER).is_file());
+        assert_eq!(
+            fs::read_link(state.join("tailscale-state")).unwrap(),
+            PathBuf::from("tailscale")
+        );
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 

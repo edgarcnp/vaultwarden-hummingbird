@@ -126,16 +126,47 @@ fn authkey_required_unless_sync_can_restore_the_identity() {
     );
 }
 
-/// A local state file is a valid identity source on a persistent volume;
-/// a `mem:` state or one outside the sync root cannot be supplied by S3.
+/// A Tailscale `{}` placeholder is not an identity: it is what `tailscaled`
+/// writes before login, and treating it as one would boot without an auth
+/// key only to fail later.
+#[test]
+fn an_empty_tailscale_state_is_not_an_identity_source() {
+    let root = std::env::temp_dir().join(format!("vw-sup-empty-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("tailscale")).unwrap();
+    std::os::unix::fs::symlink("tailscale", root.join("tailscale-state")).unwrap();
+    let state = root.join("tailscale/tailscaled.state");
+    let socket = root.join("tailscale/tailscaled.sock");
+    std::fs::write(&state, b"{}").unwrap();
+    let lookup = {
+        let state = state.to_string_lossy().into_owned();
+        let socket = socket.to_string_lossy().into_owned();
+        move |key: &str| match key {
+            "TAILSCALE_STATE_FILE" => Some(state.clone()),
+            "TAILSCALE_SOCKET" => Some(socket.clone()),
+            _ => None,
+        }
+    };
+    assert!(
+        Config::build_at(&root, FileConfig::default(), lookup.clone()).is_none(),
+        "an empty state must still require an auth key"
+    );
+    std::fs::write(&state, b"{\"_machinekey\":\"k\"}").unwrap();
+    let cfg = Config::build_at(&root, FileConfig::default(), lookup)
+        .expect("a state with a machine key is an identity");
+    assert_eq!(cfg.authkey, None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn authkey_gate_considers_the_local_state_and_sync_coverage() {
     let root = std::env::temp_dir().join(format!("vw-sup-state-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(root.join("tailscale")).unwrap();
+    std::os::unix::fs::symlink("tailscale", root.join("tailscale-state")).unwrap();
     let state = root.join("tailscale/tailscaled.state");
-    std::fs::write(&state, b"identity").unwrap();
+    std::fs::write(&state, b"{\"_machinekey\":\"k\"}").unwrap();
     let socket = root.join("tailscale/tailscaled.sock");
 
     let map: BTreeMap<String, String> = [
@@ -227,7 +258,7 @@ fn defaults_and_merge_order() {
     assert_eq!(cfg.port, 8080);
     assert_eq!(cfg.vault_port, Some(8081));
     assert_eq!(cfg.socket, "/state/tailscale/tailscaled.sock");
-    assert_eq!(cfg.state, "/state/tailscale/tailscaled.state");
+    assert_eq!(cfg.state, "/state/tailscale-state/tailscaled.state");
     assert_eq!(cfg.hostname, "vaultwarden-hummingbird");
     assert_eq!(cfg.authkey.as_deref(), Some("test-key"));
     assert!(cfg.serve && cfg.userspace);

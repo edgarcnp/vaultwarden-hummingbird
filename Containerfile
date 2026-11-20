@@ -192,8 +192,10 @@ ENV DATA_FOLDER=/data \
 # /state is supervisor-only (2710, owner 65532, group tailscale 65531):
 # group traverse, no list, so the tailscaled uid can reach only its own
 # subtree. /state/tailscale (2770) holds the identity, cert cache, and
-# LocalAPI socket; the supervisor joins group 65531 for access. The vault
-# is not in that group and cannot traverse /state.
+# LocalAPI socket; /state/tailscale-state is a supervisor-created link used
+# only for `tailscaled --state` so Tailscale does not chmod the real tree.
+# The supervisor joins group 65531 for access. The vault is not in that
+# group and cannot traverse /state.
 USER 0
 RUN mkdir -p /state/tailscale \
  && chown 65532:65532 /data \
