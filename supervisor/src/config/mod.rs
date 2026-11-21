@@ -18,5 +18,5 @@ pub use consts::{
     SYNC_TIMEOUT, TAILSCALE, TAILSCALE_DIR, TAILSCALE_GID, TAILSCALE_STATE_DIR, TAILSCALED,
     TAILSCALED_GROUPS, TAILSCALED_UID, VAULT_GID, VAULT_UID, VAULTWARDEN,
 };
-pub use env::{Config, is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
+pub use env::{Config, EarlyConfig, is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
 pub use sync::SyncConfig;

@@ -23,6 +23,11 @@ a package manager.
   [state sync](docs/state-sync.md) and database backups when the host wipes
   them. The run command creates two named volumes.
 
+The quick-start command grants four capabilities. On a runtime that cannot
+grant them (Render, most PaaS products), set `SUPERVISOR_SINGLE_UID=true`
+instead: the vault can then read `/state`, so the platform must be your
+security boundary. See [runtimes without capabilities](docs/operations.md#runtimes-without-capabilities).
+
 ## Quick start
 
 1. Pull the image.
@@ -118,6 +123,9 @@ rollback rules, and the one-time layout migration.
 
 - **The container exits immediately.** Check the auth key, the domain, and the
   log line `refusing to run the vault without Tailscale`.
+- **`cannot join the tailscale group`.** The runtime did not grant `CAP_SETGID`.
+  Use a runtime that can, or set `SUPERVISOR_SINGLE_UID=true` on a platform
+  that cannot. See [runtimes without capabilities](docs/operations.md#runtimes-without-capabilities).
 - **`/alive` returns `503`.** The vault is not answering; its error is in the
   container log.
 - **A backup was skipped.** Nothing was lost; the next cycle retries. The log

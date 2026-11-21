@@ -6,7 +6,9 @@
 //! tailscale) and the identity/certs under `/state/tailscale` (2770). The
 //! vault runs as 65533:65532 and can neither traverse that directory nor
 //! read its files. `/data` stays the vault's volume: the supervisor only
-//! reads it (0660/0770 for the shared group).
+//! reads it (0660/0770 for the shared group). In single-uid mode the group
+//! is the supervisor's own gid and the vault shares that uid, so this
+//! isolation does not apply; the layout is still prepared the same way.
 //!
 //! This runs before config resolution because the identity gate reads the
 //! state file, and before the vault can run. Every source path is treated
@@ -40,14 +42,15 @@ const MAX_ENTRIES: u64 = 2_000_000;
 /// stack.
 const MAX_TREE_DEPTH: usize = 32;
 
-/// Production entry: migrate `/data` into `/state`.
-pub fn migrate_layout() -> bool {
-    migrate_layout_at(Path::new(SUPERVISOR_STATE), Path::new("/data"))
+/// Production entry: migrate `/data` into `/state` under the chosen
+/// identity mode (`single_uid` keeps every file in the supervisor's group).
+pub fn migrate_layout(single_uid: bool) -> bool {
+    migrate_layout_at(Path::new(SUPERVISOR_STATE), Path::new("/data"), single_uid)
 }
 
 /// [`migrate_layout`] with explicit roots (tests use scratch directories).
-pub(super) fn migrate_layout_at(state: &Path, data: &Path) -> bool {
-    let group = tailscale_group();
+pub(super) fn migrate_layout_at(state: &Path, data: &Path, single_uid: bool) -> bool {
+    let group = tailscale_group(single_uid);
     if let Err(e) = ensure_state_dir(state, group) {
         log::err(&format!(
             "layout: cannot prepare the supervisor state volume {}: {e}",
@@ -136,22 +139,33 @@ pub(super) fn migrate_layout_at(state: &Path, data: &Path) -> bool {
 
 /// The production state volume and the tests share one rule: in the image
 /// the group is the fixed `tailscale` gid; in a developer test run the
-/// current gid is the only one the user may assign.
-fn tailscale_group() -> u32 {
-    let euid = geteuid();
-    if euid.as_raw() == SUPERVISOR_UID || euid.is_root() {
-        TAILSCALE_GID
+/// current gid is the only one the user may assign. Single-uid mode always
+/// uses the current gid: a foreign group needs CAP_CHOWN/CAP_SETGID.
+fn tailscale_group_for(single_uid: bool, euid: u32, egid: u32) -> u32 {
+    if single_uid || (euid != SUPERVISOR_UID && euid != 0) {
+        egid
     } else {
-        nix::unistd::getegid().as_raw()
+        TAILSCALE_GID
     }
 }
 
-/// Prepare `/state`: owner supervisor, group tailscale, mode 2710 (owner
-/// rwx, group traverse, setgid for the subtree).
+/// [`tailscale_group_for`] for the running process.
+fn tailscale_group(single_uid: bool) -> u32 {
+    tailscale_group_for(
+        single_uid,
+        geteuid().as_raw(),
+        nix::unistd::getegid().as_raw(),
+    )
+}
+
+/// Prepare `/state`: owner supervisor, the chosen group, mode 2710 (owner
+/// rwx, group traverse, setgid for the subtree). The group is set first:
+/// the setgid bit survives chmod only when the caller belongs to the group
+/// (single-uid mode has no `CAP_FSETID`).
 fn ensure_state_dir(dir: &Path, group: u32) -> std::io::Result<()> {
     ensure_private_dir(dir)?;
-    set_dir(dir, 0o2710)?;
-    set_group(dir, group)
+    set_group(dir, group)?;
+    set_dir(dir, 0o2710)
 }
 
 /// Set `path`'s group, mapping the nix error into `std::io`.
@@ -213,11 +227,12 @@ fn migrate_tailscale_layout(state: &Path, group: u32) -> bool {
     true
 }
 
-/// Create `dir` privately, then set mode 2770 and the tailscale group.
+/// Create `dir` privately, then set the chosen group and mode 2770. Group
+/// first: the setgid bit needs the caller to belong to the group.
 fn ensure_dir_group(dir: &Path, group: u32) -> std::io::Result<()> {
     ensure_private_dir(dir)?;
-    set_dir(dir, 0o2770)?;
-    set_group(dir, group)
+    set_group(dir, group)?;
+    set_dir(dir, 0o2770)
 }
 
 /// Ensure `/state/tailscale-state -> tailscale` exists and names that target.
@@ -343,15 +358,16 @@ fn fix_owned_path(path: &Path, mode: u32, group: u32) {
     if !euid.is_root() && meta.uid() != euid.as_raw() {
         return;
     }
-    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
-        log::err(&format!(
-            "layout: cannot set the mode of {}: {e}",
-            log::sanitize(&path.to_string_lossy())
-        ));
-    }
     if let Err(e) = set_group(path, group) {
         log::err(&format!(
             "layout: cannot set the group of {}: {e}",
+            log::sanitize(&path.to_string_lossy())
+        ));
+        return;
+    }
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
+        log::err(&format!(
+            "layout: cannot set the mode of {}: {e}",
             log::sanitize(&path.to_string_lossy())
         ));
     }
@@ -728,6 +744,24 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    /// In single-uid mode the layout must use the supervisor's own group;
+    /// a foreign group would require CAP_CHOWN/CAP_SETGID, which the mode
+    /// does not have.
+    #[test]
+    fn single_uid_mode_uses_the_supervisor_group() {
+        assert_eq!(
+            tailscale_group_for(true, SUPERVISOR_UID, SUPERVISOR_GID),
+            SUPERVISOR_GID
+        );
+        assert_eq!(
+            tailscale_group_for(false, SUPERVISOR_UID, SUPERVISOR_GID),
+            TAILSCALE_GID
+        );
+        assert_eq!(tailscale_group_for(false, 0, SUPERVISOR_GID), TAILSCALE_GID);
+        // a developer run keeps the only group it may assign
+        assert_eq!(tailscale_group_for(false, 1000, 1000), 1000);
+    }
+
     #[test]
     fn moves_identity_certs_and_lineage_out_of_the_vault_volume() {
         let (state, data) = scratch("move");
@@ -745,7 +779,7 @@ mod tests {
 
         // The test process is not uid 65532, so the group change cannot be
         // exercised here; the mode walk still runs.
-        assert!(migrate_layout_at(&state, &data));
+        assert!(migrate_layout_at(&state, &data, false));
 
         assert_eq!(
             fs::read(state.join("tailscale/tailscaled.state")).unwrap(),
@@ -790,7 +824,7 @@ mod tests {
         fs::create_dir_all(data.join("certs")).unwrap();
         symlink(&victim, data.join("certs/key")).unwrap();
 
-        assert!(migrate_layout_at(&state, &data));
+        assert!(migrate_layout_at(&state, &data, false));
         assert!(!data.join("tailscaled.state").exists());
         assert!(!data.join("certs/key").exists());
         assert_eq!(fs::read(&victim).unwrap(), b"keep");
@@ -803,11 +837,11 @@ mod tests {
     #[test]
     fn a_completed_migration_never_re_adopts_a_vault_volume_copy() {
         let (state, data) = scratch("readopt");
-        assert!(migrate_layout_at(&state, &data));
+        assert!(migrate_layout_at(&state, &data, false));
         assert!(state.join(MARKER).is_file());
         fs::write(state.join("tailscale/tailscaled.state"), b"real-identity").unwrap();
         fs::write(data.join("tailscaled.state"), b"planted").unwrap();
-        assert!(migrate_layout_at(&state, &data));
+        assert!(migrate_layout_at(&state, &data, false));
         assert_eq!(
             fs::read(state.join("tailscale/tailscaled.state")).unwrap(),
             b"real-identity"
@@ -822,7 +856,7 @@ mod tests {
         fs::create_dir_all(state.join("tailscale")).unwrap();
         fs::write(state.join("tailscale/tailscaled.state"), b"new").unwrap();
         fs::write(data.join("tailscaled.state"), b"old").unwrap();
-        assert!(migrate_layout_at(&state, &data));
+        assert!(migrate_layout_at(&state, &data, false));
         assert_eq!(
             fs::read(state.join("tailscale/tailscaled.state")).unwrap(),
             b"new"

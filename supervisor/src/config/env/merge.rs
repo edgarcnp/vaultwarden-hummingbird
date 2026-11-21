@@ -90,6 +90,11 @@ pub struct Config {
     pub service: Option<String>,
     /// userspace networking: no TUN device on PaaS platforms
     pub userspace: bool,
+    /// Run every child as PID 1's identity, without changing uid/gid or
+    /// joining the tailscale group. Opt-in fallback for runtimes that
+    /// cannot grant SETUID/SETGID/KILL/DAC_READ_SEARCH. It removes the
+    /// vault/state isolation, so boot logs it as a security warning.
+    pub single_uid: bool,
     /// S3 state sync (None = disabled)
     pub sync: Option<SyncConfig>,
     /// DB backup/restore (None = disabled)
@@ -98,11 +103,46 @@ pub struct Config {
     pub vw_env: Vec<(String, String)>,
 }
 
+/// Boot-affecting flags resolved before the group join and layout
+/// migration. Read from the process environment only: the dotenv file is
+/// not parsed yet, so a file value could never take effect.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EarlyConfig {
+    /// Run every child as the supervisor's uid/gid (no capability change).
+    pub single_uid: bool,
+}
+
+impl EarlyConfig {
+    /// Read the early flags from the process environment.
+    pub fn from_env() -> Self {
+        Self::from_lookup(&|k| env::var(k).ok())
+    }
+
+    /// [`Self::from_env`] with the source injected, for the config tests
+    /// that never mutate the process environment.
+    fn from_lookup(lookup: &impl Fn(&str) -> Option<String>) -> Self {
+        let raw = lookup(schema::SINGLE_UID).unwrap_or_default();
+        Self {
+            single_uid: parse_flag(
+                schema::SINGLE_UID,
+                &raw,
+                schema::bool_default(schema::SINGLE_UID),
+            ),
+        }
+    }
+}
+
 impl Config {
     /// Resolve the full config with merge order env > dotenv file > schema
     /// default. Empty means unset, bad flags warn and take the default, and
     /// any refusal (strict file, legacy port spelling, no identity) is `None`.
     pub fn from_env() -> Option<Self> {
+        Self::from_env_with(EarlyConfig::from_env())
+    }
+
+    /// [`Self::from_env`] with the pre-config flags passed explicitly, so
+    /// the boot decision and the resolved config cannot diverge.
+    pub fn from_env_with(early: EarlyConfig) -> Option<Self> {
         // The dotenv file holds the tailscale auth key and the S3
         // credentials. It must live on the supervisor-only /state volume: a file
         // mounted elsewhere (the old /config/.env) is readable by the vault
@@ -122,16 +162,20 @@ impl Config {
             ));
             return None;
         }
-        Self::build_at(Path::new(SUPERVISOR_STATE), FileConfig::load(), |k| {
-            env::var(k).ok()
-        })
+        Self::build_at(
+            Path::new(SUPERVISOR_STATE),
+            FileConfig::load(),
+            |k| env::var(k).ok(),
+            early,
+        )
     }
 
     /// [`Self::from_env`] with the env source injected: tests pass a map,
     /// never mutating the process env (unsafe and racy).
     #[cfg(test)]
     fn build(file: FileConfig, lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        Self::build_at(Path::new(SUPERVISOR_STATE), file, lookup)
+        let early = EarlyConfig::from_lookup(&lookup);
+        Self::build_at(Path::new(SUPERVISOR_STATE), file, lookup, early)
     }
 
     /// Resolve with an explicit state root and injected env source; production
@@ -140,6 +184,7 @@ impl Config {
         root: &Path,
         file: FileConfig,
         lookup: impl Fn(&str) -> Option<String>,
+        early: EarlyConfig,
     ) -> Option<Self> {
         // A configured-but-unreadable file refuses the boot: silently
         // running on env-only defaults is exactly the quiet
@@ -354,6 +399,23 @@ impl Config {
             }
         }
 
+        let userspace = parse_flag(
+            "TAILSCALE_USERSPACE",
+            &raw("TAILSCALE_USERSPACE"),
+            schema::bool_default("TAILSCALE_USERSPACE"),
+        );
+        // Single-uid mode cannot change identity or receive capabilities,
+        // so TUN mode's NET_ADMIN/NET_RAW are unreachable. Refuse here,
+        // before a spawn that would fail with a confusing errno.
+        if early.single_uid && !userspace {
+            log::err(
+                "config: SUPERVISOR_SINGLE_UID=true requires userspace networking; \
+                 TUN mode needs NET_ADMIN/NET_RAW, which this mode cannot grant; \
+                 set TAILSCALE_USERSPACE=true; refusing to start",
+            );
+            return None;
+        }
+
         Some(Self {
             state,
             socket,
@@ -370,11 +432,8 @@ impl Config {
                 non_empty(lookup("TAILSCALE_SERVICE"))
                     .or_else(|| non_empty(file.knobs.get("TAILSCALE_SERVICE").cloned())),
             ),
-            userspace: parse_flag(
-                "TAILSCALE_USERSPACE",
-                &raw("TAILSCALE_USERSPACE"),
-                schema::bool_default("TAILSCALE_USERSPACE"),
-            ),
+            userspace,
+            single_uid: early.single_uid,
             sync,
             backup,
             vw_env: file.child.into_iter().collect(),

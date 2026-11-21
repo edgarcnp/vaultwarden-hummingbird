@@ -51,7 +51,7 @@ pub fn start_vw(cfg: &Config, tsd: Handle) -> ! {
     }
 
     log::info("starting vaultwarden");
-    let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env) else {
+    let Some(vw) = run_vaultwarden(vault_port, &cfg.vw_env, cfg.single_uid) else {
         shutdown(Some(tsd), None, 1, None)
     };
     // One reactor thread owns every periodic task and the final flush:

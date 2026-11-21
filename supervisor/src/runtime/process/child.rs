@@ -118,6 +118,31 @@ pub struct Credentials {
     pub umask: u32,
 }
 
+impl Credentials {
+    /// The running process's identity. `groups` is empty because the mode
+    /// cannot call `setgroups`; any groups the supervisor inherited stay on
+    /// the child.
+    pub fn same_identity(umask: u32) -> Self {
+        Self {
+            uid: geteuid().as_raw(),
+            gid: getegid().as_raw(),
+            groups: &[],
+            umask,
+        }
+    }
+}
+
+/// The identity a child runs with: `dedicated` normally, or the
+/// supervisor's own identity in single-uid mode, where no capability is
+/// available to switch.
+pub fn child_credentials(single_uid: bool, dedicated: Credentials) -> Credentials {
+    if single_uid {
+        Credentials::same_identity(dedicated.umask)
+    } else {
+        dedicated
+    }
+}
+
 /// Run a child under the given identity: supplementary groups, all three
 /// GIDs/UIDs, dropped capabilities, `no_new_privs`, and umask are applied in
 /// the forked child before `exec`. Used for the vault and userspace tailscaled.
@@ -343,6 +368,38 @@ mod tests {
 
     use super::super::reap::{Gone, exit_code, reap_until_gone};
     use super::*;
+
+    /// The single-uid fallback reuses the running process's identity; no
+    /// capability is needed to set an identity equal to the current one.
+    #[test]
+    fn same_identity_uses_the_running_process_and_no_groups() {
+        let creds = Credentials::same_identity(0o007);
+        assert_eq!(creds.uid, geteuid().as_raw());
+        assert_eq!(creds.gid, getegid().as_raw());
+        assert!(creds.groups.is_empty());
+        assert_eq!(creds.umask, 0o007);
+    }
+
+    /// In single-uid mode every child gets the supervisor identity; the
+    /// dedicated uid/gid is used only when the runtime grants the change.
+    #[test]
+    fn single_uid_mode_reuses_the_supervisor_identity() {
+        let dedicated = Credentials {
+            uid: 1,
+            gid: 2,
+            groups: &[],
+            umask: 0o027,
+        };
+        let normal = child_credentials(false, dedicated);
+        assert_eq!((normal.uid, normal.gid), (1, 2));
+        let single = child_credentials(true, dedicated);
+        assert_eq!(
+            (single.uid, single.gid),
+            (geteuid().as_raw(), getegid().as_raw())
+        );
+        assert_eq!(single.umask, 0o027);
+        assert!(single.groups.is_empty());
+    }
 
     /// The forked child applies the credential closure (umask here) and
     /// still spawns/reaps normally. The cross-uid transition needs the

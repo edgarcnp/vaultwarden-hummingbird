@@ -40,6 +40,18 @@ the TUN network pair for tailscaled. The vault's uid is not in the `tailscale`
 group, so it cannot traverse `/state`, reach the LocalAPI socket, or read the
 dotenv file.
 
+### Single-uid mode
+
+`SUPERVISOR_SINGLE_UID=true` (process environment only) is the fallback for
+runtimes that cannot grant the four capabilities. The supervisor runs every
+child as `65532:65532`, skips the tailscale group join, and gives `/state` the
+shared group. It cannot call `setgroups`, so it adds no groups; the image's
+user has none, but groups injected by the runtime stay. The isolation described
+above does not apply: the vault can read `/state`, the dotenv file, the
+Tailscale identity, and the LocalAPI socket. TUN mode is refused; userspace
+networking is required. Treat the platform itself as the security boundary. See
+[runtimes without capabilities](operations.md#runtimes-without-capabilities).
+
 ## Volumes and modes
 
 | Path | Mode | Owner | Contents |
@@ -52,6 +64,10 @@ dotenv file.
 `/state` is group-traversable but not listable. The vault runs as a different
 uid and is not in the group, so it cannot enter. tailscaled can write only its
 own subtree.
+
+In single-uid mode the group is `65532` and the vault shares the uid, so it can
+enter `/state`; the modes stay `2710`/`2770`, but they no longer separate the
+processes.
 
 The differently named `tailscale-state` link exists because Tailscale changes a
 state directory named exactly `tailscale` to `0700`. The daemon uid cannot do
@@ -79,8 +95,8 @@ paths.
 ## Boot sequence
 
 Before the phase table, the supervisor installs signal handlers, joins the
-`tailscale` group, and migrates an old `/data` layout. Config resolution
-follows, then these phases:
+`tailscale` group (skipped in single-uid mode), and migrates an old `/data`
+layout. Config resolution follows, then these phases:
 
 | Phase | Purpose | On stop | On failure |
 | --- | --- | --- | --- |

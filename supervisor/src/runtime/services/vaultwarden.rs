@@ -11,7 +11,7 @@ use std::process::Command;
 use crate::config::{
     VAULT_GID, VAULT_UID, VAULTWARDEN, is_supervisor_consumed, is_supervisor_key, vaultwarden_key,
 };
-use crate::runtime::{Credentials, EnvGrant, Handle, spawn_as};
+use crate::runtime::{Credentials, EnvGrant, Handle, child_credentials, spawn_as};
 
 /// The vault's identity: a dedicated UID in the shared data group. It can
 /// write `/data` (0770, group 65532) but cannot traverse the supervisor's
@@ -24,12 +24,17 @@ const VAULT_CREDENTIALS: Credentials = Credentials {
 };
 
 /// vaultwarden in the foreground with a *granted* environment (see
-/// [`granted_env`]) and the dedicated vault identity. Spawn failure
-/// returns `None`; the caller tears down and exits 1.
-pub fn run_vaultwarden(vault_port: u16, extra_env: &[(String, String)]) -> Option<Handle> {
+/// [`granted_env`]) and the dedicated vault identity; single-uid mode
+/// keeps the supervisor's identity instead. Spawn failure returns `None`;
+/// the caller tears down and exits 1.
+pub fn run_vaultwarden(
+    vault_port: u16,
+    extra_env: &[(String, String)],
+    single_uid: bool,
+) -> Option<Handle> {
     let mut cmd = Command::new(VAULTWARDEN);
     granted_env(env::vars_os(), extra_env, vault_port).apply(&mut cmd);
-    spawn_as(&mut cmd, VAULT_CREDENTIALS)
+    spawn_as(&mut cmd, child_credentials(single_uid, VAULT_CREDENTIALS))
 }
 
 /// Where the image bakes the web vault (WEB_VAULT_FOLDER in the

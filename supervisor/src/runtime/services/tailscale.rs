@@ -11,8 +11,8 @@ use crate::config::{
     TAILSCALE, TAILSCALE_DIR, TAILSCALE_GID, TAILSCALED, TAILSCALED_GROUPS, TAILSCALED_UID,
 };
 use crate::runtime::{
-    Credentials, Handle, TUN_CAPS, apply_env, run_bounded, run_bounded_capture, spawn_as,
-    spawn_as_with_caps,
+    Credentials, Handle, TUN_CAPS, apply_env, child_credentials, run_bounded, run_bounded_capture,
+    spawn_as, spawn_as_with_caps,
 };
 use crate::util::{StagedFile, log};
 
@@ -28,8 +28,14 @@ const TAILSCALED_CREDS: Credentials = Credentials {
 
 /// Spawn tailscaled under its dedicated UID in its own process group, with
 /// an allow-listed env and (TUN mode only) NET_ADMIN/NET_RAW; userspace mode
-/// needs none. `--statedir` keeps the serve cert cache; `None` on failure.
-pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Handle> {
+/// needs none. In single-uid mode it keeps the supervisor's identity. `--statedir`
+/// keeps the serve cert cache; `None` on failure.
+pub fn spawn_tailscaled(
+    state: &str,
+    socket: &str,
+    userspace: bool,
+    single_uid: bool,
+) -> Option<Handle> {
     let mut cmd = Command::new(TAILSCALED);
     cmd.arg("--state").arg(state).arg("--socket").arg(socket);
     // Cert cache, Taildrop staging, and log policy live on the real
@@ -42,10 +48,11 @@ pub fn spawn_tailscaled(state: &str, socket: &str, userspace: bool) -> Option<Ha
         cmd.arg("--tun=userspace-networking");
     }
     apply_env(&mut cmd, &[]);
+    let creds = child_credentials(single_uid, TAILSCALED_CREDS);
     if userspace {
-        spawn_as(&mut cmd, TAILSCALED_CREDS)
+        spawn_as(&mut cmd, creds)
     } else {
-        spawn_as_with_caps(&mut cmd, TAILSCALED_CREDS, TUN_CAPS)
+        spawn_as_with_caps(&mut cmd, creds, TUN_CAPS)
     }
 }
 

@@ -42,6 +42,10 @@ Use `0600` owned by `65532`, or `0640` with group `65532`. The default `0644`
 works but the supervisor logs a warning, because the tailscaled group can
 traverse `/state` and read a world-readable file.
 
+In single-uid mode the vault shares the supervisor's uid, so these permissions
+no longer separate it from the file's secrets; see
+[runtimes without capabilities](operations.md#runtimes-without-capabilities).
+
 On a rootful runtime:
 
 ```sh
@@ -60,6 +64,9 @@ Other rules:
 
 - `SUPERVISOR_ENV_FILE` is read from the process environment only. Putting it
   in the file itself refuses the boot.
+- `SUPERVISOR_SINGLE_UID` is also read from the process environment only.
+  Putting it in the file refuses the boot. See
+  [runtimes without capabilities](operations.md#runtimes-without-capabilities).
 - An unquoted `$VAR` is substituted from the container environment. Use single
   quotes to keep a literal `$`.
 - Never reference `TAILSCALE_AUTHKEY` or a `SUPERVISOR_S3_*` secret from a
@@ -92,6 +99,7 @@ Other rules:
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `SUPERVISOR_ENV_FILE` | none | Dotenv file to load. Process environment only. |
+| `SUPERVISOR_SINGLE_UID` | `false` | Run every child as PID 1's uid/gid and skip the tailscale group join. Process environment only. For runtimes that cannot grant the four capabilities; the vault can then read `/state`. Requires userspace networking. See [runtimes without capabilities](operations.md#runtimes-without-capabilities). |
 | `SUPERVISOR_EPHEMERAL` | `false` | Declare temporary storage. When true, an explicitly configured but unusable S3 or backup setting refuses the boot instead of silently losing persistence. A tmpfs `/data` and `I_REALLY_WANT_VOLATILE_STORAGE` are detected too. |
 
 ### S3 state sync

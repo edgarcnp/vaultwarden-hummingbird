@@ -60,6 +60,47 @@ capabilities. TUN mode is slightly faster but needs `NET_ADMIN`, sometimes
 `NET_RAW`, and `/dev/net/tun`; rootless Podman cannot create a TUN in its user
 namespace.
 
+### Runtimes without capabilities
+
+Some platforms do not let you grant capabilities to a container (Render and
+most PaaS products). The normal mode cannot run there: it fails closed at
+`cannot join the tailscale group (Operation not permitted)`.
+
+Set `SUPERVISOR_SINGLE_UID=true` in the service's environment (not in the
+dotenv file; it is read before the file). The supervisor then runs `tailscaled`
+and the vault as its own uid/gid (`65532:65532`), skips the group join, and
+gives `/state` the shared group. Userspace networking is required; TUN mode is
+refused because `NET_ADMIN`/`NET_RAW` are unavailable.
+
+This removes the vault/state isolation: the vault can read `/state`, the
+Tailscale identity, the dotenv secrets, and the LocalAPI socket. Use it only
+when the platform itself is the security boundary, and prefer the normal mode
+on a runtime that can grant the four capabilities.
+
+On Render:
+
+- set `SUPERVISOR_SINGLE_UID=true` in the service's environment;
+- Render mounts secret files at `/etc/secrets`, which this supervisor refuses
+  as a dotenv location (the file must live under `/state`). Leave
+  `SUPERVISOR_ENV_FILE` unset and set the keys as environment variables. In
+  this mode the vault can also read PID 1's environment, so secret placement
+  adds no isolation;
+- set `VAULTWARDEN_PORT=10000` (Render's default `PORT`; the supervisor does
+  not read `PORT`) or the port Render assigned;
+- use a private service or a web service; on a web service set the health
+  check path to `/alive`;
+- a persistent disk must be writable by uid/gid `65532`; the supervisor cannot
+  chown a root-owned mount. A Render Blueprint declares one `disk`: attach it
+  to whichever of `/data` or `/state` you want local, and cover the other with
+  S3. If the mount is not writable, use the ephemeral filesystem with
+  [S3 state sync](state-sync.md) and [database backups](backup.md), and set
+  `SUPERVISOR_EPHEMERAL=true`;
+- set `maxShutdownDelaySeconds` to `180` so the final database dump and state
+  push can finish (Render's default is 30 seconds; the image budget is 180);
+- userspace Tailscale needs outbound UDP (or DERP over 443); the tailnet path
+  uses no inbound port. The gate's port exists only for the platform's health
+  check.
+
 ## Upgrading
 
 1. Pull the new image.
@@ -137,6 +178,7 @@ previous backup intact.
 | Symptom | Check |
 | --- | --- |
 | Container exits immediately | The auth key, `VAULTWARDEN_DOMAIN`, and the log line `refusing to run the vault without Tailscale`. With `TAILSCALE_SERVE=true`, a failed serve exits the same way; enable MagicDNS and HTTPS certificates, or set `TAILSCALE_SERVE=false`. |
+| `cannot join the tailscale group (Operation not permitted)` | The runtime did not grant `CAP_SETGID`. Add the four capabilities, or set `SUPERVISOR_SINGLE_UID=true` on a platform that cannot (see [runtimes without capabilities](#runtimes-without-capabilities)). |
 | `/alive` returns `503` | The vault is not answering, usually the database. Its error is in the container log. |
 | `db backup: ... skipped/failed` | That cycle did not run and nothing was lost; the next one retries. The message names S3 settings, free space on `/state`, or the lineage guard (`refusing to shadow it`). |
 | State sync cannot read the identity | `DAC_READ_SEARCH` is missing. tailscaled writes its files `0600`; add the capability and restart. |

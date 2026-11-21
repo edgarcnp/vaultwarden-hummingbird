@@ -152,12 +152,24 @@ fn an_empty_tailscale_state_is_not_an_identity_source() {
         }
     };
     assert!(
-        Config::build_at(&root, FileConfig::default(), lookup.clone()).is_none(),
+        Config::build_at(
+            &root,
+            FileConfig::default(),
+            lookup.clone(),
+            EarlyConfig::default()
+        )
+        .is_none(),
         "an empty state must still require an auth key"
     );
     std::fs::write(&state, b"{\"_machinekey\":\"not-base64\"}").unwrap();
     assert!(
-        Config::build_at(&root, FileConfig::default(), lookup.clone()).is_none(),
+        Config::build_at(
+            &root,
+            FileConfig::default(),
+            lookup.clone(),
+            EarlyConfig::default()
+        )
+        .is_none(),
         "a state with an invalid machine key must require an auth key"
     );
     std::fs::write(
@@ -165,7 +177,7 @@ fn an_empty_tailscale_state_is_not_an_identity_source() {
         b"{\"_machinekey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}",
     )
     .unwrap();
-    let cfg = Config::build_at(&root, FileConfig::default(), lookup)
+    let cfg = Config::build_at(&root, FileConfig::default(), lookup, EarlyConfig::default())
         .expect("a state with a machine key is an identity");
     assert_eq!(cfg.authkey, None);
     let _ = std::fs::remove_dir_all(&root);
@@ -198,8 +210,13 @@ fn authkey_gate_considers_the_local_state_and_sync_coverage() {
     ]
     .into_iter()
     .collect();
-    let cfg = Config::build_at(&root, FileConfig::default(), move |k| map.get(k).cloned())
-        .expect("a valid local state is an identity source");
+    let cfg = Config::build_at(
+        &root,
+        FileConfig::default(),
+        move |k| map.get(k).cloned(),
+        EarlyConfig::default(),
+    )
+    .expect("a valid local state is an identity source");
     assert_eq!(cfg.authkey, None);
 
     let sync: &[(&str, &str)] = &[
@@ -219,7 +236,13 @@ fn authkey_gate_considers_the_local_state_and_sync_coverage() {
             socket.to_string_lossy().into_owned(),
         );
         assert!(
-            Config::build_at(&root, FileConfig::default(), move |k| map.get(k).cloned()).is_none(),
+            Config::build_at(
+                &root,
+                FileConfig::default(),
+                move |k| map.get(k).cloned(),
+                EarlyConfig::default(),
+            )
+            .is_none(),
             "{state}: sync cannot supply an identity it does not cover"
         );
     }
@@ -341,6 +364,49 @@ fn lenient_bool_knobs() {
     // misspelling warns and takes the default
     let cfg = mk(&[("TAILSCALE_SERVE", "definitely")]);
     assert!(cfg.serve);
+}
+
+/// Single-uid mode is opt-in and uses the same lenient flag parser as
+/// every other boolean knob.
+#[test]
+fn single_uid_mode_is_off_by_default_and_reads_the_process_env() {
+    assert!(!mk(&[]).single_uid);
+    assert!(mk(&[("SUPERVISOR_SINGLE_UID", "true")]).single_uid);
+    assert!(mk(&[("SUPERVISOR_SINGLE_UID", "YES")]).single_uid);
+    // a bad value warns and takes the safe default (off)
+    assert!(!mk(&[("SUPERVISOR_SINGLE_UID", "nonsense")]).single_uid);
+}
+
+/// The mode removes the uid change, so TUN mode (which needs NET_ADMIN and
+/// NET_RAW) cannot work; fail at config resolution, not at spawn.
+#[test]
+fn single_uid_refuses_tun_networking() {
+    assert!(
+        mk_opt(&[
+            ("SUPERVISOR_SINGLE_UID", "true"),
+            ("TAILSCALE_USERSPACE", "false"),
+        ])
+        .is_none(),
+        "single-uid mode cannot grant NET_ADMIN/NET_RAW"
+    );
+    assert!(
+        mk_opt(&[("SUPERVISOR_SINGLE_UID", "true")]).is_some(),
+        "userspace networking is the supported mode"
+    );
+}
+
+/// The flag is resolved before the dotenv file is read, so a file value
+/// could never take effect. The strict file policy refuses it instead of
+/// silently ignoring it.
+#[test]
+fn single_uid_in_the_dotenv_file_refuses_the_boot() {
+    let file = FileConfig::load_from(Some(&env_dotenv(
+        "SUPERVISOR_SINGLE_UID=true\nTAILSCALE_AUTHKEY=file-key\n",
+    )));
+    assert!(
+        Config::build(file, |_| None).is_none(),
+        "a process-only flag in the dotenv file must refuse the boot"
+    );
 }
 
 /// The gatekeeper port has ONE spelling, `VAULTWARDEN_PORT`, in both

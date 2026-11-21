@@ -36,6 +36,10 @@ struct Knob {
     pub default: Option<Default>,
 }
 
+/// Process-env-only flag that runs every child as the supervisor's identity.
+/// It is resolved before the group join, so the dotenv file cannot carry it.
+pub(crate) const SINGLE_UID: &str = "SUPERVISOR_SINGLE_UID";
+
 /// Every key the supervisor consumes. Keep in sync with `.env.example`:
 /// the contract test fails when the two drift.
 static KNOBS: &[Knob] = &[
@@ -88,6 +92,11 @@ static KNOBS: &[Knob] = &[
         name: "SUPERVISOR_ENV_FILE",
         policy: FilePolicy::ProcessOnly,
         default: None,
+    },
+    Knob {
+        name: SINGLE_UID,
+        policy: FilePolicy::ProcessOnly,
+        default: Some(Default::Bool(false)),
     },
     Knob {
         name: "SUPERVISOR_EPHEMERAL",
@@ -220,6 +229,7 @@ mod tests {
         assert!(bool_default("TAILSCALE_SERVE"));
         assert!(bool_default("TAILSCALE_USERSPACE"));
         assert!(!bool_default("SUPERVISOR_EPHEMERAL"));
+        assert!(!bool_default("SUPERVISOR_SINGLE_UID"));
         assert_eq!(string_default("VAULTWARDEN_PORT"), "8080");
         assert_eq!(string_default("SUPERVISOR_S3_URL_STYLE"), "path");
         assert_eq!(

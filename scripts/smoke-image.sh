@@ -132,6 +132,22 @@ run tailscale-fails-closed 1 "authenticating tailscale node" -- \
   "${CAPS[@]}" -e SUPERVISOR_ENV_FILE=/state/.env \
   -v "$WORK/fake-auth.env:/state/.env:ro,z" "$IMAGE"
 
+# 7b. A runtime that grants no capabilities (a PaaS such as Render) can boot
+#     in single-uid mode: no group join and no uid change. The bogus key still
+#     fails closed after `tailscale up` starts, proving the boot got past the
+#     point that used to return EPERM.
+run single-uid-no-caps 1 "authenticating tailscale node" -- \
+  --cap-drop=ALL -e SUPERVISOR_SINGLE_UID=true -e SUPERVISOR_ENV_FILE=/state/.env \
+  -v "$WORK/fake-auth.env:/state/.env:ro,z" "$IMAGE"
+
+# 7c. In single-uid mode the vault runs as 65532; /data is 0770 with that
+#     group, so the signing key write still succeeds.
+run vault-writes-data-single-uid 101 \
+  "Private key '/data/rsa_key.pem' created correctly" -- \
+  --cap-drop=ALL --user 65532:65532 --entrypoint /vaultwarden \
+  -e DATA_FOLDER=/data -e WEB_VAULT_FOLDER=/web-vault \
+  -e I_REALLY_WANT_VOLATILE_STORAGE=true -e ROCKET_TLS='{certs,key}.pem' "$IMAGE"
+
 # 8. Run the vault binary directly under its production uid. It must write
 #    its signing key on /data (the shared data group), then stop on the
 #    deliberately broken TLS config — proof the data volume is usable.

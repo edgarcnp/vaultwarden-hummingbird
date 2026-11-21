@@ -23,7 +23,7 @@
 //! identity, and vault-phase exits — inside `start_vw` — push with
 //! `cfg.sync` as before).
 
-use crate::config::{AUTH_TIMEOUT, Config, DAEMON_WAIT, SERVE_TIMEOUT};
+use crate::config::{AUTH_TIMEOUT, Config, DAEMON_WAIT, EarlyConfig, SERVE_TIMEOUT};
 use crate::runtime::{
     Handle, RestoreOutcome, adopt_lineage, install_signal_handlers, join_tailscale_group,
     migrate_layout, restore_if_empty, restore_state, shutdown, spawn_tailscaled, start_vw,
@@ -128,7 +128,12 @@ impl Boot {
                 if take_stop() {
                     return Outcome::Exit(0);
                 }
-                match spawn_tailscaled(&self.cfg.state, &self.cfg.socket, self.cfg.userspace) {
+                match spawn_tailscaled(
+                    &self.cfg.state,
+                    &self.cfg.socket,
+                    self.cfg.userspace,
+                    self.cfg.single_uid,
+                ) {
                     Some(tsd) => {
                         self.tsd = Some(tsd);
                         log::info(if self.cfg.userspace {
@@ -225,6 +230,13 @@ impl Boot {
     }
 }
 
+/// Single-uid mode runs every child as PID 1, so a root PID 1 would make the
+/// vault root too. The image runs as 65532; this guard catches a `--user 0`
+/// override.
+fn single_uid_is_allowed(single_uid: bool, euid: u32) -> bool {
+    !single_uid || euid != 0
+}
+
 /// Boot: arm signals, load config (Tailscale required — fail closed),
 /// then run the phase table and hand the container to the vault watch
 /// loop for the lifetime of the process.
@@ -236,21 +248,41 @@ pub fn run() -> ! {
     // Join the tailscale group before the layout migration (it sets the
     // group on /state/tailscale) and before config resolution. Without the
     // group the supervisor cannot restore the identity or reach the
-    // LocalAPI socket; a failure is a failed boot.
-    if let Err(e) = join_tailscale_group() {
+    // LocalAPI socket; a failure is a failed boot. Single-uid mode has no
+    // CAP_SETGID, so it runs every child as PID 1 instead and skips the
+    // join; the vault can then read /state, which boot logs loudly.
+    let early = EarlyConfig::from_env();
+    if !single_uid_is_allowed(early.single_uid, nix::unistd::geteuid().as_raw()) {
+        log::err(
+            "single-uid mode must not run as root: every child inherits PID 1's \
+             identity; start the image as uid 65532 or drop SUPERVISOR_SINGLE_UID; \
+             refusing to start",
+        );
+        std::process::exit(1);
+    }
+    if !early.single_uid
+        && let Err(e) = join_tailscale_group()
+    {
         log::err(&format!(
             "cannot join the tailscale group ({e}); refusing to run without \
              identity/socket access"
         ));
         std::process::exit(1);
     }
+    if early.single_uid {
+        log::err(
+            "single-uid mode: children run as the supervisor uid; the vault can read \
+             /state, the dotenv file, and the LocalAPI socket — use only when the \
+             platform is the security boundary",
+        );
+    }
     // Before config resolution: the identity gate reads the state file,
     // and the vault must never start while old-layout secrets still sit on
     // its volume.
-    if !migrate_layout() {
+    if !migrate_layout(early.single_uid) {
         std::process::exit(1);
     }
-    let Some(cfg) = Config::from_env() else {
+    let Some(cfg) = Config::from_env_with(early) else {
         std::process::exit(1);
     };
 
@@ -266,4 +298,19 @@ pub fn run() -> ! {
     // handle, and every failure path after it exits through Boot::exit.
     let tsd = boot.tsd.expect("tailscaled phase ran");
     start_vw(&boot.cfg, tsd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::single_uid_is_allowed;
+
+    /// Single-uid mode runs every child as PID 1; if PID 1 is root, that
+    /// would make the vault root too. The image runs as 65532; this guard
+    /// catches a `--user 0` override.
+    #[test]
+    fn single_uid_refuses_a_root_supervisor() {
+        assert!(single_uid_is_allowed(false, 0));
+        assert!(!single_uid_is_allowed(true, 0));
+        assert!(single_uid_is_allowed(true, 65532));
+    }
 }

@@ -8,4 +8,4 @@ pub(crate) mod schema;
 
 pub use knobs::{is_supervisor_consumed, is_supervisor_key, vaultwarden_key};
 pub(crate) use knobs::{parse_count, parse_flag};
-pub use merge::Config;
+pub use merge::{Config, EarlyConfig};

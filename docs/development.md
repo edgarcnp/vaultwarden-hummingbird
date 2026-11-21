@@ -120,9 +120,9 @@ scripts/smoke-image.sh                    # defaults to vaultwarden-hummingbird:
 It runs the image networkless and asserts: non-root user with an exec health
 check, the one-shot health check refusal, the missing-authkey refusal, a bare
 upstream key in the dotenv file, an unknown supervisor key, a relative
-`TAILSCALE_STATE_FILE`, the Tailscale fail-closed chain, the TUN capability
-path on a rootful host, and a restart after tailscaled leaves a `0600` file in
-`/state/tailscale`.
+`TAILSCALE_STATE_FILE`, the Tailscale fail-closed chain, a no-capability boot
+in single-uid mode, the TUN capability path on a rootful host, and a restart
+after tailscaled leaves a `0600` file in `/state/tailscale`.
 
 A manual health check:
 
