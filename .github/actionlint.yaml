@@ -1,0 +1,6 @@
+# actionlint's built-in runner-label list lags GitHub's hosted images.
+# ubuntu-26.04-arm is a real GitHub-hosted label (actions/runner-images),
+# but the pinned actionlint release only knows ubuntu-24.04-arm.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04-arm
